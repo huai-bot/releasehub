@@ -56,7 +56,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build executable and installer
         run: |
-          pnpm exec tauri build --bundles nsis --ci -- --locked
+          node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --ci -- --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check the compiled executable with isolated empty data
         run: |
