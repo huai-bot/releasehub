@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { applyDownloadProgress } from './download-state';
+import { createPreviewSnapshot } from './preview';
+import type { DownloadRecord } from './types';
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), isTauri: vi.fn(), listen: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke, isTauri: mocks.isTauri }));
@@ -76,6 +79,85 @@ describe('single desktop command', () => {
   it('passes real host failures through rather than returning demo success', async () => {
     mocks.invoke.mockRejectedValue(new Error('网络请求失败'));
     await expect(dispatch('check_updates', { allowAutoDownload: true })).rejects.toThrow('网络请求失败');
+  });
+});
+
+describe('download progress subscriptions', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function captureEvents() {
+    const handlers = new Map<string, (event: { payload: unknown }) => void>();
+    mocks.listen.mockImplementation(async (name: string, handler: (event: { payload: unknown }) => void) => {
+      handlers.set(name, handler);
+      return () => { handlers.delete(name); };
+    });
+    return handlers;
+  }
+
+  it('applies 100 progress events without rereading the library or replacing unrelated data', async () => {
+    const handlers = captureEvents();
+    const initial = createPreviewSnapshot();
+    const base = initial.downloads[0];
+    let current = initial;
+    const changed = vi.fn();
+    const progress = vi.fn((record: DownloadRecord) => {
+      const next = applyDownloadProgress(current, record);
+      if (!next) return false;
+      current = next;
+      return true;
+    });
+    const release = await watchChanges(changed, progress);
+    for (let count = 1; count <= 100; count++) {
+      handlers.get('releasehub:download')!({ payload: {
+        ...base, status: 'downloading', receivedBytes: count, totalBytes: 1000,
+        updatedAt: new Date(Date.parse(base.updatedAt) + count * 400).toISOString(),
+      } });
+    }
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(progress).toHaveBeenCalledTimes(100);
+    expect(changed).not.toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(current.downloads[0].receivedBytes).toBe(100);
+    expect(current.projects).toBe(initial.projects);
+    expect(current.settings).toBe(initial.settings);
+    expect(current.buildTasks).toBe(initial.buildTasks);
+    expect(current.runtime).toBe(initial.runtime);
+    release();
+  });
+
+  it('coalesces metadata, malformed payloads and unknown downloads into one refresh', async () => {
+    const handlers = captureEvents();
+    const changed = vi.fn();
+    const progress = vi.fn(() => false);
+    const release = await watchChanges(changed, progress);
+    const unknown = { ...createPreviewSnapshot().downloads[0], id: 'unknown-record' };
+    for (let count = 0; count < 20; count++) {
+      handlers.get('releasehub:download')!({ payload: count % 2 ? unknown : { status: 'invalid' } });
+      handlers.get('releasehub:changed')!({ payload: {} });
+    }
+    expect(changed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(changed).toHaveBeenCalledOnce();
+    expect(progress).toHaveBeenCalledTimes(10);
+    release();
+  });
+
+  it('cleans pending refreshes and ignores late notifications after unmount', async () => {
+    const handlers = captureEvents();
+    const changed = vi.fn();
+    const progress = vi.fn(() => true);
+    const release = await watchChanges(changed, progress);
+    const metadataHandler = handlers.get('releasehub:changed')!;
+    const downloadHandler = handlers.get('releasehub:download')!;
+    metadataHandler({ payload: {} });
+    release(); release();
+    downloadHandler({ payload: createPreviewSnapshot().downloads[0] });
+    metadataHandler({ payload: {} });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(changed).not.toHaveBeenCalled();
+    expect(progress).not.toHaveBeenCalled();
+    expect(handlers.size).toBe(0);
   });
 });
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { desktopAvailable, dispatch, watchChanges, type Action, type Actions } from './lib/bridge';
+  import { applyDownloadProgress, mergeSnapshotDownloads } from './lib/download-state';
   import type { AddProjectInput, AgentConnection, AssetPreference, Channel, DownloadRecord, ManagedVersion, Project, ProjectChanges, Settings, Snapshot } from './lib/types';
   import { canActivateManagedVersion, formatBytes, parseRepository, readableError, safeGithubUrl, type Page, type Tone } from './lib/ui';
   import ManagedVersions from './components/ManagedVersions.svelte';
@@ -38,7 +39,6 @@
   let destroyed = false;
   let refreshRequested = false;
   let refreshPromise: Promise<void> | null = null;
-  let eventTimer: ReturnType<typeof setTimeout> | undefined;
   let unlisten: (() => void) | undefined;
   let toastId = 0;
   const toastTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -91,8 +91,9 @@
     refreshPromise = (async () => {
       while (refreshRequested && !destroyed) {
         refreshRequested = false;
+        const atRequestStart = snapshot;
         const next = await dispatch('snapshot', {});
-        if (!destroyed) snapshot = next;
+        if (!destroyed && !preview) snapshot = mergeSnapshotDownloads(snapshot, next, atRequestStart);
       }
     })();
     try { await refreshPromise; } finally { refreshPromise = null; refreshing = false; }
@@ -124,10 +125,16 @@
       await refreshSnapshot();
       if (!unlisten && !destroyed) {
         try {
-          const release = await watchChanges(() => {
-            if (eventTimer) return;
-            eventTimer = setTimeout(() => { eventTimer = undefined; void refreshSnapshot().catch(reportError); }, 250);
-          });
+          const release = await watchChanges(
+            () => { void refreshSnapshot().catch(reportError); },
+            (record) => {
+              if (destroyed || preview || !snapshot) return true;
+              const next = applyDownloadProgress(snapshot, record);
+              if (!next) return false;
+              snapshot = next;
+              return true;
+            },
+          );
           if (destroyed) release(); else unlisten = release;
         } catch { notify('实时状态通知暂不可用，仍可手动刷新；进行中的任务会定期同步。', 'warning'); }
       }
@@ -142,9 +149,10 @@
     media.addEventListener('change', updateSystem);
     void initialize();
     const poll = setInterval(() => {
-      if (!preview && snapshot && !document.hidden && (snapshot.runtime.agent.enabled || snapshot.downloads.some((item) => ['queued', 'downloading', 'installing'].includes(item.status)) || snapshot.buildTasks.some((item) => ['claimed', 'running'].includes(item.status)))) void refreshSnapshot().catch(reportError);
+      // Normal changes arrive as events; polling is only a recovery path if subscribing failed.
+      if (!unlisten && !preview && snapshot && !document.hidden && (snapshot.runtime.agent.enabled || snapshot.downloads.some((item) => ['queued', 'downloading', 'installing'].includes(item.status)) || snapshot.buildTasks.some((item) => ['claimed', 'running'].includes(item.status)))) void refreshSnapshot().catch(reportError);
     }, 5_000);
-    return () => { destroyed = true; unlisten?.(); clearInterval(poll); if (eventTimer) clearTimeout(eventTimer); toastTimers.forEach(clearTimeout); media.removeEventListener('change', updateSystem); };
+    return () => { destroyed = true; unlisten?.(); clearInterval(poll); toastTimers.forEach(clearTimeout); media.removeEventListener('change', updateSystem); };
   });
 
   async function enterPreview() {

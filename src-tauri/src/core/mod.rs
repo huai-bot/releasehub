@@ -23,11 +23,25 @@ pub struct Core {
     pub(crate) download_queue: Mutex<()>,
     pub(crate) installing: Mutex<std::collections::HashSet<String>>,
     pub(crate) checks: tokio::sync::Mutex<()>,
+    // Keep this last so the database and other fields close before the directory lock is released.
+    _data_lock: std::fs::File,
 }
 impl Core {
     pub fn new(data_dir: PathBuf, portable: bool, events: EventSink) -> Result<Arc<Self>, String> {
         std::fs::create_dir_all(&data_dir).map_err(|_| "无法写入数据目录，请将便携文件夹放到可写的位置".to_string())?;
         let data_dir = std::fs::canonicalize(data_dir).map_err(|_| "无法读取数据目录".to_string())?;
+        let lock_path = data_dir.join(".releasehub.lock");
+        match std::fs::symlink_metadata(&lock_path) {
+            Ok(meta) if !meta.is_file() || meta.file_type().is_symlink() => return Err("资料库锁文件不能是目录或链接".into()),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err("无法读取资料库锁文件，请检查目录权限".into()),
+            _ => {}
+        }
+        let data_lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+            .open(lock_path).map_err(|_| "无法打开资料库锁文件，请检查目录权限".to_string())?;
+        data_lock.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => "此资料库已被另一个 ReleaseHub 占用，请从右下角托盘打开原窗口；如需重启，请先从托盘退出原程序".to_string(),
+            std::fs::TryLockError::Error(_) => "无法锁定资料库，请使用本地可写的资料库文件夹".to_string(),
+        })?;
         for folder in ["downloads", "apps"] {
             let path = data_dir.join(folder);
             std::fs::create_dir_all(&path).map_err(|_| "无法创建数据文件夹".to_string())?;
@@ -41,7 +55,7 @@ impl Core {
         Ok(Arc::new(Self { store, data_dir, portable, events,
             github: network::Github::new()?, active_downloads: Mutex::new(HashMap::new()),
             download_queue: Mutex::new(()), installing: Mutex::new(std::collections::HashSet::new()),
-            checks: tokio::sync::Mutex::new(()) }))
+            checks: tokio::sync::Mutex::new(()), _data_lock: data_lock }))
     }
     pub fn set_github_token(&self, token: Option<String>) { self.github.set_token(token); }
     pub(crate) fn changed(&self) { (self.events)("releasehub:changed", json!({})); }
@@ -54,6 +68,7 @@ impl Core {
             return Err("请求内容过大".into());
         }
         match action {
+            "get_settings" => output(self.store.settings()?),
             "snapshot" => Ok(json!({"projects": self.store.projects()?, "downloads": self.store.downloads()?,
                 "buildTasks": self.store.tasks()?, "settings": self.store.settings()?,
                 "runtime": {"appVersion": env!("CARGO_PKG_VERSION"), "dataDir": self.data_dir.to_string_lossy(),
@@ -148,4 +163,66 @@ pub(crate) fn optional_text(payload: &Value, key: &str, max: usize) -> Result<Op
 }
 pub(crate) fn integer(payload: &Value, key: &str) -> Result<u64, String> {
     payload.get(key).and_then(Value::as_u64).ok_or_else(|| format!("{}须为正整数", key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn queued_download(project: &Project) -> DownloadRecord {
+        let time = now();
+        DownloadRecord { id: uuid::Uuid::new_v4().to_string(), project_id: project.id.clone(), project_name: project.name.clone(),
+            asset_id: 1, file_name: "fixture.zip".into(), tag: "v1.0.0".into(),
+            url: "https://github.com/fixture/project/releases/download/v1.0.0/fixture.zip".into(), kind: "portable".into(),
+            total_bytes: 10, received_bytes: 0, status: "queued".into(), path: None, sha256: None, verified: false,
+            error: None, created_at: time.clone(), updated_at: time }
+    }
+    #[test]
+    fn data_lock_rejects_second_core_before_recovery_and_releases_on_last_drop() {
+        let directory = tempfile::tempdir().unwrap(); let data = directory.path().join("data");
+        let core = Core::new(data.clone(), true, Arc::new(|_,_| {})).unwrap();
+        let mut project = test_project("fixture", "project"); project.status = "checking".into();
+        core.store.put_project(&project).unwrap(); let download = queued_download(&project);
+        core.store.put_download(&download).unwrap();
+        let started = std::time::Instant::now();
+        let error = Core::new(data.join("."), true, Arc::new(|_,_| {})).err().unwrap();
+        assert!(error.contains("已被另一个 ReleaseHub 占用"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(core.store.download(&download.id).unwrap().status, "queued");
+        assert_eq!(core.store.project(&project.id).unwrap().status, "checking");
+        let retained = core.clone(); drop(core);
+        assert!(Core::new(data.clone(), true, Arc::new(|_,_| {})).is_err());
+        drop(retained);
+        let reopened = Core::new(data.clone(), true, Arc::new(|_,_| {})).unwrap();
+        assert_eq!(reopened.store.download(&download.id).unwrap().status, "failed");
+        assert_eq!(reopened.store.project(&project.id).unwrap().status, "notChecked");
+        drop(reopened);
+        assert!(data.join(".releasehub.lock").is_file());
+    }
+    #[test]
+    fn data_locks_allow_independent_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = Core::new(directory.path().join("first"), true, Arc::new(|_,_| {})).unwrap();
+        let second = Core::new(directory.path().join("second"), true, Arc::new(|_,_| {})).unwrap();
+        let mut settings = Settings::default(); settings.theme = "dark".into();
+        first.store.save_settings(&settings).unwrap();
+        assert_eq!(first.store.settings().unwrap().theme, "dark");
+        assert_eq!(second.store.settings().unwrap().theme, "system");
+    }
+    #[tokio::test]
+    async fn get_settings_returns_only_preferences_without_library_or_secrets() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = Core::new(directory.path().join("data"), true, Arc::new(|_,_| {})).unwrap();
+        let project = test_project("fixture", "private-test-marker"); core.store.put_project(&project).unwrap();
+        let download = queued_download(&project); core.store.put_download(&download).unwrap();
+        core.set_github_token(Some("local-test-token-not-a-credential".into()));
+        let mut settings = Settings::default(); settings.theme = "dark".into(); settings.check_interval_minutes = 0;
+        core.store.save_settings(&settings).unwrap();
+        let result = core.handle("get_settings", json!({})).await.unwrap();
+        assert_eq!(result, serde_json::to_value(&settings).unwrap());
+        for field in ["projects", "downloads", "buildTasks", "runtime", "githubToken", "agentToken"] {
+            assert!(result.get(field).is_none(), "{field}");
+        }
+        assert!(!result.to_string().contains("local-test-token-not-a-credential"));
+        assert_eq!(core.store.download(&download.id).unwrap().status, "queued");
+    }
 }

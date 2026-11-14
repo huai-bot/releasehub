@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { canActivateManagedVersion, downloadPercent, formatBytes, matchesProject, parseRepository, readableError, safeGithubUrl } from './ui';
 import { createPreviewManagedVersions, createPreviewSnapshot } from './preview';
+import { applyDownloadProgress, isDownloadRecord, mergeSnapshotDownloads } from './download-state';
+import type { DownloadRecord } from './types';
 
 describe('GitHub input and host-bound links', () => {
   it('accepts a repository name and normalizes supported project links', () => {
@@ -52,6 +54,88 @@ describe('managed version confirmation', () => {
     const changedPreview = createPreviewManagedVersions('preview-ff');
     changedPreview[1].active = true;
     expect(createPreviewManagedVersions('preview-ff')[1].active).toBe(false);
+  });
+});
+
+describe('incremental download state', () => {
+  const time = (offset: number) => new Date(Date.parse('2026-11-14T00:00:00.000Z') + offset).toISOString();
+  function fixture() {
+    const snapshot = createPreviewSnapshot();
+    const index = snapshot.downloads.findIndex((record) => record.status === 'downloading');
+    const record: DownloadRecord = { ...snapshot.downloads[index], receivedBytes: 25, totalBytes: 100, createdAt: time(-1000), updatedAt: time(0) };
+    snapshot.downloads[index] = record;
+    return { snapshot, record, index };
+  }
+  it('accepts complete records and rejects malformed events before replacing UI data', () => {
+    const { record } = fixture();
+    expect(isDownloadRecord(record)).toBe(true);
+    for (const invalid of [null, [], {}, { ...record, projectId: '' }, { ...record, status: 'success' }, { ...record, path: 42 }, { ...record, receivedBytes: Number.NaN }, { ...record, totalBytes: -1 }, { ...record, updatedAt: 'not-a-date' }]) {
+      expect(isDownloadRecord(invalid)).toBe(false);
+    }
+  });
+  it('replaces only the matching download and preserves every other list/settings reference', () => {
+    const { snapshot, record, index } = fixture();
+    const progress = { ...record, receivedBytes: 50, updatedAt: time(400) };
+    const next = applyDownloadProgress(snapshot, progress)!;
+    expect(next.downloads[index]).toBe(progress);
+    expect(next.projects).toBe(snapshot.projects);
+    expect(next.buildTasks).toBe(snapshot.buildTasks);
+    expect(next.settings).toBe(snapshot.settings);
+    expect(next.runtime).toBe(snapshot.runtime);
+    snapshot.downloads.forEach((entry, i) => { if (i !== index) expect(next.downloads[i]).toBe(entry); });
+    expect(snapshot.downloads[index]).toBe(record);
+    expect(record.receivedBytes).toBe(25);
+  });
+  it('ignores older and same-clock events without allocating a new state', () => {
+    const { snapshot, record } = fixture();
+    expect(applyDownloadProgress(snapshot, { ...record, receivedBytes: 10, updatedAt: time(-1) })).toBe(snapshot);
+    expect(applyDownloadProgress(snapshot, { ...record, receivedBytes: 50 })).toBe(snapshot);
+  });
+  it('keeps cancellation against late progress and accepts a newer retry with reset bytes', () => {
+    const { snapshot, record, index } = fixture();
+    const cancelled: DownloadRecord = { ...record, status: 'cancelled', error: '下载已取消，可重试', updatedAt: time(400) };
+    const stopped = applyDownloadProgress(snapshot, cancelled)!;
+    expect(stopped.downloads[index]).toBe(cancelled);
+    expect(applyDownloadProgress(stopped, { ...record, receivedBytes: 80, updatedAt: time(200) })).toBe(stopped);
+    const retry: DownloadRecord = { ...record, status: 'queued', receivedBytes: 0, error: null, updatedAt: time(800) };
+    expect(applyDownloadProgress(stopped, retry)!.downloads[index]).toBe(retry);
+  });
+  it('requests resync for unknown or mismatched identities, but keeps unsubscribed download history usable', () => {
+    const { snapshot, record, index } = fixture();
+    expect(applyDownloadProgress(snapshot, { ...record, id: 'unknown-download', updatedAt: time(400) })).toBeNull();
+    expect(applyDownloadProgress(snapshot, { ...record, projectId: 'unknown-project', updatedAt: time(400) })).toBeNull();
+    const orphan = { ...snapshot, projects: [] };
+    expect(applyDownloadProgress(orphan, { ...record, receivedBytes: 50, updatedAt: time(400) })!.downloads[index].receivedBytes).toBe(50);
+  });
+  it('keeps in-flight progress when a slower full read returns, while accepting its metadata', () => {
+    const { snapshot, record, index } = fixture();
+    const progress = { ...record, receivedBytes: 75, updatedAt: time(800) };
+    const current = applyDownloadProgress(snapshot, progress)!;
+    const incoming = { ...snapshot, settings: { ...snapshot.settings, notifications: false } };
+    const merged = mergeSnapshotDownloads(current, incoming, snapshot);
+    expect(merged.downloads[index]).toBe(progress);
+    expect(merged.settings).toBe(incoming.settings);
+    expect(merged.projects).toBe(incoming.projects);
+    const tied = { ...incoming, downloads: incoming.downloads.map((item) => item.id === record.id ? { ...item, updatedAt: time(800) } : item) };
+    expect(mergeSnapshotDownloads(current, tied, snapshot).downloads[index]).toBe(progress);
+  });
+  it('accepts authoritative same-tick retry metadata when no newer event arrived during the read', () => {
+    const { snapshot, record, index } = fixture();
+    const cancelled: DownloadRecord = { ...record, status: 'cancelled', updatedAt: time(400) };
+    const current = applyDownloadProgress(snapshot, cancelled)!;
+    const retry: DownloadRecord = { ...cancelled, status: 'queued', receivedBytes: 0 };
+    expect(applyDownloadProgress(current, retry)).toBe(current);
+    const incoming = { ...current, downloads: current.downloads.map((item) => item.id === retry.id ? retry : item) };
+    expect(mergeSnapshotDownloads(current, incoming, current).downloads[index]).toBe(retry);
+  });
+  it('accepts newer completion metadata and never re-adds records absent from a full read', () => {
+    const { snapshot, record } = fixture();
+    const current = applyDownloadProgress(snapshot, { ...record, receivedBytes: 50, updatedAt: time(400) })!;
+    const incoming = { ...snapshot, downloads: snapshot.downloads.map((item) => item.id === record.id ? { ...item, status: 'completed' as const, receivedBytes: 100, updatedAt: time(800) } : item) };
+    expect(mergeSnapshotDownloads(current, incoming, snapshot)).toBe(incoming);
+    const removed = { ...incoming, downloads: [] };
+    expect(mergeSnapshotDownloads(current, removed, snapshot)).toBe(removed);
+    expect(mergeSnapshotDownloads(null, incoming, null)).toBe(incoming);
   });
 });
 

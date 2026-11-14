@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { isDownloadRecord } from './download-state';
 import type {
   AddProjectInput, AgentConnection, BuildTask, CheckResult, DownloadRecord,
   InstallResult, ManagedVersion, Project, ProjectChanges, Settings, Snapshot,
@@ -52,14 +53,32 @@ export async function dispatch<A extends Action>(action: A, payload: Actions[A][
   return invoke<Actions[A]['result']>('dispatch', { action, payload });
 }
 
-export async function watchChanges(onChange: () => void): Promise<UnlistenFn> {
+/** onDownload returns true for an applied/old event, false when its identity needs a full refresh. */
+export async function watchChanges(onChange: () => void, onDownload: (record: DownloadRecord) => boolean = () => false): Promise<UnlistenFn> {
   const releases: UnlistenFn[] = [];
+  let active = true;
+  let changeTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleChange = () => {
+    if (!active || changeTimer !== undefined) return;
+    changeTimer = setTimeout(() => { changeTimer = undefined; if (active) onChange(); }, 250);
+  };
+  const stop = () => {
+    if (!active) return;
+    active = false;
+    if (changeTimer !== undefined) clearTimeout(changeTimer);
+    // A closing webview must not prevent the remaining listeners from being released.
+    releases.splice(0).forEach((release) => { try { release(); } catch { /* Already closed. */ } });
+  };
   try {
-    releases.push(await listen('releasehub:changed', onChange));
-    releases.push(await listen('releasehub:download', onChange));
-    return () => releases.forEach((release) => release());
+    releases.push(await listen('releasehub:changed', scheduleChange));
+    releases.push(await listen<unknown>('releasehub:download', (event) => {
+      if (!active) return;
+      if (isDownloadRecord(event.payload) && onDownload(event.payload)) return;
+      scheduleChange();
+    }));
+    return stop;
   } catch (error) {
-    releases.forEach((release) => release());
+    stop();
     throw error;
   }
 }

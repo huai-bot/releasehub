@@ -221,15 +221,17 @@ async fn scheduled_checks(app: tauri::AppHandle, host: Arc<HostState>) {
     let mut notified = std::collections::HashMap::<String, String>::new();
     loop {
         tokio::time::sleep(if first { Duration::from_secs(8) } else { Duration::from_secs(30) }).await;
-        let Ok(snapshot) = host.core.handle("snapshot", json!({})).await else { continue };
-        let minutes = snapshot["settings"]["checkIntervalMinutes"].as_u64().unwrap_or(360);
-        let has_projects = snapshot["projects"].as_array().is_some_and(|rows| !rows.is_empty());
-        if minutes == 0 || !has_projects { first = false; continue; }
+        // Idle scheduling reads a small settings row, not every release note and download.
+        let Ok(settings) = host.core.handle("get_settings", json!({})).await else { continue };
+        let minutes = settings["checkIntervalMinutes"].as_u64().unwrap_or(60);
+        if minutes == 0 { first = false; continue; }
         if !first && previous_check.elapsed() < Duration::from_secs(minutes.saturating_mul(60)) { continue; }
         first = false;
         previous_check = Instant::now();
         let Ok(result) = host.core.handle("check_updates", json!({"allowAutoDownload": true})).await else { continue };
-        if result["updates"].as_u64().unwrap_or(0) == 0 || !snapshot["settings"]["notifications"].as_bool().unwrap_or(true) { continue; }
+        if result["updates"].as_u64().unwrap_or(0) == 0 { continue; }
+        let Ok(current_settings) = host.core.handle("get_settings", json!({})).await else { continue };
+        if !current_settings["notifications"].as_bool().unwrap_or(true) { continue; }
         let Ok(after) = host.core.handle("snapshot", json!({})).await else { continue };
         let mut names = Vec::new();
         for project in after["projects"].as_array().into_iter().flatten() {
@@ -345,10 +347,13 @@ pub fn run() {
             let portable = parent.join("portable.flag").is_file();
             let data_dir = if portable { parent.join("data") } else { app.path().app_local_data_dir()? };
             fs::create_dir_all(&data_dir)?;
-            let secrets = SecretStore::for_data_directory(&data_dir)?;
             let handle = app.handle().clone();
             let events = Arc::new(move |name: &str, value: Value| { let _ = handle.emit(name, value); });
+            // Acquire the data lock before creating the instance identity or opening a WebView.
             let core = Core::new(data_dir.clone(), portable, events)?;
+            let secrets = SecretStore::for_data_directory(&data_dir)?;
+            let webview_dir = data_dir.join("webview");
+            fs::create_dir_all(&webview_dir)?;
             let token = secrets.get("github").unwrap_or(None);
             let github_configured = token.is_some();
             core.set_github_token(token);
@@ -359,6 +364,11 @@ pub fn run() {
                 agent: Mutex::new(None), agent_error: Mutex::new(None), settings_lock: Mutex::new(()),
             });
             app.manage(host.clone());
+            let window_config = app.config().app.windows.iter()
+                .find(|window| window.label == "main").ok_or("找不到主窗口设置。")?;
+            tauri::WebviewWindowBuilder::from_config(app, window_config)?
+                .data_directory(webview_dir)
+                .build()?;
             setup_tray(app)?;
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

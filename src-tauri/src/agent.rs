@@ -53,6 +53,8 @@ impl RunningAgent {
     }
 
     pub async fn stop(mut self) {
+        // Revoke any still-connected request's old key and claim tickets before draining.
+        let _ = self.rotate_token(random_token());
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -316,6 +318,17 @@ mod tests {
         assert_eq!(client.get(&health).bearer_auth(&token).header("Host", "attacker.test").send().await.unwrap().status(), StatusCode::FORBIDDEN);
         assert_eq!(client.post(format!("{}/v1/dispatch", server.address)).bearer_auth(&token).json(&json!({"action":"install_download"})).send().await.unwrap().status(), StatusCode::NOT_FOUND);
         assert_eq!(client.post(format!("{}/v1/check-updates", server.address)).bearer_auth(&token).json(&json!({"allowAutoDownload":true})).send().await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let next_token = random_token();
+        server.state.claims.lock().unwrap().insert("test-task".into(), ClaimTicket {
+            token: random_token(), created: Instant::now(),
+        });
+        server.rotate_token(next_token.clone()).unwrap();
+        assert!(server.state.claims.lock().unwrap().is_empty());
+        assert_eq!(client.get(&health).bearer_auth(&token).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(client.get(&health).bearer_auth(&next_token).send().await.unwrap().status(), StatusCode::OK);
+        let held_state = server.state.clone();
         server.stop().await;
+        assert!(!secret_matches(&held_state.token.read().unwrap(), &next_token));
+        assert!(held_state.claims.lock().unwrap().is_empty());
     }
 }

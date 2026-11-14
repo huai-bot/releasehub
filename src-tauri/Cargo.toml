@@ -5,7 +5,7 @@ description = "A portable-first GitHub release center"
 authors = ["huai-bot"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.97"
 
 [lib]
 name = "releasehub_lib"

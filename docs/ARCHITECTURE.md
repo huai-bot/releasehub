@@ -39,6 +39,7 @@ The host provides periodic update scheduling and native notifications based on s
 | action | payload | result |
 | --- | --- | --- |
 | snapshot | {} | Snapshot (runtime may use host placeholder fields) |
+| get_settings | {} | Settings only; used by idle scheduling without loading the library |
 | add_project | { input: AddProjectInput } | Project |
 | update_project | { id, changes: ProjectChanges } | Project |
 | remove_project | { id } | null (remove tracking, never installed/downloaded files) |
