@@ -1,0 +1,39 @@
+{
+  "name": "releasehub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "pnpm@11.17.0",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "build": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "test:ui": "playwright test",
+    "tauri": "tauri",
+    "desktop": "tauri dev"
+  },
+  "dependencies": {
+    "@lucide/svelte": "1.72.0",
+    "@tauri-apps/api": "^2.12.4",
+    "dompurify": "3.4.17",
+    "marked": "18.2.0",
+    "svelte": "^5.57.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "@tauri-apps/cli": "^2.12.4",
+    "@tsconfig/svelte": "5.0.9",
+    "@types/node": "26.6.6",
+    "jsdom": "31.0.1",
+    "svelte-check": "4.7.8",
+    "typescript": "~5.9.2",
+    "vite": "^7.3.8",
+    "vitest": "^3.2.7"
+  }
+}

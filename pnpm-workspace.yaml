@@ -1,0 +1,6 @@
+packages:
+  - .
+
+# Only this known local build helper may run its installation script.
+allowBuilds:
+  esbuild: true

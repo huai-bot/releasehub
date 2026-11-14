@@ -1,0 +1,82 @@
+name: Build Windows
+run-name: Windows x64 · ${{ github.ref_name }} · ${{ github.run_number }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test and build Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - name: Check out source without storing credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '26.5.0'
+      - name: Prepare pinned toolchain
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm install --global pnpm@11.17.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup toolchain install 1.97.0 --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default 1.97.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check and test the interface
+        run: |
+          pnpm check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test update core and local Agent protections
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build executable and installer
+        run: |
+          pnpm exec tauri build --bundles nsis --ci -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check the compiled executable with isolated empty data
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'releasehub-smoke'
+          $app = Start-Process -FilePath 'src-tauri/target/release/releasehub.exe' -ArgumentList @('--smoke-test', ('"' + $dir + '"')) -Wait -PassThru
+          if ($app.ExitCode -ne 0) { throw 'Compiled application smoke test failed.' }
+          $result = Get-Content -Raw -Encoding utf8 (Join-Path $dir 'result.json') | ConvertFrom-Json
+          if (-not $result.ok) { throw 'The application did not return a successful smoke test.' }
+          if ($result.snapshot.settings.agentEnabled) { throw 'Agent access must be disabled by default.' }
+      - name: Package clean portable distribution
+        run: ./scripts/package-windows.ps1
+      - name: Upload only public distribution files
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ReleaseHub-windows-x64
+          path: |
+            artifacts/ReleaseHub-*-windows-x64-portable.zip
+            artifacts/ReleaseHub-*-windows-x64-setup.exe
+            artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          include-hidden-files: false

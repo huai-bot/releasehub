@@ -1,0 +1,47 @@
+ReleaseHub（追新）便携版
+
+一、打开软件
+1. 右键 ZIP 压缩包，选择“全部解压”。不要在压缩包里直接运行。
+2. 把解压后的 ReleaseHub 文件夹放到你喜欢的位置，例如 D:\TOOLS\ReleaseHub。
+3. 双击 ReleaseHub.exe。
+4. 如果提示缺少 WebView2，请安装微软官方 WebView2 运行环境，或改用 ReleaseHub 安装版补齐。
+   微软地址：https://developer.microsoft.com/microsoft-edge/webview2/
+
+二、添加你常用的软件
+1. 点击“添加软件”，粘贴 GitHub 项目地址。
+2. 选择“正式版”或“包含预览版”，按需要选择便携版或安装版。
+3. 已经装过的软件，可以手动记录当前版本。没有记录不等于已经是最新版。
+4. 点击“检查更新”，查看更新内容后下载。下载完成还不等于已经安装。
+5. 安装前会再确认。安装版打开原作者安装程序；便携版放入 ReleaseHub 自己的受管文件夹，不覆盖你原有的软件。
+
+可以添加这些项目：
+https://github.com/Lake1059/FFmpegFreeUI
+https://github.com/RoutineMiku/apkstart
+https://github.com/Predidit/Kazumi
+
+注意：有些上游软件自己还需要运行环境或配套组件。
+ApkStart 的轻量便携包不包含完整模拟器运行环境，运行时可能需要额外下载。
+
+三、搬到另一台电脑
+1. 完全退出 ReleaseHub（如果在托盘里，右键托盘图标选择“退出”）。
+2. 复制整个 ReleaseHub 文件夹，包括 portable.flag 和 data 文件夹。
+3. 在新电脑解压或粘贴后，再运行 ReleaseHub.exe。
+软件列表、下载记录和受管程序跟着 data 文件夹走。
+GitHub 授权和 Agent 连接密钥不随文件夹复制；新电脑需要重新设置。
+只分享软件清单时，用软件里的“导出”，不要把装有自己数据的文件夹当成干净安装包分享。
+
+四、Agent 编译协作
+默认关闭，也不内置任何模型账户、个人密钥或私人 API。
+在项目里建立编译任务，再在设置里开启本机 Agent 接入。
+把连接信息只交给你信任的 Agent，不要截屏或发布到 GitHub。
+说明和 PowerShell 客户端在 integrations 文件夹里。
+Agent 构建结果会单独标识，不会假装是原作者正式发行，也不会自动安装。
+
+五、常见情况
+- 提示 GitHub 请求过多：稍后再试，或在设置里自行配置 GitHub 只读授权。
+- 下载失败：到“下载”页面点击重试。
+- 不知道选哪个文件：看名称里的 Windows/x64/portable/setup，仍不确定就打开原作者发布页。
+- 更新后要保留设置：旧受管版本保留在原目录；没有确定迁移规则的软件，请按原作者说明迁移设置。
+
+项目和版本下载：https://github.com/huai-bot/releasehub
+许可：MIT。程序未购买商业代码签名证书；如 Windows 弹出未知发布者提示，请先核对下载来源，不要关闭系统安全防护。

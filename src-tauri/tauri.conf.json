@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ReleaseHub",
+  "version": "0.1.0",
+  "identifier": "io.github.huai-bot.releasehub",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "ReleaseHub · 追新", "width": 1280, "height": 840, "minWidth": 960, "minHeight": 640, "center": true }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https://avatars.githubusercontent.com data:; font-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "Utility",
+    "shortDescription": "轻量、便携的 GitHub 软件更新中心",
+    "longDescription": "集中订阅 GitHub 软件发行版，安全下载和确认更新，通过可选本机接口与 Agent 协作构建。",
+    "copyright": "Copyright © 2026 huai-bot",
+    "licenseFile": "../LICENSE",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": false },
+      "nsis": { "displayLanguageSelector": true, "languages": ["SimpChinese", "English"], "installMode": "currentUser" }
+    }
+  }
+}
