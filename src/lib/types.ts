@@ -160,3 +160,10 @@ export interface AgentConnection {
   address: string;
   token: string;
 }
+
+export interface ManagedVersion {
+  downloadId: string;
+  version: string;
+  path: string;
+  active: boolean;
+}

@@ -1,4 +1,4 @@
-import type { BuildTaskStatus, DownloadRecord, DownloadStatus, Project, ProjectStatus } from './types';
+import type { BuildTaskStatus, DownloadRecord, DownloadStatus, ManagedVersion, Project, ProjectStatus } from './types';
 
 export type Page = 'home' | 'library' | 'updates' | 'downloads' | 'agent' | 'settings';
 export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'accent';
@@ -52,6 +52,10 @@ export function formatDate(value: string | null, includeTime = false): string {
 export function downloadPercent(download: Pick<DownloadRecord, 'receivedBytes' | 'totalBytes'>): number {
   if (!Number.isFinite(download.totalBytes) || download.totalBytes <= 0 || !Number.isFinite(download.receivedBytes)) return 0;
   return Math.max(0, Math.min(100, Math.round(download.receivedBytes / download.totalBytes * 100)));
+}
+
+export function canActivateManagedVersion(project: Pick<Project, 'installedSource'> | null, version: ManagedVersion | undefined, confirmed: boolean): boolean {
+  return Boolean(confirmed && project?.installedSource === 'managed' && version && !version.active);
 }
 
 export function matchesProject(project: Project, query: string): boolean {

@@ -106,6 +106,18 @@ fn safe_browser_url(value: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
+fn managed_directory_from_versions(versions: &Value, download_id: &str, data_dir: &Path) -> Result<PathBuf, String> {
+    let version = versions.as_array().and_then(|items| items.iter().find(|item| item["downloadId"].as_str() == Some(download_id)))
+        .ok_or("这个版本没有受管安装记录，或目录已被移走。")?;
+    let path = PathBuf::from(version["path"].as_str().ok_or("版本目录记录无效。")?)
+        .canonicalize().map_err(|_| "版本目录已被移走或删除。")?;
+    let root = data_dir.join("apps").canonicalize().map_err(|_| "受管目录不可用。")?;
+    if !path.is_dir() || path == root || !path.starts_with(&root) {
+        return Err("这个位置不属于 ReleaseHub 管理的程序目录。".into());
+    }
+    Ok(path)
+}
+
 #[tauri::command]
 async fn dispatch(app: tauri::AppHandle, state: tauri::State<'_, Arc<HostState>>, action: String, payload: Option<Value>) -> Result<Value, String> {
     let host = state.inner().clone();
@@ -176,6 +188,15 @@ async fn dispatch(app: tauri::AppHandle, state: tauri::State<'_, Arc<HostState>>
         }
         "open_data_directory" => {
             app.opener().open_path(host.data_dir.to_string_lossy().to_string(), None::<&str>).map_err(|_| "无法打开数据文件夹。")?;
+            Ok(Value::Null)
+        }
+        "open_managed_version" => {
+            let project_id = object_string(&payload, "projectId")?;
+            let download_id = object_string(&payload, "downloadId")?;
+            let versions = host.core.handle("list_managed_versions", json!({"projectId": project_id})).await?;
+            let path = managed_directory_from_versions(&versions, download_id, &host.data_dir)?;
+            app.opener().open_path(path.to_string_lossy().to_string(), None::<&str>)
+                .map_err(|_| "无法打开这个版本的程序目录。")?;
             Ok(Value::Null)
         }
         "open_download" => {
@@ -370,6 +391,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn managed_directory_opener_accepts_only_recorded_local_folders() {
+        let directory = tempfile::tempdir().unwrap();
+        let managed = directory.path().join("apps").join("project").join("v1");
+        fs::create_dir_all(&managed).unwrap();
+        let versions = json!([{"downloadId":"one", "path":managed}]);
+        assert_eq!(managed_directory_from_versions(&versions, "one", directory.path()).unwrap(), managed.canonicalize().unwrap());
+        assert!(managed_directory_from_versions(&versions, "unknown", directory.path()).is_err());
+        let outside = tempfile::tempdir().unwrap();
+        assert!(managed_directory_from_versions(&json!([{"downloadId":"one","path":outside.path()}]), "one", directory.path()).is_err());
+        let file = managed.join("app.exe");
+        fs::write(&file, b"not executable").unwrap();
+        assert!(managed_directory_from_versions(&json!([{"downloadId":"one","path":file}]), "one", directory.path()).is_err());
+    }
+
     #[test]
     fn system_browser_never_opens_local_or_injected_urls() {
         assert!(safe_browser_url("https://github.com/huai-bot/releasehub/releases").is_ok());

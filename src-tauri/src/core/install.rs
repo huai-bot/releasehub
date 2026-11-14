@@ -15,6 +15,34 @@ fn child_directory(root:&Path,name:&str)->Result<PathBuf,String>{
     if resolved.parent()!=Some(root){return Err("受管安装目录不能跳转到其他位置".into());}
     Ok(resolved)
 }
+fn managed_version_name(d:&DownloadRecord)->String{
+    format!("{}--{}",downloads::safe_name(&d.tag),d.id)
+}
+fn existing_managed_directory(root:&Path,name:&str)->Result<Option<PathBuf>,String>{
+    let path=root.join(name);
+    let meta=match fs::symlink_metadata(&path){
+        Ok(meta)=>meta,
+        Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(None),
+        Err(e)=>return Err(io_error(e)),
+    };
+    let linked=meta.file_type().is_symlink();
+    #[cfg(windows)]
+    let linked={
+        use std::os::windows::fs::MetadataExt;
+        linked||meta.file_attributes()&0x400!=0 // Also reject Windows directory junctions/reparse points.
+    };
+    if !meta.is_dir()||linked{return Err("受管版本目录不能是文件或链接".into());}
+    let resolved=fs::canonicalize(&path).map_err(io_error)?;
+    if resolved.parent()!=Some(root){return Err("受管版本目录不能跳转到其他位置".into());}
+    Ok(Some(resolved))
+}
+fn managed_version_path(data:&Path,d:&DownloadRecord)->Result<Option<PathBuf>,String>{
+    uuid::Uuid::parse_str(&d.project_id).map_err(|_|"项目编号无效".to_string())?;
+    uuid::Uuid::parse_str(&d.id).map_err(|_|"下载记录编号无效".to_string())?;
+    let Some(root)=existing_managed_directory(data,"apps")? else{return Ok(None);};
+    let Some(project)=existing_managed_directory(&root,&d.project_id)? else{return Ok(None);};
+    existing_managed_directory(&project,&managed_version_name(d))
+}
 pub fn zip_path(name:&str)->Result<PathBuf,String>{
     if name.is_empty()||name.len()>1024||name.contains(['\\',':','\0'])||name.starts_with('/'){
         return Err("ZIP 包包含越界或危险路径，已停止安装".into());
@@ -108,6 +136,37 @@ fn launch_installer(path:&Path)->Result<(),String>{
 #[cfg(not(windows))]
 fn launch_installer(_: &Path)->Result<(),String>{Err("安装器只能在 Windows 上启动".into())}
 impl Core{
+    pub(crate) fn list_managed_versions(&self,project_id:&str)->Result<Vec<ManagedVersion>,String>{
+        let project=self.store.project(project_id)?;
+        let mut versions=Vec::new();
+        for d in self.store.downloads()?.into_iter().filter(|d|d.project_id==project.id&&d.status=="installed"&&d.kind=="portable"){
+            let Some(path)=managed_version_path(&self.data_dir,&d)? else{continue;};
+            let active=project.installed_source.as_deref()==Some("managed")
+                &&project.installed_version.as_deref()==Some(d.tag.as_str())
+                &&project.installed_path.as_deref().map(Path::new)==Some(path.as_path());
+            versions.push(ManagedVersion{download_id:d.id,version:d.tag,path:path.to_string_lossy().into_owned(),active});
+        }
+        Ok(versions)
+    }
+    pub(crate) fn activate_managed_version(&self,project_id:&str,download_id:&str)->Result<Project,String>{
+        let installing=self.installing.lock().map_err(|_|"安装状态不可用".to_string())?;
+        if installing.contains(project_id){return Err("此项目正在安装，请稍后再切换版本".into());}
+        let record=self.store.download(download_id)?;
+        if record.project_id!=project_id||record.status!="installed"||record.kind!="portable"{
+            return Err("只能切换此项目已准备好的受管便携版本".into());
+        }
+        let path=managed_version_path(&self.data_dir,&record)?.ok_or("受管版本目录已丢失，无法切换")?;
+        let project=self.store.mutate("projects",project_id,|p:&mut Project|{
+            if p.id!=project_id||p.installed_source.as_deref()!=Some("managed")
+                ||p.installed_path.as_deref().and_then(|s|Path::new(s).parent())!=path.parent(){
+                return Err("只能切换当前受管项目，手动记录的外部安装不会修改".into());
+            }
+            p.installed_version=Some(record.tag.clone());p.installed_path=Some(path.to_string_lossy().into_owned());
+            p.error=None;super::selection::update_status(p);Ok(())
+        })?;
+        drop(installing);
+        self.changed();Ok(project)
+    }
     pub(crate) async fn install_download(self:&Arc<Self>,id:&str)->Result<Value,String>{
         let record=self.store.download(id)?;
         if !["completed","installed"].contains(&record.status.as_str()){return Err("请先完成下载后再安装".into());}
@@ -160,8 +219,7 @@ impl Core{
             })()
         };
         if let Err(error)=prepared{let _=fs::remove_dir_all(&stage);return Err(error);}
-        let version_name=format!("{}--{}",downloads::safe_name(&d.tag),d.id);
-        let destination=project_dir.join(version_name);
+        let destination=project_dir.join(managed_version_name(d));
         if destination.exists(){let _=fs::remove_dir_all(&stage);return Err("此版本已经安装，旧文件和配置保持不变".into());}
         if let Err(e)=fs::rename(&stage,&destination){let _=fs::remove_dir_all(&stage);return Err(io_error(e));}
         let path=destination.to_string_lossy().into_owned();
@@ -178,6 +236,106 @@ impl Core{
 #[cfg(test)]
 mod tests{
     use super::*;
+    fn prepared_version(core:&Core,project:&Project,tag:&str)->(DownloadRecord,PathBuf){
+        let id=uuid::Uuid::new_v4().to_string();let folder=downloads::directory(&core.data_dir,&id).unwrap();
+        let source=folder.join("FFmpegFreeUI.x64.exe");let bytes=format!("local test data for {tag}; not a program");
+        fs::write(&source,bytes.as_bytes()).unwrap();let time=now();
+        let download=DownloadRecord{id,project_id:project.id.clone(),project_name:project.name.clone(),asset_id:1,
+            file_name:"FFmpegFreeUI.x64.exe".into(),tag:tag.into(),url:format!("https://github.com/Lake1059/FFmpegFreeUI/releases/download/{tag}/FFmpegFreeUI.x64.exe"),kind:"portable".into(),
+            total_bytes:bytes.len()as u64,received_bytes:bytes.len()as u64,status:"completed".into(),path:Some(source.to_string_lossy().into_owned()),
+            sha256:Some(format!("{:x}",Sha256::digest(bytes.as_bytes()))),verified:false,error:None,created_at:time.clone(),updated_at:time};
+        core.store.put_download(&download).unwrap();let result=core.install_blocking(&download,project).unwrap();
+        let path=PathBuf::from(result["path"].as_str().unwrap());assert_eq!(result["installed"],true);
+        (core.store.download(&download.id).unwrap(),path)
+    }
+    #[tokio::test]async fn managed_versions_switch_after_confirmation_and_preserve_both_directories(){
+        use std::sync::atomic::{AtomicUsize,Ordering};
+        let dir=tempfile::tempdir().unwrap();let changes=Arc::new(AtomicUsize::new(0));let observed=changes.clone();
+        let core=Core::new(dir.path().join("data"),true,Arc::new(move|event,_|{if event=="releasehub:changed"{observed.fetch_add(1,Ordering::SeqCst);}})).unwrap();
+        let mut project=test_project("Lake1059","FFmpegFreeUI");
+        project.release=Some(Release{id:2,tag:"v2.0.0".into(),name:"2.0.0".into(),body:String::new(),published_at:now(),
+            url:"https://github.com/Lake1059/FFmpegFreeUI/releases/tag/v2.0.0".into(),prerelease:false,
+            assets:vec![ReleaseAsset{id:1,name:"FFmpegFreeUI.x64.exe".into(),size:32,url:"https://github.com/Lake1059/FFmpegFreeUI/releases/download/v2.0.0/FFmpegFreeUI.x64.exe".into(),
+                content_type:"application/octet-stream".into(),digest:None,kind:"portable".into(),compatible:true,score:100,reason:String::new()}]});
+        core.store.put_project(&project).unwrap();
+        let (old,old_path)=prepared_version(&core,&project,"v1.0.0");fs::write(old_path.join("settings.json"),b"old user settings").unwrap();
+        let (new,new_path)=prepared_version(&core,&project,"v2.0.0");fs::write(new_path.join("settings.json"),b"new user settings").unwrap();
+        let downloads_before=serde_json::to_value(core.store.downloads().unwrap()).unwrap();
+        let listed=core.handle("list_managed_versions",json!({"projectId":project.id})).await.unwrap();
+        let listed=listed.as_array().unwrap();assert_eq!(listed.len(),2);
+        assert_eq!(listed[0].as_object().unwrap().len(),4);
+        assert_eq!(listed.iter().find(|v|v["downloadId"]==new.id).unwrap()["active"],true);
+        assert_eq!(listed.iter().find(|v|v["downloadId"]==old.id).unwrap()["active"],false);
+        let mut request=json!({"projectId":project.id,"downloadId":old.id});
+        assert!(core.handle("activate_managed_version",request.clone()).await.is_err());
+        for confirmation in [Value::Null,json!(false),json!("true")]{
+            request["confirmed"]=confirmation;assert!(core.handle("activate_managed_version",request.clone()).await.is_err());
+        }
+        assert_eq!(changes.load(Ordering::SeqCst),0);
+        assert_eq!(core.store.project(&project.id).unwrap().installed_version.as_deref(),Some("v2.0.0"));
+        request["confirmed"]=json!(true);let activated=core.handle("activate_managed_version",request.clone()).await.unwrap();
+        assert_eq!(activated["installedVersion"],old.tag);assert_eq!(activated["installedPath"],old_path.to_string_lossy().as_ref());
+        assert_eq!(activated["installedSource"],"managed");assert_eq!(activated["status"],"updateAvailable");
+        assert_eq!(core.handle("activate_managed_version",request).await.unwrap(),activated);
+        let listed=core.list_managed_versions(&project.id).unwrap();assert_eq!(listed.iter().filter(|v|v.active).count(),1);
+        assert!(listed.iter().find(|v|v.download_id==old.id).unwrap().active);
+        let restored=core.handle("activate_managed_version",json!({"projectId":project.id,"downloadId":new.id,"confirmed":true})).await.unwrap();
+        assert_eq!(restored["installedVersion"],new.tag);assert_eq!(restored["status"],"upToDate");
+        assert_eq!(changes.load(Ordering::SeqCst),3);
+        assert_eq!(fs::read(old_path.join("settings.json")).unwrap(),b"old user settings");
+        assert_eq!(fs::read(new_path.join("settings.json")).unwrap(),b"new user settings");
+        assert_eq!(serde_json::to_value(core.store.downloads().unwrap()).unwrap(),downloads_before);
+    }
+    #[tokio::test]async fn managed_versions_reject_external_cross_project_missing_and_unprepared_targets(){
+        let dir=tempfile::tempdir().unwrap();let core=Core::new(dir.path().join("data"),true,Arc::new(|_,_|{})).unwrap();
+        let project=test_project("Lake1059","FFmpegFreeUI");core.store.put_project(&project).unwrap();
+        let (installed,path)=prepared_version(&core,&project,"v1.0.0");let current=core.store.project(&project.id).unwrap();
+        let request=json!({"projectId":project.id,"downloadId":installed.id,"confirmed":true});
+        core.installing.lock().unwrap().insert(project.id.clone());
+        assert!(core.handle("activate_managed_version",request.clone()).await.is_err());
+        core.installing.lock().unwrap().remove(&project.id);
+        let other=test_project("other-owner","other-project");core.store.put_project(&other).unwrap();
+        assert!(core.handle("activate_managed_version",json!({"projectId":other.id,"downloadId":installed.id,"confirmed":true})).await.is_err());
+        assert!(core.list_managed_versions(&other.id).unwrap().is_empty());assert!(!core.data_dir.join("apps").join(&other.id).exists());
+        let external=dir.path().join("external-app");fs::create_dir(&external).unwrap();fs::write(external.join("settings.json"),b"external settings").unwrap();
+        for source in ["manual","managed"]{
+            let mut manual=current.clone();manual.installed_source=Some(source.into());manual.installed_path=Some(external.to_string_lossy().into_owned());core.store.put_project(&manual).unwrap();
+            assert!(core.handle("activate_managed_version",request.clone()).await.is_err());
+            assert_eq!(serde_json::to_value(core.store.project(&project.id).unwrap()).unwrap(),serde_json::to_value(manual).unwrap());
+            assert!(core.list_managed_versions(&project.id).unwrap().iter().all(|v|!v.active));
+        }
+        core.store.put_project(&current).unwrap();assert_eq!(fs::read(external.join("settings.json")).unwrap(),b"external settings");
+        let mut missing=installed.clone();missing.id=uuid::Uuid::new_v4().to_string();missing.tag="v0.9.0".into();core.store.put_download(&missing).unwrap();
+        assert!(core.handle("activate_managed_version",json!({"projectId":project.id,"downloadId":missing.id,"confirmed":true})).await.is_err());
+        for (kind,status) in [("portable","completed"),("installer","installed")]{
+            let mut unprepared=installed.clone();unprepared.id=uuid::Uuid::new_v4().to_string();unprepared.kind=kind.into();unprepared.status=status.into();
+            core.store.put_download(&unprepared).unwrap();fs::create_dir(path.parent().unwrap().join(managed_version_name(&unprepared))).unwrap();
+            assert!(core.handle("activate_managed_version",json!({"projectId":project.id,"downloadId":unprepared.id,"confirmed":true})).await.is_err());
+        }
+        fs::create_dir(path.parent().unwrap().join("unrecorded-folder")).unwrap();
+        let listed=core.list_managed_versions(&project.id).unwrap();assert_eq!(listed.len(),1);assert_eq!(listed[0].download_id,installed.id);
+        assert!(core.handle("activate_managed_version",json!({"projectId":project.id,"downloadId":"../outside","confirmed":true})).await.is_err());
+        assert_eq!(serde_json::to_value(core.store.project(&project.id).unwrap()).unwrap(),serde_json::to_value(current).unwrap());
+    }
+    #[cfg(any(windows,unix))]
+    #[tokio::test]async fn managed_versions_reject_links_at_every_managed_directory_level(){
+        for level in ["apps","project","version"]{
+            let dir=tempfile::tempdir().unwrap();let core=Core::new(dir.path().join("data"),true,Arc::new(|_,_|{})).unwrap();
+            let project=test_project("Lake1059","FFmpegFreeUI");core.store.put_project(&project).unwrap();
+            let (installed,version)=prepared_version(&core,&project,"v1.0.0");let before=serde_json::to_value(core.store.project(&project.id).unwrap()).unwrap();
+            let path=match level{"apps"=>core.data_dir.join("apps"),"project"=>core.data_dir.join("apps").join(&project.id),_=>version};
+            let moved=path.with_file_name(format!("moved-{level}"));assert!(path.starts_with(&core.data_dir));assert!(!moved.exists());
+            fs::rename(&path,&moved).unwrap();
+            #[cfg(windows)]{
+                let result=std::process::Command::new("cmd.exe").args(["/d","/c","mklink","/J"]).arg(&path).arg(&moved).output().unwrap();
+                assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+            }
+            #[cfg(unix)]std::os::unix::fs::symlink(&moved,&path).unwrap();
+            assert!(core.list_managed_versions(&project.id).is_err(),"{level}");
+            assert!(core.handle("activate_managed_version",json!({"projectId":project.id,"downloadId":installed.id,"confirmed":true})).await.is_err(),"{level}");
+            assert_eq!(serde_json::to_value(core.store.project(&project.id).unwrap()).unwrap(),before);
+        }
+    }
     #[test]fn zip_rejects_traversal_and_windows_aliases(){
         for bad in ["../escape.exe","C:/escape.exe","a\\..\\escape.exe","/root/file","a/NUL.txt","a/file. ","a:file"]{assert!(zip_path(bad).is_err(),"{bad}");}
         assert!(zip_path("App/config/settings.json").is_ok());

@@ -77,6 +77,11 @@ impl Core {
                 if payload.get("confirmed").and_then(Value::as_bool) != Some(true) { return Err("请先确认安装此软件".into()); }
                 self.install_download(&text(&payload, "id", 128)?).await
             }
+            "list_managed_versions" => output(self.list_managed_versions(&text(&payload, "projectId", 128)?)?),
+            "activate_managed_version" => {
+                if payload.get("confirmed").and_then(Value::as_bool) != Some(true) { return Err("请先确认切换当前受管版本；旧目录和配置将保持不变".into()); }
+                output(self.activate_managed_version(&text(&payload, "projectId", 128)?, &text(&payload, "downloadId", 128)?)?)
+            }
             "mark_installed" => {
                 let id = text(&payload, "projectId", 128)?; let version = text(&payload, "version", 200)?;
                 let path = optional_text(&payload, "path", 4096)?;

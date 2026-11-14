@@ -17,6 +17,8 @@ test-results/
 playwright-report/
 *.log
 *.part
+*.tmp
+*.tmpdir/
 .env
 .env.*
 !.env.example

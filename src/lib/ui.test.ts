@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { downloadPercent, formatBytes, matchesProject, parseRepository, readableError, safeGithubUrl } from './ui';
-import { createPreviewSnapshot } from './preview';
+import { canActivateManagedVersion, downloadPercent, formatBytes, matchesProject, parseRepository, readableError, safeGithubUrl } from './ui';
+import { createPreviewManagedVersions, createPreviewSnapshot } from './preview';
 
 describe('GitHub input and host-bound links', () => {
   it('accepts a repository name and normalizes supported project links', () => {
@@ -22,6 +22,36 @@ describe('GitHub input and host-bound links', () => {
     expect(safeGithubUrl('https://github.com@evil.example/a')).toBeNull();
     expect(safeGithubUrl('file:///C:/Windows/System32/cmd.exe')).toBeNull();
     expect(safeGithubUrl('#content', 'https://github.com/owner/repo')).toBeNull();
+  });
+});
+
+describe('managed version confirmation', () => {
+  const versions = createPreviewManagedVersions('preview-ff');
+  it('requires explicit confirmation before selecting a different managed version', () => {
+    expect(canActivateManagedVersion({ installedSource: 'managed' }, versions[1], false)).toBe(false);
+    expect(canActivateManagedVersion({ installedSource: 'managed' }, versions[1], true)).toBe(true);
+  });
+  it('does not offer switching for external, missing, or already-current versions', () => {
+    expect(canActivateManagedVersion({ installedSource: 'manual' }, versions[1], true)).toBe(false);
+    expect(canActivateManagedVersion({ installedSource: null }, versions[1], true)).toBe(false);
+    expect(canActivateManagedVersion(null, versions[1], true)).toBe(false);
+    expect(canActivateManagedVersion({ installedSource: 'managed' }, undefined, true)).toBe(false);
+    expect(canActivateManagedVersion({ installedSource: 'managed' }, versions[0], true)).toBe(false);
+  });
+  it('keeps preview versions isolated and consistent with the sample installed records', () => {
+    const preview = createPreviewSnapshot();
+    const project = preview.projects.find((item) => item.id === 'preview-ff')!;
+    expect(createPreviewManagedVersions('another-project')).toEqual([]);
+    expect(versions.filter((version) => version.active)).toHaveLength(1);
+    expect(project.installedSource).toBe('managed');
+    expect(project.installedVersion).toBe(versions[0].version);
+    expect(project.installedPath).toBe(versions[0].path);
+    for (const version of versions) {
+      expect(preview.downloads.find((download) => download.id === version.downloadId)).toMatchObject({ projectId: project.id, tag: version.version, status: 'installed', kind: 'portable' });
+    }
+    const changedPreview = createPreviewManagedVersions('preview-ff');
+    changedPreview[1].active = true;
+    expect(createPreviewManagedVersions('preview-ff')[1].active).toBe(false);
   });
 });
 

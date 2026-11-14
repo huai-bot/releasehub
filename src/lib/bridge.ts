@@ -2,7 +2,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   AddProjectInput, AgentConnection, BuildTask, CheckResult, DownloadRecord,
-  InstallResult, Project, ProjectChanges, Settings, Snapshot,
+  InstallResult, ManagedVersion, Project, ProjectChanges, Settings, Snapshot,
 } from './types';
 
 /** Keep every desktop operation behind the one audited host command. */
@@ -17,6 +17,8 @@ export interface Actions {
   cancel_download: { payload: { id: string }; result: null };
   install_download: { payload: { id: string; confirmed: true }; result: InstallResult };
   mark_installed: { payload: { projectId: string; version: string; path?: string }; result: Project };
+  list_managed_versions: { payload: { projectId: string }; result: ManagedVersion[] };
+  activate_managed_version: { payload: { projectId: string; downloadId: string; confirmed: true }; result: Project };
   save_settings: { payload: { settings: Partial<Settings> }; result: Settings };
   export_library: { payload: Record<string, never>; result: string };
   import_library: { payload: { contents: string }; result: { imported: number; skipped: number } };
@@ -34,6 +36,7 @@ export interface Actions {
   open_url: { payload: { url: string }; result: null };
   open_download: { payload: { id: string }; result: null };
   open_data_directory: { payload: Record<string, never>; result: null };
+  open_managed_version: { payload: { projectId: string; downloadId: string }; result: null };
   set_github_token: { payload: { token: string }; result: null };
   reveal_agent_connection: { payload: Record<string, never>; result: AgentConnection };
   rotate_agent_token: { payload: Record<string, never>; result: AgentConnection };

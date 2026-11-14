@@ -39,6 +39,11 @@ pub struct DownloadRecord {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ManagedVersion {
+    pub download_id: String, pub version: String, pub path: String, pub active: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildTask {
     pub id: String, pub project_id: String, pub project_name: String, pub repository: String,
     pub source_ref: String, pub source_commit: Option<String>, pub target: String,

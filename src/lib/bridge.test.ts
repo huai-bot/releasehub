@@ -36,6 +36,32 @@ describe('single desktop command', () => {
       ['dispatch', { action: 'create_build_task', payload: { projectId: 'project-1', sourceRef: 'main', instructions: 'Build Windows x64' } }],
     ]);
   });
+  it('reads managed versions without inventing an active version or directory', async () => {
+    const versions = [{ downloadId: 'download-1', version: 'v1.2.3', path: 'C:\\ReleaseHub\\data\\apps\\project-1\\v1.2.3', active: false }];
+    mocks.invoke.mockResolvedValue(versions);
+    expect(await dispatch('list_managed_versions', { projectId: 'project-1' })).toEqual(versions);
+    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith('dispatch', { action: 'list_managed_versions', payload: { projectId: 'project-1' } });
+  });
+  it('sends only project/download identity and explicit confirmation for managed actions', async () => {
+    mocks.invoke.mockResolvedValue(null);
+    await dispatch('activate_managed_version', { projectId: 'project-1', downloadId: 'download-1', confirmed: true });
+    await dispatch('open_managed_version', { projectId: 'project-1', downloadId: 'download-1' });
+    expect(mocks.invoke.mock.calls).toEqual([
+      ['dispatch', { action: 'activate_managed_version', payload: { projectId: 'project-1', downloadId: 'download-1', confirmed: true } }],
+      ['dispatch', { action: 'open_managed_version', payload: { projectId: 'project-1', downloadId: 'download-1' } }],
+    ]);
+  });
+  it('never simulates managed-directory reads, switching, or opening without a desktop host', async () => {
+    mocks.isTauri.mockReturnValue(false);
+    await expect(dispatch('list_managed_versions', { projectId: 'project-1' })).rejects.toThrow('桌面服务未连接');
+    await expect(dispatch('activate_managed_version', { projectId: 'project-1', downloadId: 'download-1', confirmed: true })).rejects.toThrow('桌面服务未连接');
+    await expect(dispatch('open_managed_version', { projectId: 'project-1', downloadId: 'download-1' })).rejects.toThrow('桌面服务未连接');
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+  it('preserves a real managed-version rejection rather than returning success', async () => {
+    mocks.invoke.mockRejectedValue(new Error('已准备的程序目录不存在'));
+    await expect(dispatch('activate_managed_version', { projectId: 'project-1', downloadId: 'download-1', confirmed: true })).rejects.toThrow('已准备的程序目录不存在');
+  });
   it('retains the explicit installer confirmation in the host request', async () => {
     mocks.invoke.mockResolvedValue({ installed: false, message: 'installer opened', kind: 'installer', path: 'test.exe' });
     const result = await dispatch('install_download', { id: 'download-1', confirmed: true });

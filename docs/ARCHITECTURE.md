@@ -48,6 +48,8 @@ The host provides periodic update scheduling and native notifications based on s
 | cancel_download | { id } | null |
 | install_download | { id, confirmed: true } | InstallResult |
 | mark_installed | { projectId, version, path?: string } | Project (manual confirmation, not a fake detector) |
+| list_managed_versions | { projectId } | ManagedVersion[]: downloadId, version, path, active; only recorded, existing, isolated managed installs |
+| activate_managed_version | { projectId, downloadId, confirmed: true } | Project; switch the tracked active managed directory/version, never launch, overwrite, or remove a program |
 | save_settings | { settings: Partial<Settings> } | Settings (host owns Agent lifecycle) |
 | export_library | {} | string (versioned JSON containing project subscriptions/preferences only; never secrets, absolute install paths or tasks) |
 | import_library | { contents: string } | { imported: number, skipped: number } (validate sizes/schema, deduplicate, no automatic downloads) |
@@ -75,6 +77,7 @@ Install: EXE/MSI opens the official installer only with confirmed=true; do not m
 | open_url | { url } | null (validate HTTPS GitHub URLs, then system browser) |
 | open_download | { id } | null (show/reveal parent folder, never execute by this action) |
 | open_data_directory | {} | null |
+| open_managed_version | { projectId, downloadId } | null; validate against list_managed_versions, then open that managed directory only; no execution |
 | set_github_token | { token: string } | null (empty removes; OS credential storage, UI clears input) |
 | reveal_agent_connection | {} | AgentConnection (only explicit UI action, token never in logs/export) |
 | rotate_agent_token | {} | AgentConnection |

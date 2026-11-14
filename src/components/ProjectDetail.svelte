@@ -3,11 +3,11 @@
   import { formatBytes, formatDate, projectInitials, projectStatus } from '../lib/ui';
   import Icon from './Icon.svelte';
   import ReleaseNotes from './ReleaseNotes.svelte';
-  let { project, busy, onclose, oncheck, ondownload, onupdate, onmark, onbuild, onremove, onopen }: {
+  let { project, busy, onclose, oncheck, ondownload, onupdate, onmark, onbuild, onremove, onopen, onversions }: {
     project: Project; busy: boolean; onclose: () => void; oncheck: (ids: string[]) => void;
     ondownload: (project: Project) => void; onupdate: (id: string, changes: ProjectChanges) => void;
     onmark: (project: Project) => void; onbuild: (project: Project) => void;
-    onremove: (project: Project) => void; onopen: (url: string) => void;
+    onremove: (project: Project) => void; onopen: (url: string) => void; onversions: (projectId: string) => void;
   } = $props();
   let tab = $state<'notes' | 'assets' | 'manage'>('notes');
   let previousId = $state<string | null>(null);
@@ -21,6 +21,7 @@
   <div class="detail-identity"><span class="app-avatar large" class:avatar-purple={project.repo.toLowerCase() === 'kazumi'} class:avatar-blue={project.repo.toLowerCase() === 'apkstart'}>{projectInitials(project)}</span><h2>{project.name}</h2><button class="text-button muted" onclick={() => onopen(project.url)}>{project.owner}/{project.repo}<Icon name="external" size={13} /></button>{#if project.description}<p>{project.description}</p>{/if}<span class={`status-badge ${status.tone}`}><span class="tiny-dot"></span>{status.label}</span></div>
   <div class="version-summary"><div><span>已记录版本</span><strong>{project.installedVersion ?? '尚未记录'}</strong><small>{project.installedSource === 'managed' ? '由追新管理' : project.installedSource === 'manual' ? '手动确认' : '不自动推测本机版本'}</small></div><Icon name="arrowRight" size={18} /><div><span>最新发行 <em class:preview-label={project.release?.prerelease}>{project.release?.prerelease ? '预览' : '正式'}</em></span><strong class="accent-text">{project.release?.tag ?? '暂无信息'}</strong><small>{formatDate(project.release?.publishedAt ?? null)}</small></div></div>
   <div class="detail-primary-actions"><button class="button primary" disabled={busy || !selectedAsset} onclick={() => ondownload(project)}><Icon name="download" size={16} />下载{project.release ? '此版本' : '安装包'}</button><button class="button secondary" disabled={busy} aria-label={`检查 ${project.name} 更新`} onclick={() => oncheck([project.id])}><Icon name="refresh" size={16} /></button></div>
+  {#if project.installedSource === 'managed'}<div class="managed-entry"><button class="button secondary small" disabled={busy} onclick={() => onversions(project.id)}><Icon name="drive" size={15} />管理已准备版本</button><span>打开程序目录，或确认切换当前记录</span></div>{/if}
   {#if project.error}<div class="detail-error"><Icon name="alert" size={16} /><span>{project.error}</span></div>{/if}
   {#if project.release && !selectedAsset}<button class="asset-needed" onclick={() => tab = 'assets'}><Icon name="info" size={16} /><span>还没有确定合适的安装包，查看后手动选择。</span><Icon name="chevronRight" size={14} /></button>{/if}
   <div class="detail-tabs" role="tablist" aria-label="详情内容"><button role="tab" aria-selected={tab === 'notes'} class:active={tab === 'notes'} onclick={() => tab = 'notes'}>更新说明</button><button role="tab" aria-selected={tab === 'assets'} class:active={tab === 'assets'} onclick={() => tab = 'assets'}>安装包 <span>{project.release?.assets.length ?? 0}</span></button><button role="tab" aria-selected={tab === 'manage'} class:active={tab === 'manage'} onclick={() => tab = 'manage'}>管理</button></div>
@@ -42,3 +43,8 @@
   </div>
   <div class="detail-footer"><Icon name="clock" size={13} />最近检查 · {formatDate(project.checkedAt, true)}</div>
 </aside>
+
+<style>
+  .managed-entry { display: flex; flex-direction: column; gap: 6px; margin: 0 23px 14px; }
+  .managed-entry span { color: var(--muted); font-size: 10px; text-align: center; }
+</style>
