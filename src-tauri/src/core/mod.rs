@@ -8,6 +8,8 @@ mod library;
 mod tasks;
 
 use models::*;
+pub use models::RepositoryNote;
+use crate::proxy::ProxyState;
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf, sync::{atomic::AtomicBool, Arc, Mutex}};
 
@@ -19,6 +21,7 @@ pub struct Core {
     portable: bool,
     events: EventSink,
     pub(crate) github: network::Github,
+    pub proxy: Arc<ProxyState>,
     pub(crate) active_downloads: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub(crate) download_queue: Mutex<()>,
     pub(crate) installing: Mutex<std::collections::HashSet<String>>,
@@ -52,12 +55,14 @@ impl Core {
         }
         let store = store::Store::new(&data_dir.join("releasehub.sqlite3"))?;
         repair_portable_paths(&store,&data_dir)?;
+        let proxy = Arc::new(ProxyState::new(store.settings()?.proxy, None)?);
         Ok(Arc::new(Self { store, data_dir, portable, events,
-            github: network::Github::new()?, active_downloads: Mutex::new(HashMap::new()),
+            github: network::Github::new(proxy.clone())?, proxy, active_downloads: Mutex::new(HashMap::new()),
             download_queue: Mutex::new(()), installing: Mutex::new(std::collections::HashSet::new()),
             checks: tokio::sync::Mutex::new(()), _data_lock: data_lock }))
     }
     pub fn set_github_token(&self, token: Option<String>) { self.github.set_token(token); }
+    pub fn set_proxy_password(&self, password: Option<String>) -> Result<(), String> { self.proxy.set_password(password) }
     pub(crate) fn set_github_service(&self, service: Arc<crate::github::GithubService>) { self.github.set_service(service); }
     pub(crate) fn changed(&self) { (self.events)("releasehub:changed", json!({})); }
     pub(crate) fn download_event(&self, record: &DownloadRecord) {
@@ -71,7 +76,7 @@ impl Core {
         match action {
             "get_settings" => output(self.store.settings()?),
             "snapshot" => Ok(json!({"projects": self.store.projects()?, "downloads": self.store.downloads()?,
-                "buildTasks": self.store.tasks()?, "settings": self.store.settings()?,
+                "buildTasks": self.store.tasks()?, "repositoryNotes": self.store.repository_notes()?, "settings": self.store.settings()?,
                 "runtime": {"appVersion": env!("CARGO_PKG_VERSION"), "dataDir": self.data_dir.to_string_lossy(),
                     "portable": self.portable, "githubTokenConfigured": self.github.token_configured(),
                     "agent": {"enabled": false, "address": null, "tokenConfigured": false, "error": null}}})),
@@ -106,11 +111,24 @@ impl Core {
                     selection::update_status(p); Ok(())
                 })?; self.changed(); output(p)
             }
+            "get_repository_notes" => output(self.store.repository_notes()?),
+            "save_repository_note" => {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct NoteInput { repository: String, name: String, description: String }
+                let input: NoteInput = decode(payload)?;
+                let note = RepositoryNote { repository: input.repository, name: input.name,
+                    description: input.description, updated_at: now() }.normalized()?;
+                let note = self.store.save_repository_note(&note)?;
+                self.changed(); output(note)
+            }
+            "test_proxy" => self.proxy.test().await,
             "save_settings" => {
                 let patch = payload.get("settings").and_then(Value::as_object).ok_or("设置内容无效")?;
                 let mut value = output(self.store.settings()?)?;
                 for (k,v) in patch { value.as_object_mut().ok_or("设置内容无效")?.insert(k.clone(),v.clone()); }
-                let settings: Settings = decode(value)?; self.store.save_settings(&settings)?;
+                let settings: Settings = decode(value)?; settings.validate()?;
+                self.proxy.persist_settings(settings.proxy.clone(), || self.store.save_settings(&settings))?;
                 self.pump_downloads(); self.changed(); output(settings)
             }
             "export_library" => Ok(Value::String(self.export_library()?)),
@@ -208,6 +226,31 @@ mod tests {
         first.store.save_settings(&settings).unwrap();
         assert_eq!(first.store.settings().unwrap().theme, "dark");
         assert_eq!(second.store.settings().unwrap().theme, "system");
+    }
+    #[tokio::test]
+    async fn repository_notes_commands_are_local_and_empty_text_deletes() {
+        let directory=tempfile::tempdir().unwrap(); let core=Core::new(directory.path().into(),true,Arc::new(|_,_|{})).unwrap();
+        let saved=core.handle("save_repository_note",json!({"repository":"Owner/Unsubscribed","name":"  我的名称  ","description":"只存在本地"})).await.unwrap();
+        assert_eq!(saved["repository"],"owner/unsubscribed"); assert_eq!(saved["name"],"我的名称");
+        assert!(core.store.projects().unwrap().is_empty());
+        assert_eq!(core.handle("get_repository_notes",json!({})).await.unwrap()[0],saved);
+        assert_eq!(core.handle("snapshot",json!({})).await.unwrap()["repositoryNotes"][0],saved);
+        assert!(core.handle("save_repository_note",json!({"repository":"OWNER/UNSUBSCRIBED","name":" ","description":" "})).await.unwrap().is_null());
+        assert!(core.store.repository_notes().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn settings_save_updates_proxy_but_never_serializes_password() {
+        let directory=tempfile::tempdir().unwrap(); let core=Core::new(directory.path().into(),true,Arc::new(|_,_|{})).unwrap();
+        let proxy=json!({"mode":"manual","url":"http://127.0.0.1:9","username":"fixture-user"});
+        core.handle("save_settings",json!({"settings":{"proxy":proxy,"startupPage":"github","startupGithubTab":"feed"}})).await.unwrap();
+        core.set_proxy_password(Some("fixture-memory-only".into())).unwrap();
+        let saved=core.handle("save_settings",json!({"settings":{"theme":"dark"}})).await.unwrap();
+        assert_eq!(core.proxy.settings().unwrap().mode,"manual"); assert_eq!(saved["startupPage"],"github");
+        assert!(!saved.to_string().contains("fixture-memory-only"));
+        assert!(core.handle("save_settings",json!({"settings":{"proxy":{"mode":"manual","url":"http://127.0.0.1:9","username":"fixture-user","password":"fixture-memory-only"}}})).await.is_err());
+        assert!(core.handle("save_settings",json!({"settings":{"navigationOrder":["home","home"]}})).await.is_err());
+        assert_eq!(core.proxy.settings().unwrap().mode,"manual");
+        assert_eq!(core.store.settings().unwrap().navigation_order,default_navigation_order());
     }
     #[tokio::test]
     async fn get_settings_returns_only_preferences_without_library_or_secrets() {

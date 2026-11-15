@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-feed-receive"
+description = "Receive bounded plain-text GitHub feed snapshots from the dedicated GitHub webview only."
+commands.allow = ["feed_receive"]

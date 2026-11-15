@@ -1,4 +1,4 @@
-import type { AgentIntegration, GithubActivityPage, GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubRepositoryTab, GithubStatus } from './types';
+import type { AgentIntegration, GithubActivityPage, GithubListRepositoryPage, GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubRepositoryTab, GithubStatus, GithubUserList, RepositoryNote } from './types';
 import { filterGithubPage, GITHUB_DEVICE_URL } from './github';
 
 export type GithubPreviewScenario = 'connected' | 'anonymous' | 'waiting' | 'unavailable' | 'empty' | 'error';
@@ -27,7 +27,7 @@ function examples(): GithubRepository[] {
     repository(901, 'Lake1059/FFmpegFreeUI', '界面示例：直观的音视频处理工具；此处数量与状态均非实时数据。', { language: 'Visual Basic .NET', stars: 2450, starred: true }),
     repository(902, 'releasehub-demo/window-notes', '示例仓库：把窗口中的灵感和待办收进一份简洁清单。', { stars: 326, canAdmin: true, starred: false }),
     repository(903, 'releasehub-demo/release-desk', '示例仓库：汇集桌面工具的发行记录，按自己的节奏追踪。', { language: 'Rust', stars: 91, canAdmin: true, starred: true }),
-    repository(904, 'releasehub-demo/private-plans', '示例私有仓库：只用于展示权限提醒，不对应真实的私人数据。', { private: true, stars: 0, canAdmin: true, starred: false, topics: [] }),
+    repository(904, 'releasehub-demo/private-plans', '示例私有仓库：汇集团队的工具规划与待办。', { private: true, stars: 0, canAdmin: true, starred: false, topics: [] }),
     repository(905, 'example-tools/archive-browser', '示例仓库：快速浏览本地归档内容，不改动原文件。', { language: 'C#', stars: 670, starred: null }),
   ];
 }
@@ -44,7 +44,7 @@ export function createPreviewGithubDetail(name: string, connected: boolean): Git
   const item = examples().find((entry) => entry.fullName === name) ?? repository(999, name, '界面预览示例仓库。');
   return {
     repository: { ...item, canAdmin: connected && item.canAdmin, starred: connected ? item.starred ?? false : null },
-    readme: `# ${item.name}\n\n> 这是界面预览，仓库说明、账号、数量与状态均为示例。\n\n一个简洁的 Windows 桌面工具。在追新中，你可以先读说明，再决定是否加入软件库。\n\n## 使用方式\n\n- 搜索或查看自己关注的仓库\n- 单击 Star，或明确取消 Star\n- 加入软件库只记录订阅，不自动下载或安装\n\n[查看 GitHub 原页](${item.url})\n\n## 安全展示\n\nREADME 中的脚本和远程图片会被过滤；站外地址不会直接打开。`,
+    readme: `# ${item.name}\n\n> 界面预览示例\n\n一个简洁的 Windows 桌面工具。在追新中，先阅读项目说明，再选择要持续关注的软件。\n\n## 使用方式\n\n- 搜索仓库或浏览 Stars\n- 通过分类整理，给仓库写下好记的本地备注\n- 加入软件库，订阅后续版本更新\n\n[查看 GitHub 原页](${item.url})`,
   };
 }
 export function createPreviewGithubActivity(page: number, scenario: GithubPreviewScenario): GithubActivityPage {
@@ -57,6 +57,34 @@ export function createPreviewGithubActivity(page: number, scenario: GithubPrevie
     ], page, hasMore: false,
   };
 }
+export function createPreviewGithubLists(scenario: GithubPreviewScenario): GithubUserList[] {
+  if (scenario === 'error') throw new Error('示例：分类暂时读取失败，请重试。');
+  if (scenario === 'empty') return [];
+  return [
+    { id: 'demo-tools', name: '桌面工具', description: '常用的 Windows 软件', url: 'https://github.com/stars/releasehub-demo/lists/desktop-tools', itemCount: 2 },
+    { id: 'demo-media', name: '音视频', description: '剪辑、转码与素材管理', url: 'https://github.com/stars/releasehub-demo/lists/media', itemCount: 1 },
+  ];
+}
+
+export function createPreviewGithubListRepositories(listId: string, cursor: string | undefined, scenario: GithubPreviewScenario): GithubListRepositoryPage {
+  if (scenario === 'error') throw new Error('示例：Stars 暂时读取失败，请重试。');
+  let items = scenario === 'empty' ? [] : examples().filter((item) => item.starred === true || item.id === 905).map((item) => ({ ...item, starred: true }));
+  if (listId === 'demo-tools') items = items.filter((item) => item.id !== 905);
+  if (listId === 'demo-media') items = items.filter((item) => item.id === 901);
+  if (listId === 'unlisted') items = items.filter((item) => item.id === 905);
+  const start = Number(cursor ?? 0);
+  const hasMore = items.length > start + 2;
+  return { items: items.slice(start, start + 2), totalCount: items.length, hasMore, endCursor: hasMore ? String(start + 2) : null };
+}
+
+export function createPreviewRepositoryNotes(): RepositoryNote[] {
+  return [{ repository: 'Lake1059/FFmpegFreeUI', name: '视频工具箱', description: '日常转码、压缩与音轨处理', updatedAt: exampleDate }];
+}
+
+export function createPreviewRepositoryLists(repository: string): string[] {
+  return repository === 'Lake1059/FFmpegFreeUI' ? ['demo-tools', 'demo-media'] : repository === 'releasehub-demo/release-desk' ? ['demo-tools'] : [];
+}
+
 export function createPreviewAgentIntegration(): AgentIntegration {
   const command = 'C:\\Example\\ReleaseHub\\tools\\releasehub-mcp.exe';
   const args = ['--data-dir', 'C:\\Example\\ReleaseHub\\data'];
@@ -64,5 +92,10 @@ export function createPreviewAgentIntegration(): AgentIntegration {
     command, args, readOnly: true,
     claudeConfig: JSON.stringify({ mcpServers: { releasehub: { command, args } } }, null, 2),
     codexConfig: `[mcp_servers.releasehub]\ncommand = ${JSON.stringify(command)}\nargs = ${JSON.stringify(args)}`,
+    genericConfig: JSON.stringify({ command, args }, null, 2),
+    cursorConfig: JSON.stringify({ mcpServers: { releasehub: { command, args } } }, null, 2),
+    vscodeConfig: JSON.stringify({ servers: { releasehub: { type: 'stdio', command, args } } }, null, 2),
+    cliCommand: `& '${command}' --data-dir '${args[1]}' --cli`,
+    tools: [{ name: 'repository_notes', description: '查看仓库的本地备注' }],
   };
 }

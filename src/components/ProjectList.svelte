@@ -26,7 +26,7 @@
       <span class={`status-badge ${status.tone}`}><span class="tiny-dot"></span>{status.label}</span>
       <div class="row-actions">
         {#if project.status === 'updateAvailable' && asset}
-          <button class="icon-button accent-button" aria-label={`下载 ${project.name} ${project.release?.tag}`} title="下载更新，不会自动安装" disabled={busy} onclick={() => ondownload(project)}><Icon name="download" size={17} /></button>
+          <button class="icon-button accent-button" aria-label={`下载 ${project.name} ${project.release?.tag}`} title="下载此版本的安装包" disabled={busy} onclick={() => ondownload(project)}><Icon name="download" size={17} /></button>
         {:else if project.status === 'error' || project.status === 'notChecked'}
           <button class="icon-button" aria-label={`重新检查 ${project.name}`} title="检查更新" disabled={busy} onclick={() => oncheck([project.id])}><Icon name="refresh" size={16} /></button>
         {:else}

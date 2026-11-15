@@ -1,4 +1,4 @@
-use crate::{agent::{self, RunningAgent}, core::Core, github::GithubService, mcp, secrets::{random_token, SecretStore}};
+use crate::{agent::{self, RunningAgent}, core::Core, github::GithubService, github_feed::GitHubFeedService, mcp, proxy::{ProxySettings, ProxyState}, secrets::{random_token, SecretStore}};
 use serde_json::{json, Value};
 use std::{fs, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{Duration, Instant}};
 use tauri::{Emitter, Manager};
@@ -14,6 +14,8 @@ struct HostState {
     secrets: SecretStore,
     github_configured: AtomicBool,
     github: Arc<GithubService>,
+    feed: Arc<GitHubFeedService>,
+    proxy_password_configured: AtomicBool,
     close_to_tray: AtomicBool,
     agent: Mutex<Option<RunningAgent>>,
     agent_error: Mutex<Option<String>>,
@@ -29,6 +31,7 @@ impl HostState {
             "dataDir": self.data_dir.to_string_lossy(),
             "portable": self.portable,
             "githubTokenConfigured": self.github_configured.load(Ordering::Relaxed),
+            "proxyPasswordConfigured": self.proxy_password_configured.load(Ordering::Relaxed),
             "agent": {
                 "enabled": agent.is_some(),
                 "address": agent.as_ref().map(|agent| &agent.address),
@@ -80,6 +83,7 @@ impl HostState {
     async fn save_settings(&self, changes: Value) -> Result<Value, String> {
         let _serial = self.settings_lock.lock().await;
         if !changes.is_object() { return Err("设置格式不正确。".into()); }
+        if changes.get("proxy").is_some() { return Err("请从网络代理区保存连接设置。".into()); }
         let snapshot = self.core.handle("snapshot", json!({})).await?;
         let previous = snapshot["settings"].clone();
         let enabled = changes["agentEnabled"].as_bool().unwrap_or(previous["agentEnabled"].as_bool().unwrap_or(false));
@@ -93,6 +97,36 @@ impl HostState {
             return Err(error);
         }
         self.close_to_tray.store(result["closeToTray"].as_bool().unwrap_or(false), Ordering::Relaxed);
+        Ok(result)
+    }
+
+    async fn save_proxy(&self, app: &tauri::AppHandle, payload: Value) -> Result<Value, String> {
+        let _serial = self.settings_lock.lock().await;
+        let settings: ProxySettings = serde_json::from_value(payload["proxy"].clone()).map_err(|_| "代理设置格式不正确。")?;
+        let old_settings = self.core.proxy.settings()?;
+        let old_record = self.secrets.get("proxy-password")?;
+        let old_password = proxy_password_from_record(old_record.as_deref(), &old_settings);
+        let password = requested_proxy_password(&payload, &settings, &self.secrets)?;
+        // Validate both pieces before touching either the saved account or the database.
+        ProxyState::new(settings.clone(), password.clone())?;
+        let record = password.as_ref().map(|password| json!({"url":settings.url,"username":settings.username,"password":password}).to_string());
+        self.secrets.set("proxy-password", record.as_deref())?;
+        let result = match self.core.handle("save_settings", json!({"settings":{"proxy":settings}})).await {
+            Ok(result) => result,
+            Err(error) => {
+                self.secrets.set("proxy-password", old_record.as_deref())?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.core.set_proxy_password(password.clone()) {
+            let _ = self.core.handle("save_settings", json!({"settings":{"proxy":old_settings}})).await;
+            let _ = self.core.set_proxy_password(old_password);
+            self.secrets.set("proxy-password", old_record.as_deref())?;
+            return Err(error);
+        }
+        self.proxy_password_configured.store(password.is_some(), Ordering::Relaxed);
+        // The service retains its own actionable error if the website window cannot close.
+        let _ = self.feed.restart_for_proxy_change(app).await;
         Ok(result)
     }
 
@@ -121,6 +155,24 @@ fn bundled_tool(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
 fn github_cli(app: &tauri::AppHandle) -> Option<PathBuf> {
     // Always use the pinned, bundled component, never a different program from PATH.
     bundled_tool(app, "gh.exe")
+}
+
+fn proxy_password_from_record(record: Option<&str>, settings: &ProxySettings) -> Option<String> {
+    let record: Value = serde_json::from_str(record?).ok()?;
+    if record["url"].as_str()? != settings.url || record["username"].as_str()? != settings.username { return None; }
+    record["password"].as_str().filter(|value| !value.is_empty()).map(str::to_owned)
+}
+
+fn load_proxy_password(secrets: &SecretStore, settings: &ProxySettings) -> Result<Option<String>, String> {
+    Ok(proxy_password_from_record(secrets.get("proxy-password")?.as_deref(), settings))
+}
+
+fn requested_proxy_password(payload: &Value, settings: &ProxySettings, secrets: &SecretStore) -> Result<Option<String>, String> {
+    match payload.get("password") {
+        Some(Value::String(value)) => Ok(if value.is_empty() { None } else { Some(value.clone()) }),
+        Some(_) => Err("代理密码格式不正确。".into()),
+        None => load_proxy_password(secrets, settings),
+    }
 }
 
 fn object_string<'a>(payload: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -152,7 +204,8 @@ fn managed_directory_from_versions(versions: &Value, download_id: &str, data_dir
 }
 
 #[tauri::command]
-async fn dispatch(app: tauri::AppHandle, state: tauri::State<'_, Arc<HostState>>, action: String, payload: Option<Value>) -> Result<Value, String> {
+async fn dispatch(window: tauri::WebviewWindow, app: tauri::AppHandle, state: tauri::State<'_, Arc<HostState>>, action: String, payload: Option<Value>) -> Result<Value, String> {
+    if window.label() != "main" { return Err("此窗口没有工作空间操作权限。".into()); }
     let host = state.inner().clone();
     let payload = payload.unwrap_or_else(|| json!({}));
     match action.as_str() {
@@ -162,6 +215,22 @@ async fn dispatch(app: tauri::AppHandle, state: tauri::State<'_, Arc<HostState>>
             let _ = app.emit("releasehub:changed", json!({}));
             Ok(value)
         }
+        "save_proxy" => {
+            let value = host.save_proxy(&app, payload).await?;
+            let _ = app.emit("releasehub:changed", json!({}));
+            Ok(value)
+        }
+        "test_proxy" => {
+            let settings = if let Some(value) = payload.get("proxy") {
+                serde_json::from_value(value.clone()).map_err(|_| "代理设置格式不正确。")?
+            } else { host.core.proxy.settings()? };
+            let password = requested_proxy_password(&payload, &settings, &host.secrets)?;
+            ProxyState::new(settings, password)?.test().await
+        }
+        "get_agent_diagnostic" => {
+            agent::diagnostic_from_snapshot(&host.snapshot().await?, object_string(&payload, "projectId")?)
+        }
+        action if action.starts_with("feed_") => host.feed.handle(&app, action, payload).await,
         "set_github_token" => {
             let token = object_string(&payload, "token")?.trim();
             if token.len() > 1024 || token.bytes().any(|byte| byte.is_ascii_control()) {
@@ -380,7 +449,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![dispatch])
+        .invoke_handler(tauri::generate_handler![dispatch, crate::github_feed::feed_receive])
         .setup(|app| {
             let executable = std::env::current_exe()?;
             let parent = executable.parent().ok_or("无法定位应用目录。")?;
@@ -399,10 +468,16 @@ pub fn run() {
             core.set_github_token(token);
             // Account configuration is always machine-local, including in portable mode.
             let auth_root = app.path().app_local_data_dir()?.join("accounts").join(secrets.instance_id());
-            let github = GithubService::new(auth_root, github_cli(app.handle()));
+            let proxy_password = load_proxy_password(&secrets, &core.proxy.settings()?)?;
+            let proxy_password_configured = proxy_password.is_some();
+            core.set_proxy_password(proxy_password)?;
+            let github = GithubService::new(auth_root.clone(), github_cli(app.handle()), core.proxy.clone());
+            let feed = GitHubFeedService::new(auth_root, core.proxy.clone());
+            app.manage(feed.clone());
             core.set_github_service(github.clone());
             let host = Arc::new(HostState {
-                core, data_dir, portable, secrets, github,
+                core, data_dir, portable, secrets, github, feed,
+                proxy_password_configured: AtomicBool::new(proxy_password_configured),
                 github_configured: AtomicBool::new(github_configured),
                 close_to_tray: AtomicBool::new(false),
                 agent: Mutex::new(None), agent_error: Mutex::new(None), settings_lock: Mutex::new(()),
@@ -432,6 +507,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() != "main" { return; }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if let Some(host) = window.app_handle().try_state::<Arc<HostState>>() {
                     if host.close_to_tray.load(Ordering::Relaxed) { api.prevent_close(); let _ = window.hide(); }
@@ -467,6 +543,16 @@ mod tests {
         let file = managed.join("app.exe");
         fs::write(&file, b"not executable").unwrap();
         assert!(managed_directory_from_versions(&json!([{"downloadId":"one","path":file}]), "one", directory.path()).is_err());
+    }
+
+    #[test]
+    fn proxy_password_is_bound_to_its_saved_address_and_account() {
+        let settings = ProxySettings { mode: "manual".into(), url: "http://127.0.0.1:7890".into(), username: "demo".into() };
+        let record = json!({"url":settings.url,"username":settings.username,"password":"local-test"}).to_string();
+        assert_eq!(proxy_password_from_record(Some(&record), &settings).as_deref(), Some("local-test"));
+        assert!(proxy_password_from_record(Some(&record), &ProxySettings { url: "http://127.0.0.1:7891".into(), ..settings.clone() }).is_none());
+        assert!(proxy_password_from_record(Some(&record), &ProxySettings { username: "other".into(), ..settings }).is_none());
+        assert!(proxy_password_from_record(Some("not-json"), &ProxySettings::default()).is_none());
     }
 
     #[test]

@@ -1,67 +1,124 @@
-# 让 Codex / Claude Code 读取追新里的软件资料
+# 把软件资料交给你的 Agent
 
-ReleaseHub 不内置 AI，也不要求你填写模型密钥。你继续使用已经登录的 Codex、Claude Code 等客户端；追新只提供一条**默认关闭、只读的本机连接**。
+ReleaseHub 提供软件信息，你在外部 Agent 平台完成分析、编译、修复或安装。它不内置 AI 聊天，不接管外部平台的执行或审批流程。
+
+推荐使用 **MCP**：支持 Claude Code、Claude Desktop、Codex、Cursor、VS Code，以及能启动本机 stdio 程序的其他 MCP 客户端。这里的“支持”指连接格式和协议兼容，不要求你更换常用平台。纯云端连接不能直接访问这台电脑；远程开发窗口也须确认连接程序实际运行在 ReleaseHub 所在的 Windows 上。
 
 ## 第一次连接
 
 1. 打开 ReleaseHub，点击左侧 **AI 连接**。
-2. 开启 **允许本机 AI 读取信息**，保持 ReleaseHub 运行。设置页也有相同开关。
-3. 选择 **Claude Code** 或 **Codex**，点击复制对应配置。软件会自动填入这台电脑上的真实路径，里面没有密钥。
-4. 将配置加入你使用的 AI 客户端：
-   - **Claude Code**：在要使用它的项目文件夹中，打开或创建 `.mcp.json`，加入复制内容中的 `mcpServers.releasehub`。已有其他连接时保留它们，不要直接覆盖整个文件。
-   - **Codex**：在用户目录的 `.codex/config.toml` 中加入复制的 `[mcp_servers.releasehub]` 段；不要重复添加同名段，也不要覆盖原有账号或模型设置。
-5. 重新打开 AI 客户端的会话；如果它询问是否信任这个本机连接，核对程序路径后允许。
-6. 对它说：**“读取 ReleaseHub 中已保存的软件列表，告诉我哪些有更新，并比较当前版本和最新版本。不要下载或安装。”**
+2. 打开 **开启软件资料连接**，使用期间保持 ReleaseHub 运行。
+3. 选择自己的平台，点击 **复制配置**。没有专用选项时选 **通用 JSON**。
+4. 在客户端的 MCP 设置里添加连接，保留已经存在的其他配置：
 
-这些客户端的界面会随版本变化；也可以把复制的配置交给已经受你信任的 Codex / Claude Code，让它只添加这个连接，保留原有配置。
+   | 平台格式 | 放在哪里 |
+   | --- | --- |
+   | 通用 JSON | 新建本机 stdio 连接，分别填入 `command` 和 `args`；连接名可用 `releasehub` |
+   | Claude | Claude Code 的项目 MCP 配置，或 Claude Desktop 的 MCP 配置；合并 `mcpServers.releasehub` |
+   | Codex | Codex 配置中的 `[mcp_servers.releasehub]` 段，不重复添加同名段 |
+   | Cursor | Cursor 的 MCP 设置，合并 `mcpServers.releasehub` |
+   | VS Code | VS Code 的 MCP 配置，合并 `servers.releasehub`，其中 `type` 为 `stdio` |
 
-- 不需要额外安装 Python、Node 或 GitHub CLI；完整发行包已附带连接程序。
-- 第一次打开时不会自行开启连接，也不会读取你的其他 AI 客户端配置。
-- 关闭开关后，外部 AI 不能继续读取；重新开启通常不需要重新填写配置。
-- 移动软件目录后，应重新复制配置。换电脑后需重新开启连接；Windows 中的本机凭据不随文件夹复制。
-- AI 客户端已有的账号、订阅或计费方式仍由它自己负责，追新不会代替它登录模型服务。
+5. 保存后重新载入客户端连接。如果客户端询问是否信任本机程序，核对路径后允许。
+6. 对 Agent 说：**“读取 ReleaseHub 的软件列表，再读取我要处理的软件的发行包、源码和诊断资料。先区分已保存的信息和需要你自行核实的信息。”**
 
-## AI 能读到什么
+界面名称可能随客户端版本变化。也可以让你信任的 Agent 按上表添加这一个连接，不覆盖账号、模型或其他连接设置。
 
-| 工具 | 内容 |
+完整发行包自带连接组件，不需要额外安装 Python、Node 或 GitHub CLI。配置只有本机程序路径和数据目录，凭据由连接程序从 Windows 凭据库自动获取，不需要查看、输入或粘贴 token。关闭开关即可停止读取；移动软件目录后重新复制配置，换电脑后重新开启连接。
+
+## 可以读取的资料
+
+| MCP 工具 | 对应命令行 | 内容 |
+| --- | --- | --- |
+| `releasehub_status` | `status` | 连接状态、应用版本 |
+| `releasehub_list_software` | `list` | 软件列表、安装记录、保存的发行版本和检查时间；支持搜索、筛选与分页 |
+| `releasehub_get_software` | `show` | 一款软件的详细资料、发行说明、资产、安装记录及诊断信息 |
+| `releasehub_get_releases` | `releases` | 已保存的一份发行版及其全部 assets，包括类型、大小、下载地址和可用摘要 |
+| `releasehub_get_source` | `source` | 已保存的默认分支、完整源码 SHA、领先状态和固定提交下载地址 |
+| `releasehub_get_downloads` | `downloads` | ReleaseHub 自身的下载记录、进度、错误；可按软件筛选 |
+| `releasehub_diagnose` | `diagnose` | 版本是否未知、安装位置是否待识别、错误记录、源码和基础环境 |
+| `releasehub_environment` | `environment` | 系统、架构、应用版本、便携模式和信息来源 |
+| `releasehub_snapshot` | `snapshot` | 全部已保存的软件资料、下载记录、常用偏好和基础环境 |
+| `releasehub_saved_context` | `context` | 常用偏好、数量统计和最近最多 100 条下载记录 |
+
+**这些查询不会触发检查更新。** `collectedAt` 是本次汇总资料的时间，不是资料刚从 GitHub 更新的时间；每款软件的 `checkedAt` 才是上次检查时间。Agent 可使用返回的 GitHub 网页/API 地址自行获取上游资料，或由你在追新里点击“检查更新”后再读。
+
+- `projectId` 来自 `list` 返回的 `id`，不是软件名称或仓库地址。
+- `list` 和 `downloads` 默认每页 50 项，最多 100 项；用 `offset` 翻页。列表的 `query` 是保存资料内的搜索，`updatesOnly` 只筛选已保存的可更新状态。
+- `releases` 返回 `historyComplete: false`。它不是完整发行历史，也不承诺这份记录此刻仍是上游最新版本；完整历史请使用 `upstream.releasesApiUrl`。
+- `source.headSha` 只使用已保存的完整提交号。`commitUrl` 与 `archiveUrl` 固定到该提交；没有完整 SHA 时返回空值，不用分支名冒充固定版本。`sourceAhead` 保留已有的 `true`、`false` 或空值，不重新计算。
+
+## 不用 MCP 时：命令行查询
+
+在 **AI 连接 → 命令行查询** 点击 **复制查询命令**，粘贴到 PowerShell 回车即可。命令已经包含这台电脑的正确路径。它和 MCP 使用同一个连接程序、同一份软件记录、同一个自动获取的读取凭据。
+
+下面仅演示格式，路径是虚构的；实际使用应从界面复制：
+
+```powershell
+& 'D:\ReleaseHub\tools\releasehub-mcp.exe' --data-dir 'D:\ReleaseHub\data' --cli list
+& 'D:\ReleaseHub\tools\releasehub-mcp.exe' --data-dir 'D:\ReleaseHub\data' --cli list --query '示例' --limit 20 --json
+& 'D:\ReleaseHub\tools\releasehub-mcp.exe' --data-dir 'D:\ReleaseHub\data' --cli diagnose '<list 返回的 id>' --json
+```
+
+第一条显示易读的软件列表；第二条搜索保存的资料并输出 JSON，便于外部 Agent 继续处理；第三条输出指定软件的诊断资料。将 `diagnose` 换成 `show`、`releases` 或 `source` 可读取相应内容；`downloads` 可带软件 ID，也可不带。
+
+| 用法 | 结果 |
 | --- | --- |
-| `releasehub_status` | 追新是否连通、版本和只读能力 |
-| `releasehub_list_software` | 已保存的软件、安装版本、最新版本和检查时间；可搜索、只看可更新项、分页 |
-| `releasehub_get_software` | 一款软件的保存信息、安装位置、发行说明、安装包选项和下载记录 |
-| `releasehub_saved_context` | 已保存的常用偏好、软件和更新数量、最近最多 100 条下载记录 |
+| `--cli --help` 或单独 `--help` | 查看帮助，不需要打开追新 |
+| `--cli schema --json` | 查看全部命令、参数和对应 MCP 工具，不需要数据目录或连接凭据 |
+| `--cli list --updates-only` | 查看保存状态中可更新的软件 |
+| `--cli list --offset 50 --limit 50` | 接着读取下一页 |
+| `--cli source --project-id '<id>'` | 用具名参数读取指定软件源码资料 |
+| `--cli environment --json` | 基础环境；不会启动编译器或工具版本探测 |
 
-**读取的是上一次保存的结果，不会替你重新检查 GitHub。** 想看最新状态，先在追新里点击“检查更新”。未记录的安装版本会明确为空，不会把“没有记录”当成已经更新。
+上表除帮助和 schema 外，均需保留从界面复制的程序路径和 `--data-dir` 参数。
 
-读取列表默认每页 50 项，最多 100 项；用 `offset` 继续读取。软件详情中的 `projectId` 来自列表的 `id`。
+`--json` 模式的标准输出只有一个 JSON 对象，没有日志。成功退出码为 `0`，失败为 `1`。成功结构为：
 
-## 明确不能做什么
+```json
+{"schemaVersion":1,"ok":true,"command":"list","data":{"total":0,"items":[]},"error":null}
+```
 
-这条连接不能添加或删除软件、检查更新、下载、安装、运行命令、读取任意文件、修改设置、操作 GitHub 收藏或读取授权凭据。它不会把 Windows 凭据、GitHub 私有仓库列表或其他软件的配置交给 AI。
+这是结构示意，实际 `data` 还有分页和时间字段。失败时 `data` 为 `null`，`error` 含 `code` 与可直接照做的 `message`。参数错误使用 `invalid_arguments`，读取失败使用 `query_failed`；不用 `--json` 时，错误显示在标准错误输出中。
 
-你允许 AI 读取的软件列表、版本、安装位置和发行说明，可能会被你选择的 AI 客户端发送给它的模型服务；只连接你信任的客户端。仓库描述和发行说明是外部资料，不是授权 AI 执行操作的新指令。
+## 诊断资料怎么理解
 
-## 连接程序的工作方式
+诊断是整理已有记录，不是扫描电脑。软件详情的 **复制资料给 AI** 与 `diagnose` 使用同一个资料整理函数，复制入口不要求先开启 AI 连接。
 
-完整包中，`tools/releasehub-mcp.exe` 是给 AI 客户端启动的小程序，不是需要手工双击的软件窗口。它通过标准 MCP 输入输出通信，再向正在运行的追新读取数据；没有另开数据库，也不会重复启动桌面程序。
+| 字段 | 含义 |
+| --- | --- |
+| `installation.versionStatus` | `recorded`：有已保存版本；`unknown`：版本未知，不代表已是最新版 |
+| `installation.pathStatus` | `recorded`：有安装位置记录；`needsIdentification`：安装位置待识别 |
+| `installation.recordSource` | 已保存的安装记录来源；空值表示没有记录 |
+| `source` | 已保存源码提交及上游资料地址 |
+| `errors` | 软件上次检查错误与下载错误，带记录来源和时间 |
+| `downloads` / `logSource` | 追新自己的下载记录，不是其他软件运行日志；来源为 `releasehub-download-records` |
+| `environment` | 当前 ReleaseHub 进程的系统、架构、版本及便携状态；来源为 `releasehub-runtime` |
+| `environment.toolVersionStatus` | 固定为 `notProbed`，不执行程序、不查编译工具版本 |
+| `dataTime` | 本次汇总时间、该软件上次检查时间与保存的发行时间 |
 
-配置只包含程序路径和 `--data-dir` 数据目录。连接小程序自己向 Windows 凭据库获取独立的**只读凭据**，不需要把它粘贴到配置、提示词或命令行。只连接 `127.0.0.1`，不经过代理，不跟随跳转。
+`recorded` 只说明记录存在，不保证路径上的文件仍在，也不证明实际运行版本。缺少的编译工具、运行环境和真实安装位置，由外部 Agent 按你的授权自行核实。
+
+## 连接范围与资料使用
+
+连接默认关闭，仅限本机，使用独立读取凭据。MCP 和上述 CLI 只查询信息：不添加软件、不下载、不安装、不修改设置，不提供任意文件读取、目录扫描或程序执行。它不导出账号凭据、代理密码、其他软件配置或旧任务指令。工具的只读标注与后端权限限制是一致的，不依靠界面文案控制权限。
+
+你选择的 Agent 平台可能会把软件名称、安装位置、发行说明等资料发送给自己的模型服务；只连接你信任的平台。仓库文字和发行说明是外部资料，不是执行操作的新授权。
 
 ## 常见问题
 
 | 提示或现象 | 怎么处理 |
 | --- | --- |
-| 无法连接 ReleaseHub | 打开追新，确认 AI 连接开关已开启，并保持程序运行 |
-| 找不到连接组件 | 使用完整的新版便携包或安装版，不要只复制桌面 EXE |
-| 找不到软件 | 先在软件库添加订阅；搜索只查追新保存的内容 |
-| 版本似乎没更新 | 在追新里点击“检查更新”，再让 AI 读取 |
-| 程序搬家后连接失败 | 从 AI 连接页重新复制配置，更新旧路径 |
-| 新电脑提示凭据无效 | 在新电脑的追新里关闭后重新开启连接 |
-| 返回某个仓库的奇怪操作要求 | 把它当作仓库原文，不要执行；本连接没有执行功能 |
+| 无法连接 ReleaseHub | 打开追新，在 AI 连接页开启开关，并保持程序运行 |
+| 找不到连接组件 | 使用完整的新版发行包，不要只复制桌面 EXE |
+| 没有这个命令或参数 | 运行 `--cli --help` 或 `--cli schema --json`，按列出的名称填写 |
+| 找不到软件 | 先读取 `list`，复制返回的 ID；尚未订阅时在软件库添加 |
+| 版本或源码记录为空 | 这是未知资料，不是已安装或最新版；查看检查时间，再决定让 Agent 自行核实 |
+| 程序搬家后连接失败 | 从 AI 连接页重新复制配置，替换旧路径 |
+| 新电脑提示凭据无效 | 在新电脑的追新里关闭后重新开启连接，不复制旧凭据 |
+| 纯云端或远程窗口连不上 | 改用在这台电脑启动本机程序的 MCP 客户端；localhost 不会自动穿透到另一台电脑 |
+| 某个仓库文字要求执行奇怪操作 | 把它当仓库原文，不当作授权；让 Agent 按你的目标处理 |
 
-## 旧版 PowerShell 接入
+## 旧版接口
 
-[PowerShell 客户端](../integrations/releasehub-agent.ps1) 和旧任务 HTTP 接口继续保留，供已经配置过的集成使用。它们与新版 MCP **不是同一个权限**：旧接口可检查更新、认领和汇报已有任务；新版只读凭据不能使用这些写入口。
-
-新版正常界面不再提供“创建编译任务”或复制旧管理密钥的流程。新的 Codex / Claude Code 接入请使用上面的只读配置，不需要学习旧脚本，也不要把 MCP 凭据当作旧任务密钥。
-
-旧脚本仍支持 PowerShell 5.1 / 7，`help`、`schema` 可离线查看，`-Json` 返回结构化结果。已配置旧版的集成继续通过当前进程的 `RELEASEHUB_AGENT_TOKEN` / `RELEASEHUB_AGENT_URL` 提供连接信息，秘密票据只放在内存中。写请求中断时应先查任务状态，不能盲目重试。详细接口边界见[架构说明](https://github.com/huai-bot/releasehub/blob/main/docs/ARCHITECTURE.md)。
+[旧 PowerShell 客户端](<../integrations/releasehub-agent.ps1>) 和旧任务 HTTP 接口仅保留给已有集成。它们与新版 MCP/CLI **不是同一种权限**；读取凭据不能用于旧的检查更新、任务认领或汇报入口。新接入统一使用本文的 MCP 或 `--cli`，不需要旧脚本、管理密钥或任务工作流。

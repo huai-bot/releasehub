@@ -1,7 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "ReleaseHub's local desktop window; remote pages have no capability grants.",
+  "description": "ReleaseHub local workspace and native window controls.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default", "allow-host-dispatch",
+    "core:window:allow-minimize", "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized", "core:window:allow-close",
+    "core:window:allow-start-dragging", "core:window:allow-set-theme"
+  ]
 }

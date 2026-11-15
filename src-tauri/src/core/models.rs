@@ -52,18 +52,56 @@ pub struct BuildTask {
     pub artifact_sha256: Option<String>, pub error: Option<String>,
     pub created_at: String, pub updated_at: String,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepositoryNote {
+    pub repository: String, pub name: String, pub description: String, pub updated_at: String,
+}
+impl RepositoryNote {
+    pub fn normalized(mut self) -> Result<Self, String> {
+        let (owner, repo) = super::network::repository(&self.repository)?;
+        self.repository = format!("{owner}/{repo}").to_ascii_lowercase();
+        self.name = note_text(&self.name, 80, "本地名称")?;
+        self.description = note_text(&self.description, 240, "本地描述")?;
+        if self.updated_at.len() > 64 || chrono::DateTime::parse_from_rfc3339(&self.updated_at).is_err() {
+            return Err("备注更新时间无效".into());
+        }
+        Ok(self)
+    }
+}
+fn note_text(value: &str, max: usize, label: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.chars().count() > max || value.chars().any(|c| c.is_control()) {
+        return Err(format!("{label}最多{max}个字符，不能含换行或控制字符"));
+    }
+    Ok(value.to_owned())
+}
+pub const NAVIGATION_PAGES: [&str; 6] = ["home", "library", "updates", "downloads", "github", "agent"];
+pub fn default_startup_page() -> String { "home".into() }
+pub fn default_startup_github_tab() -> String { "explore".into() }
+pub fn default_navigation_order() -> Vec<String> { NAVIGATION_PAGES.iter().map(|s| (*s).into()).collect() }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
     pub theme: String, pub check_interval_minutes: u32, pub notifications: bool,
     pub auto_download: bool, pub max_concurrent_downloads: usize, pub close_to_tray: bool,
     pub agent_enabled: bool, pub agent_port: u16,
+    #[serde(default = "default_startup_page")]
+    pub startup_page: String,
+    #[serde(default = "default_startup_github_tab")]
+    pub startup_github_tab: String,
+    #[serde(default = "default_navigation_order")]
+    pub navigation_order: Vec<String>,
+    #[serde(default)]
+    pub proxy: crate::proxy::ProxySettings,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self { theme: "system".into(), check_interval_minutes: 60, notifications: true,
             auto_download: false, max_concurrent_downloads: 2, close_to_tray: true,
-            agent_enabled: false, agent_port: 47831 }
+            agent_enabled: false, agent_port: 47831, startup_page: default_startup_page(),
+            startup_github_tab: default_startup_github_tab(), navigation_order: default_navigation_order(),
+            proxy: crate::proxy::ProxySettings::default() }
     }
 }
 impl Settings {
@@ -72,6 +110,13 @@ impl Settings {
         if self.check_interval_minutes != 0 && !(5..=10080).contains(&self.check_interval_minutes) { return Err("检查间隔须为0（仅手动检查）或5至10080分钟".into()); }
         if !(1..=4).contains(&self.max_concurrent_downloads) { return Err("同时下载数量须为1至4".into()); }
         if self.agent_port < 1024 { return Err("Agent端口须为1024至65535".into()); }
+        if !NAVIGATION_PAGES.contains(&self.startup_page.as_str()) { return Err("启动页面无效".into()); }
+        if !["explore", "owned", "starred", "activity", "feed"].contains(&self.startup_github_tab.as_str()) { return Err("GitHub 启动页面无效".into()); }
+        if self.navigation_order.len() != NAVIGATION_PAGES.len()
+            || NAVIGATION_PAGES.iter().any(|page| self.navigation_order.iter().filter(|item| item.as_str() == *page).count() != 1) {
+            return Err("导航顺序须包含全部六个页面，不能重复".into());
+        }
+        self.proxy.validate()?;
         Ok(())
     }
 }
@@ -118,6 +163,24 @@ mod tests {
         let mut settings=Settings::default();
         for minutes in [0,5,60,10080] {settings.check_interval_minutes=minutes;assert!(settings.validate().is_ok(),"{minutes}");}
         for minutes in [1,4,10081,u32::MAX] {settings.check_interval_minutes=minutes;assert!(settings.validate().is_err(),"{minutes}");}
+    }
+    #[test] fn old_settings_gain_startup_navigation_and_proxy_defaults() {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        for key in ["startupPage", "startupGithubTab", "navigationOrder", "proxy"] { value.as_object_mut().unwrap().remove(key); }
+        let settings: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.startup_page, "home"); assert_eq!(settings.startup_github_tab, "explore");
+        assert_eq!(settings.navigation_order, default_navigation_order()); assert_eq!(settings.proxy.mode, "system");
+        settings.validate().unwrap();
+    }
+    #[test] fn startup_navigation_and_note_limits_are_validated() {
+        let mut settings = Settings::default(); settings.startup_page = "github".into(); settings.startup_github_tab = "feed".into();
+        settings.navigation_order.reverse(); settings.validate().unwrap();
+        settings.navigation_order[0] = settings.navigation_order[1].clone(); assert!(settings.validate().is_err());
+        let note = RepositoryNote { repository: "  Owner/Repo  ".into(), name: "追".repeat(80), description: "新".repeat(240), updated_at: now() }.normalized().unwrap();
+        assert_eq!(note.repository, "owner/repo");
+        let mut invalid = note.clone(); invalid.name.push('超'); assert!(invalid.normalized().is_err());
+        let mut invalid = note.clone(); invalid.description.push('超'); assert!(invalid.normalized().is_err());
+        let mut invalid = note; invalid.name = "第一行\n第二行".into(); assert!(invalid.normalized().is_err());
     }
     #[test] fn optional_updates_preserve_omission_and_allow_explicit_clear() {
         let absent:ProjectChanges=serde_json::from_value(serde_json::json!({})).unwrap();assert!(absent.installed_version.is_none());

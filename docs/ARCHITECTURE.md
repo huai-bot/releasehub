@@ -2,7 +2,7 @@
 
 ## Product boundaries
 
-ReleaseHub is a portable-first Windows x64 desktop application. Release monitoring, a native GitHub workspace, and a read-only external-AI connector are the current modules. Codex / Claude Code run outside this application and connect through the bundled MCP stdio bridge; no model keys or model execution belong in ReleaseHub. The legacy build workboard remains for compatibility, not as the primary Agent workflow. No generic plugin loader or speculative marketplace is needed.
+ReleaseHub is a portable-first Windows x64 desktop application. Version 0.3 combines release monitoring, a GitHub workspace with Lists and local repository notes, an independently connected website feed, and a general MCP/CLI information connector. External Agent platforms obtain saved software information and perform diagnosis, builds and installation in their own authorized environments. ReleaseHub does not add an executor or model-key configuration. The legacy build workboard remains for compatibility.
 
 The UI never talks to arbitrary remote APIs. It invokes one Tauri command `dispatch` with `{ action: string, payload: object }`. The host/core validate every payload. Public GitHub API access is anonymous until the user authorizes the bundled official GitHub CLI; a legacy manually configured token is retained only for compatibility. The UI's production CSP excludes remote scripts and frames. Rich release notes and repository READMEs are sanitized.
 
@@ -10,9 +10,13 @@ The UI never talks to arbitrary remote APIs. It invokes one Tauri command `dispa
 
 `src/lib/types.ts` is the source contract. Rust uses serde camelCase for fields and enums. Times are RFC3339 UTC strings. Optional values are explicit null, not empty-string guesses. Errors returned to the UI are short helpful Chinese strings, without credential-bearing URLs or header values.
 
-Snapshot shape: `{ projects, downloads, buildTasks, settings, runtime }`.
+Snapshot shape: `{ projects, downloads, buildTasks, repositoryNotes, settings, runtime }`.
 
-The host enriches `runtime` with app version, portable mode/data directory, and safe GitHub/Agent credential status. It never includes secret values in a snapshot.
+The host enriches `runtime` with app version, portable mode/data directory, GitHub/Agent status and `proxyPasswordConfigured`; secret values are excluded.
+
+Settings add `startupPage` (one of the six workspace pages), `startupGithubTab` (`explore|owned|starred|activity|feed`), `navigationOrder` (all six pages exactly once), and `proxy: { mode:'system'|'manual'|'direct', url, username }`. Older settings gain defaults. Startup preferences are applied once when the application opens; changing them does not interrupt the current page. Sidebar order supports drag/drop and Alt+Up/Down; Settings remains fixed.
+
+`RepositoryNote` stores `{ repository, name, description, updatedAt }` in a separate SQLite table. Repository keys are lowercase `owner/repo`; local names and descriptions are single-line, limited to 80 and 240 characters. Empty name plus description removes the note. A note does not require a subscription and never changes the upstream repository.
 
 ## Core facade (backend owner's public Rust interface)
 
@@ -51,9 +55,11 @@ The host provides periodic update scheduling and native notifications based on s
 | mark_installed | { projectId, version, path?: string } | Project (manual confirmation, not a fake detector) |
 | list_managed_versions | { projectId } | ManagedVersion[]: downloadId, version, path, active; only recorded, existing, isolated managed installs |
 | activate_managed_version | { projectId, downloadId, confirmed: true } | Project; switch the tracked active managed directory/version, never launch, overwrite, or remove a program |
-| save_settings | { settings: Partial<Settings> } | Settings (host owns Agent lifecycle) |
-| export_library | {} | string (versioned JSON containing project subscriptions/preferences only; never secrets, absolute install paths or tasks) |
-| import_library | { contents: string } | { imported: number, skipped: number } (validate sizes/schema, deduplicate, no automatic downloads) |
+| save_settings | { settings: Partial<Settings> } | Settings (host owns Agent lifecycle; proxy changes use save_proxy) |
+| get_repository_notes | {} | RepositoryNote[] |
+| save_repository_note | { repository, name, description } | RepositoryNote or null after removal |
+| export_library | {} | versioned JSON with subscriptions, notes and portable preferences; proxy/account data, install paths and tasks excluded |
+| import_library | { contents: string } | { imported, skipped, notesImported }; validate before transaction, preserve local proxy, merge newer notes |
 | create_build_task | { projectId, sourceRef?: string, instructions?: string } | BuildTask |
 | cancel_build_task | { id } | BuildTask |
 | list_build_tasks | {} | BuildTask[] |
@@ -74,7 +80,7 @@ Install: EXE/MSI opens the official installer only with confirmed=true; do not m
 | --- | --- | --- |
 | pick_directory | {} | string or null (native chooser) |
 | export_library_file | {} | { path: string } or null (native save dialog) |
-| import_library_file | {} | { imported, skipped } or null (native open dialog) |
+| import_library_file | {} | { imported, skipped, notesImported } or null (native open dialog) |
 | open_url | { url } | null (validate HTTPS GitHub URLs, then system browser) |
 | open_download | { id } | null (show/reveal parent folder, never execute by this action) |
 | open_data_directory | {} | null |
@@ -82,13 +88,24 @@ Install: EXE/MSI opens the official installer only with confirmed=true; do not m
 | set_github_token | { token: string } | null (empty removes; OS credential storage, UI clears input) |
 | reveal_agent_connection | {} | AgentConnection (only explicit UI action, token never in logs/export) |
 | rotate_agent_token | {} | AgentConnection (legacy only; no normal UI entry) |
-| get_agent_integration | {} | AgentIntegration: command, args, claudeConfig, codexConfig, readOnly:true; no secrets |
-| github_status / github_login / github_cancel_login / github_logout | {} | GithubStatus; logout disconnects this application only |
+| get_agent_integration | {} | AgentIntegration: command, args, genericConfig, claudeConfig, codexConfig, cursorConfig, vscodeConfig, cliCommand, tools, readOnly:true |
+| get_agent_diagnostic | { projectId } | saved software diagnostic object, also available while MCP is off |
+| save_proxy | { proxy: ProxySettings, password?: string } | Settings; omitted password retains matching saved account, empty clears it |
+| test_proxy | { proxy?: ProxySettings, password?: string } | { ok, mode, source, target, status, latencyMs, message }; tests unsaved input without saving |
+| github_status / github_cancel_login / github_logout | {} | GithubStatus; logout disconnects this application only |
+| github_login | { lists?: boolean } | GithubStatus; Lists management explicitly requests the additional user scope |
 | github_repositories | { tab:'explore'\|'starred'\|'owned', query:string, page:number } | GithubRepositoryPage; 30/page, page 1..10; owned/starred filter the current page only |
 | github_repository | { repository:'owner/repo' } | GithubRepositoryDetail: repository and bounded README |
 | github_set_star | { repository, starred:boolean, confirmed:true } | { starred:boolean }; explicit 204 plus readback |
 | github_update_repository | { repository, description:string, homepage:string, confirmed:true } | GithubRepository; only two fields, current account/admin checked |
-| github_activity | { page:number } | GithubActivityPage; received_events, not a real-time all-Star feed |
+| github_activity | { page:number } | GithubActivityPage; received_events shown separately as 关注动态 |
+| github_lists | {} | GithubUserList[] from official GraphQL |
+| github_save_list | { id?, name, description, confirmed:true } | created/updated GithubUserList |
+| github_delete_list | { id, confirmed:true } | null |
+| github_list_repositories | { listId, cursor?, query? } | GithubListRepositoryPage; cursor pagination, all/unlisted/List views |
+| github_repository_lists | { repository } | { listIds } |
+| github_assign_lists | { repositories, listIds, mode:'add'|'remove'|'replace', confirmed:true } | { updated }; load complete memberships before merging, then read back |
+| feed_status / feed_connect / feed_refresh / feed_more / feed_disconnect | {} | GithubFeedPage; independent website session, requestId/sessionRevision reject stale results |
 
 `save_settings` is intercepted by the host to start/stop/rebind the Agent server safely; on failure preserve previous enabled settings and report the error. `snapshot` is enriched by the host. The browser-only development preview must be clearly marked and never pretend real operations succeeded. Production must never silently fall back to demo data.
 
@@ -100,15 +117,33 @@ The host passes `app_local_data_dir/accounts/<instance-id>` as the authorization
 
 Every gh call uses a direct executable plus argument array, a fixed constructed `https://api.github.com/...` URL, bounded output, fixed timeout, cleared token/debug/browser overrides, and no automatic write retry. Anonymous reqwest requests disable redirects; signed requests follow gh's own protection (not a claim of universally disabled redirects). No arbitrary endpoint/gh command is exposed. Core's internal optional `repository_api(owner,repo,tail,page)` shares this authorization for metadata/releases/commits/compare GETs without copying credentials. The outer None means disconnected; inner Ok(None) means 404. Signed reads bypass the old anonymous cache/cooldown. Download transport is unchanged and never receives authorization.
 
+## Proxy policy and desktop shell
+
+One shared `Arc<ProxyState>` builds the HTTP clients for metadata, update checks and downloads, and configures only the bundled gh child process environment. System mode uses the Windows static proxy, then environment settings when applicable; direct mode disables proxies. Manual mode accepts HTTP/HTTPS and SOCKS5/SOCKS5h with separate account fields. Loopback connections always bypass the proxy. WebView2 uses its own system/PAC support in system mode; manual authenticated webpage proxies require a system or local forwarding proxy.
+
+Proxy passwords are stored in the Windows credential manager as an account record bound to the exact URL and username. They are not saved in SQLite, snapshots, logs or export files. The host validates first, persists settings under its serial lock, rolls back on a failed save, and rebuilds the independent website window after a change. Existing downloads retain their current connection until cancelled/retried.
+
+The main window disables native decorations and uses the shared Slate/Cobalt theme for a single 52px title/search bar. Window controls use Tauri's scoped minimize, maximize, close, drag and theme APIs; close-to-tray remains a main-window behavior. Native file-drop handling is disabled so HTML sidebar dragging works. The application icon and sidebar mark use the same blue cube asset.
+
+## GitHub Lists and homepage feed
+
+Stars classification uses fixed official GraphQL queries for `User.lists`, `UserList.items`, `createUserList`, `updateUserList`, `deleteUserList`, and `updateUserListsForItem`. The last mutation replaces all membership: add/remove first read every list and membership cursor, merge the requested change, then verify the result. All/unlisted Stars use cursor pagination. List URLs are constructed from the authenticated login and list slug. Names/descriptions shown as local notes remain local.
+
+Homepage feed uses a separate GitHub website window and a machine-local profile beneath the application instance account root. The user logs in there explicitly. `https://github.com/dashboard-feed` is read from the rendered page in its original order and presented as plain text/cards in the application; Events/RSS are not substituted. Content is bounded to 160 items and 2 MiB, links are allowlisted, and changed/unrecognized page structures produce an actionable error. Website session changes discard old cards; disconnect rotates and clears only this module's profile.
+
+The remote website capability permits only `feed_receive`, with a per-window token plus request/session validation. It has no host dispatch or filesystem permission. Host `dispatch` additionally rejects any window label except `main`. Refresh and pagination only operate on the recognized official page controls. Implementation and desktop-login steps are documented in `src/lib/feed/INTEGRATION.md`.
+
 ## External-AI and legacy Agent interfaces
 
 Off by default. Bind only 127.0.0.1, default port 47831, adjustable in Settings. Require a locally generated bearer credential on every request. Reject Origin headers and invalid Host, do not enable CORS, bound request bodies and traffic, and compare credentials in constant time. Credentials live in Windows keyring under a portable instance ID. No credentials accompany portable exports/releases; a new computer reconnects explicitly.
 
-`tools/releasehub-mcp.exe` is a separate console executable using newline-delimited JSON-RPC over stdin/stdout; it does not initialize a WebView or open the SQLite database. The generated Claude JSON/Codex TOML config contains only this executable and `--data-dir`. A safe `agent-connection.json` descriptor stores schema version and loopback address; the helper reads the separate `agent-read` credential itself. It disables proxies/redirects and accepts only the local nonprivileged HTTP port. No arbitrary path or URL tools are exposed.
+`tools/releasehub-mcp.exe` serves newline-delimited JSON-RPC over stdin/stdout, or CLI queries when passed `--cli`. It does not initialize a WebView or open SQLite. Generic JSON, Claude, Codex, Cursor and VS Code configuration contains only this executable and `--data-dir`. A safe `agent-connection.json` descriptor stores schema version and loopback address; the helper reads the separate `agent-read` credential itself. It disables proxies/redirects and accepts only the local nonprivileged HTTP port.
 
-Four tools: `releasehub_status`, `releasehub_list_software` (search, updatesOnly, offset, limit 1..100), `releasehub_get_software` (projectId), and `releasehub_saved_context`. They return saved data only, with explicit read-only annotations. The context endpoint projects allowed fields: software/releases/assets, install metadata, download records and selected preferences; never runtime credentials, account/private-repository lists or build-task instructions. Upstream text is untrusted data, not instructions.
+Ten tools: `releasehub_status`, `releasehub_list_software`, `releasehub_get_software`, `releasehub_get_releases`, `releasehub_get_source`, `releasehub_get_downloads`, `releasehub_diagnose`, `releasehub_environment`, `releasehub_snapshot`, and `releasehub_saved_context`. CLI commands use the same information functions; `--cli schema --json` works offline and structured failures exit 1. Query paging uses offset and limit 1..100. The context endpoint projects saved software/releases/assets, install metadata, download records, basic environment and selected preferences; runtime credentials, account/Lists/feed contents and build-task instructions are excluded.
 
-The distinct read credential can only GET health/projects/context. Legacy checks/task writes require the separate old credential, cannot be reached through MCP tools, and have no normal creation/secret-reveal UI in 0.2.
+Diagnostics keep unknown versions and locations explicit, include record timestamps and application download errors, and construct source archive links only from a saved full SHA. Tool versions are not probed. The desktop Copy to AI action uses the same diagnostic projection without requiring the MCP switch. An external Agent decides and performs its own work using its own tools and permissions. Upstream descriptions remain untrusted data.
+
+The distinct read credential can only GET health/projects/context. Legacy checks/task writes require the separate old credential, cannot be reached through MCP tools, and have no normal creation/secret-reveal UI in 0.3.
 
 Supported routes (lead implements):
 - GET /v1/health (authenticated, safe status only)
@@ -124,6 +159,6 @@ There is no route for arbitrary commands, file reads/writes, tokens, settings, i
 
 ## Portable mode and delivery
 
-Presence of `portable.flag` next to ReleaseHub.exe selects `data/` beside the executable; installed mode uses the platform app-data directory. A non-writable portable directory fails clearly instead of silently losing portability. Credentials are separate. Import/export migrates subscriptions, while copying the portable folder migrates full non-secret local history and managed apps.
+Presence of `portable.flag` next to ReleaseHub.exe selects `data/` beside the executable; installed mode uses the platform app-data directory. A non-writable portable directory fails clearly instead of silently losing portability. Credentials are separate. Import/export migrates subscriptions, repository notes and portable preferences, while copying the portable folder migrates full non-secret local history and managed apps. Webpage logins and proxy passwords remain machine-local.
 
 Final distribution: Windows x64 EXE installer, portable ZIP (exe + portable.flag + quick-start guide). WebView2 is required; use the shared installed runtime and give an actionable missing-runtime explanation. No bundled private endpoints or developer credentials. Final artifact build is a manual `workflow_dispatch` after implementation and two concrete improvement rounds. Public CI permissions and artifact contents are explicitly reviewed.

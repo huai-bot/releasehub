@@ -52,17 +52,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm exec vitest run --config tests/github-ui.config.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec vitest run --config tests/github-lists.config.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec vitest run --config tests/preferences-ui.config.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec vitest run --config src/lib/feed/ui.config.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test update core and local Agent protections
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build the read-only MCP connector
+      - name: Build the MCP and CLI information connector
         run: |
           cargo build --locked --manifest-path src-tauri/Cargo.toml --release --bin releasehub-mcp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item -LiteralPath 'src-tauri/target/release/releasehub-mcp.exe' -Destination 'src-tauri/tools/releasehub-mcp.exe'
+          & 'src-tauri/target/release/releasehub-mcp.exe' --cli schema --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build executable and installer
         run: |
           node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --ci -- --locked

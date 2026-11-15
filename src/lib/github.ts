@@ -1,4 +1,4 @@
-import type { GithubRepository, GithubStatus, Project } from './types';
+import type { GithubRepository, GithubStatus, Project, RepositoryNote } from './types';
 
 export const GITHUB_DEVICE_URL = 'https://github.com/login/device';
 
@@ -15,12 +15,25 @@ export function githubAvatarUrl(value: string | null | undefined): string | null
   } catch { return null; }
 }
 
-export function filterGithubPage(items: GithubRepository[], query: string): GithubRepository[] {
+export function filterGithubPage(items: GithubRepository[], query: string, notes: RepositoryNote[] = []): GithubRepository[] {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const byRepository = new Map(notes.map((note) => [note.repository.toLowerCase(), note]));
   return items.filter((repository) => {
-    const text = `${repository.fullName} ${repository.description ?? ''} ${repository.language ?? ''} ${repository.topics.join(' ')}`.toLocaleLowerCase();
+    const note = byRepository.get(repository.fullName.toLowerCase());
+    const text = `${repository.fullName} ${repository.description ?? ''} ${repository.language ?? ''} ${repository.topics.join(' ')} ${note?.name ?? ''} ${note?.description ?? ''}`.toLocaleLowerCase();
     return terms.every((term) => text.includes(term));
   });
+}
+
+/** Cursor pages extend the searchable set; an overlapping page updates rather than duplicates a row. */
+export function appendGithubRepositories(previous: GithubRepository[], next: GithubRepository[]): GithubRepository[] {
+  const items = new Map(previous.map((repository) => [repository.id, repository]));
+  for (const repository of next) items.set(repository.id, repository);
+  return [...items.values()];
+}
+
+export function findRepositoryNote(notes: RepositoryNote[], repository: string): RepositoryNote | undefined {
+  return notes.find((note) => note.repository.toLowerCase() === repository.toLowerCase());
 }
 
 export function isSubscribed(repository: string, projects: Pick<Project, 'owner' | 'repo'>[]): boolean {

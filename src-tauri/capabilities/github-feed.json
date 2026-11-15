@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "github-feed",
+  "description": "Only the dedicated GitHub website window may deliver plain feed text; no dispatcher, shell, opener, filesystem, or core permissions.",
+  "local": false,
+  "windows": ["github-feed"],
+  "webviews": ["github-feed"],
+  "remote": { "urls": ["https://github.com/*"] },
+  "permissions": ["allow-feed-receive"]
+}

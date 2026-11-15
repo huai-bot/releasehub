@@ -94,8 +94,35 @@ export interface BuildTask {
   updatedAt: string;
 }
 
+export type WorkspacePage = 'home' | 'library' | 'updates' | 'downloads' | 'github' | 'agent';
+export type GithubTab = 'explore' | 'owned' | 'starred' | 'activity' | 'feed';
+export interface ProxySettings {
+  mode: 'system' | 'manual' | 'direct';
+  url: string;
+  username: string;
+}
+export interface ProxyTestResult {
+  ok: boolean;
+  mode: string;
+  source: string;
+  target: string;
+  status: number | null;
+  latencyMs: number;
+  message: string;
+}
+export interface RepositoryNote {
+  repository: string;
+  name: string;
+  description: string;
+  updatedAt: string;
+}
+
 export interface Settings {
   theme: Theme;
+  startupPage: WorkspacePage;
+  startupGithubTab: GithubTab;
+  navigationOrder: WorkspacePage[];
+  proxy: ProxySettings;
   checkIntervalMinutes: number;
   notifications: boolean;
   autoDownload: boolean;
@@ -110,6 +137,7 @@ export interface RuntimeInfo {
   dataDir: string;
   portable: boolean;
   githubTokenConfigured: boolean;
+  proxyPasswordConfigured: boolean;
   agent: {
     enabled: boolean;
     address: string | null;
@@ -122,6 +150,7 @@ export interface Snapshot {
   projects: Project[];
   downloads: DownloadRecord[];
   buildTasks: BuildTask[];
+  repositoryNotes: RepositoryNote[];
   settings: Settings;
   runtime: RuntimeInfo;
 }
@@ -174,6 +203,11 @@ export interface AgentIntegration {
   args: string[];
   claudeConfig: string;
   codexConfig: string;
+  genericConfig: string;
+  cursorConfig: string;
+  vscodeConfig: string;
+  cliCommand: string;
+  tools: { name: string; description: string }[];
   readOnly: true;
 }
 
@@ -251,4 +285,40 @@ export interface GithubActivityPage {
   items: GithubActivity[];
   page: number;
   hasMore: boolean;
+}
+
+export interface GithubUserList {
+  id: string;
+  name: string;
+  description: string | null;
+  url: string;
+  itemCount: number;
+}
+export interface GithubListRepositoryPage {
+  items: GithubRepository[];
+  endCursor: string | null;
+  hasMore: boolean;
+  totalCount: number;
+}
+export interface GithubFeedItem {
+  id: string;
+  actor: string;
+  avatarUrl: string | null;
+  summary: string;
+  body: string;
+  url: string;
+  repository: string | null;
+  occurredAt: string | null;
+}
+export interface GithubFeedPage {
+  connected: boolean;
+  loading: boolean;
+  account: string | null;
+  items: GithubFeedItem[];
+  hasMore: boolean;
+  lastUpdated: string | null;
+  error: string | null;
+  sourceUrl: string;
+  requestId: string;
+  sessionRevision: number;
 }

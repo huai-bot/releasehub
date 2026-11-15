@@ -8,10 +8,23 @@ use std::sync::Arc;
 struct Subscription { repository:String, channel:String, preference:String, asset_pattern:Option<String> }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-struct Library { version:u32, projects:Vec<Subscription>, settings:LibrarySettings }
+struct Library {
+    version: u32, projects: Vec<Subscription>, settings: LibrarySettings,
+    #[serde(default)]
+    repository_notes: Vec<RepositoryNote>,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-struct LibrarySettings { theme:String, check_interval_minutes:u32, notifications:bool, auto_download:bool, max_concurrent_downloads:usize, close_to_tray:bool }
+struct LibrarySettings {
+    theme: String, check_interval_minutes: u32, notifications: bool, auto_download: bool,
+    max_concurrent_downloads: usize, close_to_tray: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    startup_page: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    startup_github_tab: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    navigation_order: Option<Vec<String>>,
+}
 fn empty_project(owner:String,repo:String,channel:String,preference:String) -> Project {
     let time=now();
     Project { id:uuid::Uuid::new_v4().to_string(), name:repo.clone(),
@@ -126,27 +139,42 @@ impl Core {
         let s=self.store.settings()?;
         let library=Library {version:1,projects:self.store.projects()?.into_iter().map(|p|Subscription{
             repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern}).collect(),
+            repository_notes:self.store.repository_notes()?,
             settings:LibrarySettings{theme:s.theme,check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
-                auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray}};
+                auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray,
+                startup_page:Some(s.startup_page),startup_github_tab:Some(s.startup_github_tab),navigation_order:Some(s.navigation_order)}};
         serde_json::to_string_pretty(&library).map_err(|_|"订阅导出失败".into())
     }
     pub(crate) fn import_library(&self,contents:&str)->Result<Value,String> {
         if contents.len()>1024*1024 {return Err("订阅文件超过1MB限制".into());}
         let library:Library=serde_json::from_str(contents).map_err(|_|"订阅文件格式无效或含不支持的字段".to_string())?;
-        if library.version!=1 || library.projects.len()>1000 {return Err("订阅文件版本无效或项目过多".into());}
+        if library.version!=1 || library.projects.len()>1000 || library.repository_notes.len()>1000 {return Err("订阅文件版本无效或项目、备注过多".into());}
         let mut settings=self.store.settings()?;
         settings.theme=library.settings.theme;settings.check_interval_minutes=library.settings.check_interval_minutes;
         settings.notifications=library.settings.notifications;settings.auto_download=library.settings.auto_download;
-        settings.max_concurrent_downloads=library.settings.max_concurrent_downloads;settings.close_to_tray=library.settings.close_to_tray;settings.validate()?;
+        settings.max_concurrent_downloads=library.settings.max_concurrent_downloads;settings.close_to_tray=library.settings.close_to_tray;
+        if let Some(page)=library.settings.startup_page {settings.startup_page=page;}
+        if let Some(tab)=library.settings.startup_github_tab {settings.startup_github_tab=tab;}
+        if let Some(order)=library.settings.navigation_order {settings.navigation_order=order;}
+        settings.validate()?;
+        // Validate everything before any writes; malformed notes cannot partially import subscriptions.
+        let mut notes=std::collections::BTreeMap::new();
+        for note in library.repository_notes {
+            let note=note.normalized()?;
+            if note.name.is_empty()&&note.description.is_empty(){continue;}
+            let replace=notes.get(&note.repository).is_none_or(|old:&RepositoryNote|
+                chrono::DateTime::parse_from_rfc3339(&note.updated_at).ok()>chrono::DateTime::parse_from_rfc3339(&old.updated_at).ok());
+            if replace {notes.insert(note.repository.clone(),note);}
+        }
         let mut ready=Vec::new();
         for input in library.projects {
             validate_choices(&input.channel,&input.preference)?;let (owner,repo)=network::repository(&input.repository)?;
             let mut p=empty_project(owner,repo,input.channel,input.preference);
             p.asset_pattern=input.asset_pattern.map(|s|bounded_text(&s,200,"文件名规则")).transpose()?;ready.push(p);
         }
-        let (mut imported,mut skipped)=(0,0);
-        for p in ready {if self.store.insert_project_unique(&p)? {imported+=1;}else{skipped+=1;}}
-        self.store.save_settings(&settings)?;self.changed();Ok(json!({"imported":imported,"skipped":skipped}))
+        let notes:Vec<_>=notes.into_values().collect();
+        let (imported,skipped,notes_imported)=self.store.import_library(&ready,&notes,&settings)?;
+        self.changed();Ok(json!({"imported":imported,"skipped":skipped,"notesImported":notes_imported}))
     }
 }
 #[cfg(test)]
@@ -166,6 +194,47 @@ mod tests {
         assert!(imported.store.settings().unwrap().auto_download);assert!(!imported.store.settings().unwrap().agent_enabled);
         assert!(!imported.github.token_configured());assert!(imported.store.downloads().unwrap().is_empty());
         let restored=&imported.store.projects().unwrap()[0];assert!(restored.installed_path.is_none());assert!(restored.installed_version.is_none());
+    }
+    #[test] fn notes_and_startup_preferences_export_without_proxy_or_credentials() {
+        let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().join("source"),true,Arc::new(|_,_|{})).unwrap();
+        let note=RepositoryNote { repository:"Owner/Unsubscribed".into(),name:"本地名称".into(),description:"不会发给 GitHub".into(),updated_at:now() };
+        core.store.save_repository_note(&note).unwrap();
+        let mut settings=core.store.settings().unwrap(); settings.startup_page="github".into(); settings.startup_github_tab="starred".into(); settings.navigation_order.reverse();
+        settings.proxy=crate::proxy::ProxySettings { mode:"manual".into(),url:"http://127.0.0.1:9".into(),username:"fixture-proxy-user".into() };
+        core.store.save_settings(&settings).unwrap(); core.proxy.configure(settings.proxy.clone(),Some("fixture-only-password".into())).unwrap();
+        let export=core.export_library().unwrap(); let value:Value=serde_json::from_str(&export).unwrap();
+        assert!(value["settings"].get("proxy").is_none()); assert!(!export.contains("fixture-proxy-user")); assert!(!export.contains("fixture-only-password"));
+        assert_eq!(value["repositoryNotes"][0]["repository"],"owner/unsubscribed");
+        let target=Core::new(dir.path().join("target"),true,Arc::new(|_,_|{})).unwrap();
+        let mut target_settings=target.store.settings().unwrap(); target_settings.proxy.mode="direct".into(); target.store.save_settings(&target_settings).unwrap();
+        let result=target.import_library(&export).unwrap(); assert_eq!(result["imported"],0); assert_eq!(result["notesImported"],1);
+        assert_eq!(target.store.settings().unwrap().startup_page,"github"); assert_eq!(target.store.settings().unwrap().startup_github_tab,"starred");
+        assert_eq!(target.store.settings().unwrap().navigation_order,settings.navigation_order); assert_eq!(target.store.settings().unwrap().proxy.mode,"direct");
+        assert_eq!(target.store.repository_notes().unwrap()[0].name,"本地名称");
+        let mut old=value; old.as_object_mut().unwrap().remove("repositoryNotes");
+        for key in ["startupPage","startupGithubTab","navigationOrder"] {old["settings"].as_object_mut().unwrap().remove(key);}
+        target.import_library(&old.to_string()).unwrap(); assert_eq!(target.store.settings().unwrap().startup_page,"github");
+        assert_eq!(target.store.repository_notes().unwrap().len(),1);
+    }
+    #[test] fn imports_keep_newer_notes_and_reject_invalid_notes_before_writing() {
+        let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().into(),true,Arc::new(|_,_|{})).unwrap();
+        let note=RepositoryNote { repository:"owner/repo".into(),name:"最新备注".into(),description:String::new(),updated_at:"2026-01-02T00:00:00Z".into() };
+        core.store.save_repository_note(&note).unwrap();
+        let mut value:Value=serde_json::from_str(&core.export_library().unwrap()).unwrap();
+        value["repositoryNotes"][0]["name"]=json!("旧备注"); value["repositoryNotes"][0]["updatedAt"]=json!("2026-01-01T00:00:00Z");
+        core.import_library(&value.to_string()).unwrap(); assert_eq!(core.store.repository_notes().unwrap()[0].name,"最新备注");
+        value["projects"]=json!([{"repository":"owner/new","channel":"stable","preference":"auto","assetPattern":null}]);
+        value["repositoryNotes"][0]["name"]=json!("超".repeat(81)); assert!(core.import_library(&value.to_string()).is_err());
+        assert!(core.store.projects().unwrap().is_empty());
+    }
+    #[test] fn refreshed_repository_metadata_does_not_touch_local_notes() {
+        let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().into(),true,Arc::new(|_,_|{})).unwrap();
+        let note=RepositoryNote { repository:"owner/repo".into(),name:"我的备注".into(),description:"我自己的描述".into(),updated_at:now() };
+        core.store.save_repository_note(&note).unwrap();
+        let mut project=empty_project("owner".into(),"repo".into(),"stable".into(),"auto".into());
+        metadata(&mut project,&json!({"private":false,"name":"upstream-name","description":"upstream description","default_branch":"main"})).unwrap();
+        core.store.put_project(&project).unwrap(); assert_eq!(core.store.repository_notes().unwrap(),vec![note]);
+        core.store.remove_project(&project.id).unwrap(); assert_eq!(core.store.repository_notes().unwrap().len(),1);
     }
     #[test] fn import_rejects_secrets_and_unknown_schema() {
         let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().into(),true,Arc::new(|_,_|{})).unwrap();

@@ -15,6 +15,7 @@ data/
 private/
 .local/
 artifacts/
+.artifacts/
 test-results/
 playwright-report/
 *.log

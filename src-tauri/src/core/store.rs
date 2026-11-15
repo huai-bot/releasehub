@@ -1,4 +1,4 @@
-use super::models::{now, BuildTask, DownloadRecord, Project, Settings};
+use super::models::{now, BuildTask, DownloadRecord, Project, RepositoryNote, Settings};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{path::Path, sync::Mutex};
@@ -15,7 +15,9 @@ impl Store {
             CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS preferences (id TEXT PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS download_digests (id TEXT PRIMARY KEY, digest TEXT);
-            PRAGMA user_version=1;").map_err(storage_error)?;
+            CREATE TABLE IF NOT EXISTS repository_notes (repository TEXT PRIMARY KEY COLLATE NOCASE,
+                name TEXT NOT NULL, description TEXT NOT NULL, updated_at TEXT NOT NULL);
+            PRAGMA user_version=2;").map_err(storage_error)?;
         let store = Self { db: Mutex::new(db) };
         for mut d in store.downloads()? {
             if ["queued", "downloading"].contains(&d.status.as_str()) {
@@ -83,6 +85,52 @@ impl Store {
     pub fn tasks(&self) -> Result<Vec<BuildTask>, String> { self.list("tasks") }
     pub fn task(&self, id: &str) -> Result<BuildTask, String> { self.get("tasks", id) }
     pub fn put_task(&self, task: &BuildTask) -> Result<(), String> { self.put("tasks", &task.id, task) }
+    pub fn repository_notes(&self) -> Result<Vec<RepositoryNote>, String> {
+        let db = self.db.lock().map_err(storage_error)?;
+        let mut stmt = db.prepare("SELECT repository,name,description,updated_at FROM repository_notes ORDER BY repository").map_err(storage_error)?;
+        let rows = stmt.query_map([], |row| Ok(RepositoryNote { repository: row.get(0)?, name: row.get(1)?,
+            description: row.get(2)?, updated_at: row.get(3)? })).map_err(storage_error)?;
+        rows.map(|row| row.map_err(storage_error)).collect()
+    }
+    pub fn save_repository_note(&self, note: &RepositoryNote) -> Result<Option<RepositoryNote>, String> {
+        let note = note.clone().normalized()?;
+        let db = self.db.lock().map_err(storage_error)?;
+        if note.name.is_empty() && note.description.is_empty() {
+            db.execute("DELETE FROM repository_notes WHERE repository=?1", [&note.repository]).map_err(storage_error)?;
+            return Ok(None);
+        }
+        db.execute("INSERT INTO repository_notes(repository,name,description,updated_at) VALUES(?1,?2,?3,?4)
+            ON CONFLICT(repository) DO UPDATE SET name=excluded.name,description=excluded.description,updated_at=excluded.updated_at",
+            params![note.repository, note.name, note.description, note.updated_at]).map_err(storage_error)?;
+        Ok(Some(note))
+    }
+    pub fn import_library(&self, projects: &[Project], notes: &[RepositoryNote], settings: &Settings) -> Result<(usize, usize, usize), String> {
+        settings.validate()?;
+        let mut db = self.db.lock().map_err(storage_error)?;
+        let tx = db.transaction().map_err(storage_error)?;
+        let (mut imported, mut skipped, mut notes_imported) = (0, 0, 0);
+        for project in projects {
+            let exists: i64 = tx.query_row("SELECT count(*) FROM projects WHERE lower(json_extract(json,'$.owner'))=lower(?1) AND lower(json_extract(json,'$.repo'))=lower(?2)",
+                params![project.owner, project.repo], |row| row.get(0)).map_err(storage_error)?;
+            if exists > 0 { skipped += 1; continue; }
+            tx.execute("INSERT INTO projects(id,json) VALUES(?1,?2)", params![project.id, serde_json::to_string(project).map_err(storage_error)?]).map_err(storage_error)?;
+            imported += 1;
+        }
+        for note in notes {
+            let note = note.clone().normalized()?;
+            if note.name.is_empty() && note.description.is_empty() { continue; }
+            let previous: Option<String> = tx.query_row("SELECT updated_at FROM repository_notes WHERE repository=?1", [&note.repository], |row| row.get(0)).optional().map_err(storage_error)?;
+            if previous.as_ref().is_some_and(|old| chrono::DateTime::parse_from_rfc3339(old).ok() >= chrono::DateTime::parse_from_rfc3339(&note.updated_at).ok()) { continue; }
+            tx.execute("INSERT INTO repository_notes(repository,name,description,updated_at) VALUES(?1,?2,?3,?4)
+                ON CONFLICT(repository) DO UPDATE SET name=excluded.name,description=excluded.description,updated_at=excluded.updated_at",
+                params![note.repository, note.name, note.description, note.updated_at]).map_err(storage_error)?;
+            notes_imported += 1;
+        }
+        tx.execute("INSERT INTO preferences(id,json) VALUES('settings',?1) ON CONFLICT(id) DO UPDATE SET json=excluded.json",
+            [serde_json::to_string(settings).map_err(storage_error)?]).map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok((imported, skipped, notes_imported))
+    }
     pub fn settings(&self) -> Result<Settings, String> {
         let db = self.db.lock().map_err(storage_error)?;
         let json: Option<String> = db.query_row("SELECT json FROM preferences WHERE id='settings'", [], |r| r.get(0)).optional().map_err(storage_error)?;
@@ -107,6 +155,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap(); let s = Store::new(&dir.path().join("db.sqlite")).unwrap();
         let mut settings = s.settings().unwrap(); settings.auto_download = true;
         s.save_settings(&settings).unwrap(); assert!(s.settings().unwrap().auto_download);
+    }
+    #[test] fn old_database_settings_and_notes_survive_portable_reopen() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("db.sqlite"); let store = Store::new(&path).unwrap();
+        let mut old = serde_json::to_value(Settings::default()).unwrap();
+        for key in ["startupPage", "startupGithubTab", "navigationOrder", "proxy"] { old.as_object_mut().unwrap().remove(key); }
+        store.put("preferences", "settings", &old).unwrap(); assert_eq!(store.settings().unwrap().startup_page, "home");
+        let mut note = RepositoryNote { repository: "Owner/Repo".into(), name: "我的名称".into(), description: "我的描述".into(), updated_at: now() };
+        store.save_repository_note(&note).unwrap(); note.repository = "OWNER/REPO".into(); note.name = "新名称".into();
+        store.save_repository_note(&note).unwrap(); assert_eq!(store.repository_notes().unwrap().len(), 1);
+        let mut settings = store.settings().unwrap(); settings.startup_page = "github".into(); settings.startup_github_tab = "feed".into(); settings.navigation_order.reverse();
+        store.save_settings(&settings).unwrap(); drop(store);
+        let moved = dir.path().join("portable.sqlite"); std::fs::copy(path, &moved).unwrap();
+        let reopened = Store::new(&moved).unwrap();
+        assert_eq!(reopened.repository_notes().unwrap()[0].name, "新名称");
+        assert_eq!(reopened.settings().unwrap().navigation_order, settings.navigation_order);
+        assert_eq!(reopened.settings().unwrap().startup_github_tab, "feed");
+        note.name.clear(); note.description.clear(); assert!(reopened.save_repository_note(&note).unwrap().is_none());
+        assert!(reopened.repository_notes().unwrap().is_empty());
     }
     #[test]fn restart_keeps_interrupted_work_recoverable(){
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();

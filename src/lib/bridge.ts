@@ -3,8 +3,8 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isDownloadRecord } from './download-state';
 import type {
   AddProjectInput, AgentConnection, AgentIntegration, BuildTask, CheckResult, DownloadRecord,
-  GithubActivityPage, GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubRepositoryTab, GithubStatus,
-  InstallResult, ManagedVersion, Project, ProjectChanges, Settings, Snapshot,
+  GithubActivityPage, GithubFeedPage, GithubListRepositoryPage, GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubRepositoryTab, GithubStatus, GithubUserList,
+  InstallResult, ManagedVersion, Project, ProjectChanges, ProxySettings, ProxyTestResult, RepositoryNote, Settings, Snapshot,
 } from './types';
 
 /** Keep every desktop operation behind the one audited host command. */
@@ -23,7 +23,7 @@ export interface Actions {
   activate_managed_version: { payload: { projectId: string; downloadId: string; confirmed: true }; result: Project };
   save_settings: { payload: { settings: Partial<Settings> }; result: Settings };
   export_library: { payload: Record<string, never>; result: string };
-  import_library: { payload: { contents: string }; result: { imported: number; skipped: number } };
+  import_library: { payload: { contents: string }; result: { imported: number; skipped: number; notesImported: number } };
   create_build_task: { payload: { projectId: string; sourceRef?: string; instructions?: string }; result: BuildTask };
   cancel_build_task: { payload: { id: string }; result: BuildTask };
   list_build_tasks: { payload: Record<string, never>; result: BuildTask[] };
@@ -34,14 +34,19 @@ export interface Actions {
   };
   pick_directory: { payload: Record<string, never>; result: string | null };
   export_library_file: { payload: Record<string, never>; result: { path: string } | null };
-  import_library_file: { payload: Record<string, never>; result: { imported: number; skipped: number } | null };
+  import_library_file: { payload: Record<string, never>; result: { imported: number; skipped: number; notesImported: number } | null };
   open_url: { payload: { url: string }; result: null };
   open_download: { payload: { id: string }; result: null };
   open_data_directory: { payload: Record<string, never>; result: null };
   open_managed_version: { payload: { projectId: string; downloadId: string }; result: null };
   get_agent_integration: { payload: Record<string, never>; result: AgentIntegration };
+  get_agent_diagnostic: { payload: { projectId: string }; result: Record<string, unknown> };
+  save_proxy: { payload: { proxy: ProxySettings; password?: string }; result: Settings };
+  test_proxy: { payload: { proxy?: ProxySettings; password?: string }; result: ProxyTestResult };
+  get_repository_notes: { payload: Record<string, never>; result: RepositoryNote[] };
+  save_repository_note: { payload: { repository: string; name: string; description: string }; result: RepositoryNote | null };
   github_status: { payload: Record<string, never>; result: GithubStatus };
-  github_login: { payload: Record<string, never>; result: GithubStatus };
+  github_login: { payload: { lists?: boolean }; result: GithubStatus };
   github_cancel_login: { payload: Record<string, never>; result: GithubStatus };
   github_logout: { payload: Record<string, never>; result: GithubStatus };
   github_repositories: { payload: { tab: GithubRepositoryTab; query: string; page: number }; result: GithubRepositoryPage };
@@ -49,6 +54,17 @@ export interface Actions {
   github_set_star: { payload: { repository: string; starred: boolean; confirmed: true }; result: { starred: boolean } };
   github_update_repository: { payload: { repository: string; description: string; homepage: string; confirmed: true }; result: GithubRepository };
   github_activity: { payload: { page: number }; result: GithubActivityPage };
+  github_lists: { payload: Record<string, never>; result: GithubUserList[] };
+  github_save_list: { payload: { id?: string; name: string; description: string; confirmed: true }; result: GithubUserList };
+  github_delete_list: { payload: { id: string; confirmed: true }; result: null };
+  github_list_repositories: { payload: { listId: string; cursor?: string; query?: string }; result: GithubListRepositoryPage };
+  github_repository_lists: { payload: { repository: string }; result: { listIds: string[] } };
+  github_assign_lists: { payload: { repositories: string[]; listIds: string[]; mode: 'add' | 'remove' | 'replace'; confirmed: true }; result: { updated: number } };
+  feed_status: { payload: Record<string, never>; result: GithubFeedPage };
+  feed_connect: { payload: Record<string, never>; result: GithubFeedPage };
+  feed_refresh: { payload: Record<string, never>; result: GithubFeedPage };
+  feed_more: { payload: Record<string, never>; result: GithubFeedPage };
+  feed_disconnect: { payload: Record<string, never>; result: GithubFeedPage };
   set_github_token: { payload: { token: string }; result: null };
   reveal_agent_connection: { payload: Record<string, never>; result: AgentConnection };
   rotate_agent_token: { payload: Record<string, never>; result: AgentConnection };

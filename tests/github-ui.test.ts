@@ -10,6 +10,10 @@ import type { GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, Gi
 
 const { dispatchMock } = vi.hoisted(() => ({ dispatchMock: vi.fn() }));
 vi.mock('../src/lib/bridge', () => ({ dispatch: dispatchMock, desktopAvailable: () => true, watchChanges: async () => () => {} }));
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({
+  isMaximized: async () => false, onResized: async () => () => {}, setTheme: async () => {},
+  minimize: async () => {}, toggleMaximize: async () => {}, close: async () => {},
+}) }));
 let target: HTMLDivElement;
 let cleanup: (() => Promise<void>) | null;
 const onopen = vi.fn();
@@ -144,16 +148,54 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
     failed = false; await click('重试这一页'); expect(target.textContent).toContain('demo/alpha');
   });
 
-  it('keeps AI disabled by default and only copies key-free MCP configuration when enabled', async () => {
-    const snapshot = createPreviewSnapshot(); const onintegration = vi.fn(async () => createPreviewAgentIntegration()); const onsave = vi.fn();
-    let instance = mount(AiConnection, { target, props: { settings: snapshot.settings, runtime: snapshot.runtime, busy: false, preview: false, onsave, onintegration, oncopy } });
-    cleanup = async () => { await unmount(instance); }; await settle();
-    expect(onintegration).not.toHaveBeenCalled(); expect(target.querySelector('[role="switch"]')!.getAttribute('aria-checked')).toBe('false');
-    await cleanup();
-    instance = mount(AiConnection, { target, props: { settings: { ...snapshot.settings, agentEnabled: true }, runtime: { ...snapshot.runtime, agent: { ...snapshot.runtime.agent, enabled: true } }, busy: false, preview: false, onsave, onintegration, oncopy } }); await settle();
-    expect(onintegration).toHaveBeenCalledOnce(); await click('复制配置'); expect(oncopy).toHaveBeenLastCalledWith(createPreviewAgentIntegration().claudeConfig);
-    await click('Codex'); await click('复制配置'); expect(oncopy).toHaveBeenLastCalledWith(createPreviewAgentIntegration().codexConfig);
-    expect(target.querySelector('input[type="password"]')).toBeNull(); expect(target.textContent).not.toContain('重新生成密钥');
+  describe('AiConnection information sharing', () => {
+    it('starts off and copies all five platform formats plus the same-executable CLI command', async () => {
+      const snapshot = createPreviewSnapshot(); const config = createPreviewAgentIntegration();
+      const onintegration = vi.fn(async () => config); const onsave = vi.fn();
+      let instance = mount(AiConnection, { target, props: { settings: snapshot.settings, runtime: snapshot.runtime, busy: false, preview: false, onsave, onintegration, oncopy } });
+      cleanup = async () => { await unmount(instance); }; await settle();
+      expect(onintegration).not.toHaveBeenCalled(); expect(target.querySelector('[role="switch"]')!.getAttribute('aria-checked')).toBe('false');
+      await click('开启软件资料连接'); expect(onsave).toHaveBeenLastCalledWith({ agentEnabled: true });
+      await cleanup();
+      instance = mount(AiConnection, { target, props: { settings: { ...snapshot.settings, agentEnabled: true }, runtime: { ...snapshot.runtime, agent: { ...snapshot.runtime.agent, enabled: true } }, busy: false, preview: false, onsave, onintegration, oncopy } }); await settle();
+      expect(onintegration).toHaveBeenCalledOnce(); expect(button('通用 JSON').getAttribute('aria-pressed')).toBe('true');
+      for (const [label, value] of [['通用 JSON', config.genericConfig], ['Claude', config.claudeConfig], ['Codex', config.codexConfig], ['Cursor', config.cursorConfig], ['VS Code', config.vscodeConfig]]) {
+        await click(label); await click('复制配置'); expect(oncopy).toHaveBeenLastCalledWith(value);
+        expect(target.querySelector<HTMLTextAreaElement>('#mcp-client-config')!.value).toBe(value);
+      }
+      target.querySelector<HTMLDetailsElement>('.connection-detail')!.open = true;
+      await click('复制查询命令'); expect(oncopy).toHaveBeenLastCalledWith(`${config.cliCommand} list --json`);
+      expect(target.textContent).toContain('纯云端连接无法直接访问这台电脑');
+      expect(target.querySelector('input[type="password"]')).toBeNull(); expect(target.textContent).not.toContain('重新生成密钥');
+    });
+
+    it('retries unavailable configuration and validates the local port before saving', async () => {
+      const snapshot = createPreviewSnapshot(); const onsave = vi.fn();
+      const onintegration = vi.fn().mockRejectedValueOnce(new Error('连接未就绪，请重新读取。')).mockResolvedValue(createPreviewAgentIntegration());
+      const instance = mount(AiConnection, { target, props: { settings: { ...snapshot.settings, agentEnabled: true }, runtime: { ...snapshot.runtime, agent: { ...snapshot.runtime.agent, enabled: true } }, busy: false, preview: false, onsave, onintegration, oncopy } });
+      cleanup = async () => { await unmount(instance); }; await settle();
+      expect(target.querySelector('[role="alert"]')!.textContent).toContain('连接未就绪');
+      await click('重新读取'); expect(onintegration).toHaveBeenCalledTimes(2); expect(button('复制配置').disabled).toBe(false);
+      target.querySelector<HTMLDetailsElement>('.connection-advanced')!.open = true;
+      await input('#ai-agent-port', '80'); target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle();
+      expect(onsave).not.toHaveBeenCalled(); expect(target.querySelector('#agent-port-error')!.textContent).toContain('1024 到 65535');
+      await input('#ai-agent-port', '47832'); target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle();
+      expect(onsave).toHaveBeenCalledWith({ agentPort: 47832 }); expect(target.querySelector('#agent-port-error')).toBeNull();
+    });
+
+    it('keeps preview controls inert and drops a configuration response after unmount', async () => {
+      const snapshot = createPreviewSnapshot(); const onintegration = vi.fn(async () => createPreviewAgentIntegration()); const onsave = vi.fn();
+      let instance = mount(AiConnection, { target, props: { settings: snapshot.settings, runtime: snapshot.runtime, busy: false, preview: true, onsave, onintegration, oncopy } });
+      cleanup = async () => { await unmount(instance); }; await settle();
+      expect(button('开启软件资料连接').disabled).toBe(true); expect(button('应用').disabled).toBe(true);
+      await click('查看配置示例'); expect(onintegration).not.toHaveBeenCalled();
+      expect(button('复制配置').disabled).toBe(true); expect(target.querySelector<HTMLTextAreaElement>('#mcp-client-config')!.value).toContain('releasehub-mcp.exe');
+      await cleanup(); const late = deferred<ReturnType<typeof createPreviewAgentIntegration>>();
+      instance = mount(AiConnection, { target, props: { settings: { ...snapshot.settings, agentEnabled: true }, runtime: { ...snapshot.runtime, agent: { ...snapshot.runtime.agent, enabled: true } }, busy: false, preview: false, onsave, onintegration: () => late.promise, oncopy } }); await settle();
+      expect(target.querySelector('[role="status"]')!.textContent).toContain('正在准备');
+      await cleanup(); cleanup = null; late.resolve(createPreviewAgentIntegration()); await settle();
+      expect(target.textContent).toBe(''); expect(oncopy).not.toHaveBeenCalled();
+    });
   });
 
   it('adds a public repository via add_project without downloads and has no normal task-creation UI', async () => {
@@ -161,7 +203,7 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
     dispatchMock.mockImplementation(async (action: string) => action === 'snapshot' ? snapshot : action === 'add_project' ? { ...snapshot.projects[0], id: 'new-project', owner: 'demo', repo: 'alpha' } : base(action));
     const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
     expect(target.textContent).not.toContain('Agent 任务'); expect(target.textContent).not.toContain('创建编译任务');
-    const nav = [...target.querySelectorAll<HTMLButtonElement>('nav button')].find((item) => item.textContent?.trim() === 'GitHub')!; nav.click(); await settle();
+    const nav = [...target.querySelectorAll<HTMLButtonElement>('nav button')].find((item) => item.querySelector('span')?.textContent === 'GitHub')!; nav.click(); await settle();
     await click('加入软件库');
     expect(dispatchMock).toHaveBeenCalledWith('add_project', { input: { repository: 'demo/alpha', channel: 'stable', preference: 'auto' } });
     expect(dispatchMock.mock.calls.some(([action]) => ['check_updates', 'download_asset', 'install_download', 'create_build_task', 'reveal_agent_connection', 'rotate_agent_token'].includes(action))).toBe(false);

@@ -11,7 +11,7 @@ const MAX_API_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone)]
 struct Cached { json: Value, etag: Option<String>, until: Instant }
 pub struct Github {
-    client: Client,
+    proxy: Arc<crate::proxy::ProxyState>,
     token: RwLock<Option<String>>,
     service: RwLock<Option<Arc<crate::github::GithubService>>>,
     cache: Mutex<HashMap<String, Cached>>,
@@ -94,12 +94,14 @@ fn api_resource_available(status:StatusCode)->Result<bool,String> {
     }
 }
 impl Github {
-    pub fn new() -> Result<Self, String> {
-        let client = Client::builder().user_agent(concat!("ReleaseHub/", env!("CARGO_PKG_VERSION"), " public-release-manager"))
-            .redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(45)).build().map_err(|_| "网络服务初始化失败".to_string())?;
-        Ok(Self { client, token:RwLock::new(None), service:RwLock::new(None), cache:Mutex::new(HashMap::new()),
+    pub fn new(proxy: Arc<crate::proxy::ProxyState>) -> Result<Self, String> {
+        Ok(Self { proxy, token:RwLock::new(None), service:RwLock::new(None), cache:Mutex::new(HashMap::new()),
             request_slots:Semaphore::new(3), next_request:Mutex::new(Instant::now()), authorization_changed:Notify::new() })
+    }
+    fn client(&self) -> Result<Client, String> {
+        self.proxy.client_builder()?.user_agent(concat!("ReleaseHub/", env!("CARGO_PKG_VERSION"), " public-release-manager"))
+            .redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(45)).build().map_err(|_| "网络服务初始化失败".to_string())
     }
     pub(crate) fn set_service(&self, service: Arc<crate::github::GithubService>) {
         if let Ok(mut current) = self.service.write() { *current = Some(service); }
@@ -155,7 +157,7 @@ impl Github {
         for attempt in 0..3 {
             self.wait_for_request().await?;
             let token=self.token.read().map_err(|_| "凭据读取失败".to_string())?.clone();
-            let mut request=self.client.get(url.clone()).header(header::ACCEPT,"application/vnd.github+json")
+            let mut request=self.client()?.get(url.clone()).header(header::ACCEPT,"application/vnd.github+json")
                 .header("X-GitHub-Api-Version","2022-11-28");
             if let Some(t)=&token { request=request.bearer_auth(t); }
             if let Some(etag)=cached.as_ref().and_then(|c| c.etag.as_ref()) { request=request.header(header::IF_NONE_MATCH,etag); }
@@ -290,7 +292,7 @@ mod tests {
         }
     }
     #[tokio::test] async fn changed_authorization_wakes_wait_and_rejects_stale_cooldown() {
-        let github=Github::new().unwrap();
+        let github=Github::new(Arc::new(crate::proxy::ProxyState::new(crate::proxy::ProxySettings { mode: "direct".into(), ..Default::default() }, None).unwrap())).unwrap();
         github.cache.lock().unwrap().insert("test".into(),Cached{json:serde_json::json!({}),etag:None,until:Instant::now()+Duration::from_secs(60)});
         assert!(github.defer_requests(&None,30).unwrap());
         let waiting=github.wait_for_request();tokio::pin!(waiting);
@@ -303,7 +305,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1),github.wait_for_request()).await.unwrap().unwrap();
     }
     #[tokio::test] async fn stable_uses_author_latest_while_preview_uses_publication_time() {
-        let github=Github::new().unwrap();let mut project=test_project("owner","app");
+        let github=Github::new(Arc::new(crate::proxy::ProxyState::new(crate::proxy::ProxySettings { mode: "direct".into(), ..Default::default() }, None).unwrap())).unwrap();let mut project=test_project("owner","app");
         let release=|id:u64,tag:&str,date:&str,prerelease:bool|serde_json::json!({"id":id,"tag_name":tag,"name":tag,"draft":false,
             "prerelease":prerelease,"published_at":date,"html_url":format!("https://github.com/owner/app/releases/tag/{tag}"),"assets":[]});
         let latest=release(1,"v2.0.0","2026-01-01T00:00:00Z",false);

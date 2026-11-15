@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-host-dispatch"
+description = "Allow the trusted main application window to use its audited command dispatcher. Never grant this permission to a remote capability."
+commands.allow = ["dispatch"]

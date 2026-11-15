@@ -111,7 +111,7 @@ impl Core {
         if cancel.load(Ordering::Acquire){return Err("下载已取消".into());}
         let url=network::trusted_download_url(&record.url)?;
         // This client intentionally has no API token, default authorization header, or cookie store.
-        let client=reqwest::Client::builder().user_agent("ReleaseHub/0.1 artifact-download")
+        let client=self.proxy.client_builder()?.user_agent(concat!("ReleaseHub/", env!("CARGO_PKG_VERSION"), " artifact-download"))
             .connect_timeout(Duration::from_secs(15)).timeout(Duration::from_secs(3600))
             .redirect(reqwest::redirect::Policy::custom(|attempt|{
                 if attempt.previous().len()>=5||network::trusted_download_url(attempt.url().as_str()).is_err(){attempt.error("不可信下载跳转")}else{attempt.follow()}

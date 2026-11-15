@@ -10,9 +10,11 @@
 //! --paginate, and rely on gh's cross-host credential protection. gh has no switch
 //! to disable every redirect; do not describe that transport as strictly no-follow.
 
-use reqwest::{header, Client};
+use crate::proxy::ProxyState;
+use reqwest::header;
 use serde_json::{json, Value};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -65,7 +67,7 @@ struct Backend {
     auth_root: PathBuf,
     config_dir: PathBuf,
     gh_path: Option<PathBuf>,
-    client: Option<Client>,
+    proxy: Arc<ProxyState>,
     configuration_error: Option<String>,
 }
 
@@ -330,7 +332,7 @@ enum AuthStatusError {
 impl GithubService {
     /// `auth_root` must be an absolute host-selected local authorization directory.
     /// `gh_path` is the host-resolved official CLI executable; never search PATH here.
-    pub fn new(auth_root: PathBuf, gh_path: Option<PathBuf>) -> Arc<Self> {
+    pub fn new(auth_root: PathBuf, gh_path: Option<PathBuf>, proxy: Arc<ProxyState>) -> Arc<Self> {
         let configuration_error = validate_auth_root(&auth_root)
             .and_then(|_| reject_link_ancestors(&auth_root))
             .err();
@@ -342,22 +344,13 @@ impl GithubService {
         } else {
             (false, None)
         };
-        let client = Client::builder()
-            .https_only(true)
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent(concat!("ReleaseHub/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .ok();
         let config_dir = auth_root.join("github-cli");
         Arc::new(Self {
             backend: Arc::new(Backend {
                 auth_root,
                 config_dir,
                 gh_path,
-                client,
+                proxy,
                 configuration_error,
             }),
             session: Arc::new(StdMutex::new(Session {
@@ -385,8 +378,13 @@ impl GithubService {
                 Ok(self.status_value())
             }
             "github_login" => {
-                fields(&payload, &[])?;
-                self.start_login().await;
+                fields(&payload, &["lists"])?;
+                let lists = match payload.get("lists") {
+                    None | Some(Value::Bool(false)) => false,
+                    Some(Value::Bool(true)) => true,
+                    _ => return Err("GitHub 授权选项不正确。".into()),
+                };
+                self.start_login(lists).await;
                 Ok(self.status_value())
             }
             "github_cancel_login" => {
@@ -426,6 +424,12 @@ impl GithubService {
             "github_set_star" => self.set_star(&payload).await,
             "github_update_repository" => self.update_repository(&payload).await,
             "github_activity" => self.activity(&payload).await,
+            "github_lists" => self.lists(&payload).await,
+            "github_save_list" => self.save_list(&payload).await,
+            "github_delete_list" => self.delete_list(&payload).await,
+            "github_list_repositories" => self.list_repositories(&payload).await,
+            "github_assign_lists" => self.assign_lists(&payload).await,
+            "github_repository_lists" => self.repository_lists(&payload).await,
             _ => Err("不支持这个 GitHub 操作。".into()),
         }
     }
@@ -536,7 +540,7 @@ impl GithubService {
         Ok(account)
     }
 
-    async fn start_login(&self) {
+    async fn start_login(&self, lists: bool) {
         let running = self
             .login_task
             .lock()
@@ -547,7 +551,7 @@ impl GithubService {
             return;
         }
         self.stop_login().await;
-        if self.has_consent() && self.authenticated_account().await.is_ok() {
+        if !lists && self.has_consent() && self.authenticated_account().await.is_ok() {
             return;
         }
         let prepared = if !self.backend.available() {
@@ -594,7 +598,7 @@ impl GithubService {
             return;
         }
         let task = tokio::spawn(async move {
-            login_worker(backend, session, generation, receiver).await;
+            login_worker(backend, session, generation, receiver, lists).await;
         });
         *slot = Some(LoginTask { cancel, task });
     }
@@ -978,6 +982,7 @@ impl Backend {
             .env("TERM", "dumb")
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("GH_NO_EXTENSION_UPDATE_NOTIFIER", "1");
+        self.proxy.apply_command(&mut command)?;
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         Ok(command)
@@ -1035,7 +1040,14 @@ impl Backend {
             if method != Method::Get || !endpoint.is_public_read() {
                 return Err("请先连接 GitHub 账号。".into());
             }
-            let client = self.client.as_ref().ok_or("无法准备 GitHub 网络连接。")?;
+            let client = self.proxy.client_builder()?
+                .https_only(true)
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(REQUEST_TIMEOUT)
+                .user_agent(concat!("ReleaseHub/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map_err(|_| "无法准备 GitHub 网络连接。")?;
             let mut response = client
                 .get(target)
                 .header(header::ACCEPT, endpoint.accept())
@@ -1113,6 +1125,449 @@ impl Backend {
         }
         Ok(response)
     }
+}
+
+// Every document is compiled into the app. Callers supply validated variables,
+// never GraphQL text, endpoints, headers, or credentials.
+#[derive(Clone, Copy)]
+enum ListOperation {
+    Catalog,
+    Stars,
+    Items,
+    Members,
+    Repository,
+    Create,
+    Update,
+    Delete,
+    Assign,
+}
+
+const LIST_REPOSITORY_FRAGMENT: &str = r#"
+fragment ListRepository on Repository {
+  databaseId nameWithOwner description isPrivate isArchived isFork
+  primaryLanguage { name } stargazerCount forkCount issues(states: OPEN) { totalCount }
+  updatedAt defaultBranchRef { name } homepageUrl repositoryTopics(first: 20) { nodes { topic { name } } }
+  viewerPermission viewerHasStarred
+}"#;
+
+impl ListOperation {
+    fn is_mutation(self) -> bool {
+        matches!(self, Self::Create | Self::Update | Self::Delete | Self::Assign)
+    }
+
+    fn document(self) -> String {
+        let document = match self {
+            Self::Catalog => r#"query ReleaseHubLists($after: String) {
+              viewer { login lists(first: 100, after: $after) {
+                totalCount pageInfo { hasNextPage endCursor }
+                nodes { id name description slug user { login } items(first: 1) { totalCount } }
+              } }
+            }"#,
+            Self::Stars => r#"query ReleaseHubStars($after: String) {
+              viewer { login starredRepositories(first: 100, after: $after, orderBy: {field: STARRED_AT, direction: DESC}) {
+                totalCount pageInfo { hasNextPage endCursor } nodes { ...ListRepository }
+              } }
+            }"#,
+            Self::Items => r#"query ReleaseHubListItems($id: ID!, $after: String) {
+              viewer { login }
+              node(id: $id) { ... on UserList { id user { login } items(first: 100, after: $after) {
+                totalCount pageInfo { hasNextPage endCursor } nodes { ...ListRepository }
+              } } }
+            }"#,
+            Self::Members => r#"query ReleaseHubListMembers($id: ID!, $after: String) {
+              viewer { login }
+              node(id: $id) { ... on UserList { id user { login } items(first: 100, after: $after) {
+                totalCount pageInfo { hasNextPage endCursor }
+                nodes { ... on Repository { id nameWithOwner viewerHasStarred } }
+              } } }
+            }"#,
+            Self::Repository => r#"query ReleaseHubListRepository($owner: String!, $name: String!) {
+              viewer { login }
+              repository(owner: $owner, name: $name) { id nameWithOwner viewerHasStarred }
+            }"#,
+            Self::Create => r#"mutation ReleaseHubCreateList($input: CreateUserListInput!) {
+              createUserList(input: $input) { list { id } }
+            }"#,
+            Self::Update => r#"mutation ReleaseHubUpdateList($input: UpdateUserListInput!) {
+              updateUserList(input: $input) { list { id } }
+            }"#,
+            Self::Delete => r#"mutation ReleaseHubDeleteList($input: DeleteUserListInput!) {
+              deleteUserList(input: $input) { user { login } }
+            }"#,
+            Self::Assign => r#"mutation ReleaseHubAssignLists($input: UpdateUserListsForItemInput!) {
+              updateUserListsForItem(input: $input) { item { ... on Repository { id } } lists { id } }
+            }"#,
+        };
+        if matches!(self, Self::Stars | Self::Items) {
+            format!("{document}\n{LIST_REPOSITORY_FRAGMENT}")
+        } else {
+            document.to_owned()
+        }
+    }
+}
+
+impl Backend {
+    async fn graphql(&self, operation: ListOperation, variables: Value, confirmed: bool) -> Result<Value, String> {
+        if operation.is_mutation() && !confirmed {
+            return Err("请确认要保存的 GitHub 分类操作。".into());
+        }
+        let input = serde_json::to_vec(&json!({ "query": operation.document(), "variables": variables }))
+            .map_err(|_| "无法准备 GitHub 分类请求。")?;
+        let version = format!("X-GitHub-Api-Version: {API_VERSION}");
+        let output = capture(
+            self.command(&[
+                "api", "--hostname", "github.com", "--method", "POST", "--include",
+                "--header", "Accept: application/vnd.github+json", "--header", &version,
+                "--header", "Content-Type: application/json", "--input", "-",
+                "https://api.github.com/graphql",
+            ], true)?,
+            Some(input), MAX_RESPONSE_BYTES + MAX_HEADER_BYTES,
+        ).await?;
+        let response = parse_cli_response(&output.stdout)?;
+        let value = response.json()?;
+        if let Some(errors) = value["errors"].as_array().filter(|errors| !errors.is_empty()) {
+            return Err(graphql_error(errors));
+        }
+        if !output.status.success() {
+            return Err("GitHub 分类请求未完成，请刷新后重试。".into());
+        }
+        value.get("data").filter(|data| data.is_object()).cloned()
+            .ok_or_else(|| "GitHub 分类响应不完整，请重试。".into())
+    }
+
+    async fn list_catalog(&self, login: &str) -> Result<Vec<Value>, String> {
+        let mut result = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut cursor: Option<String> = None;
+        let mut cursors = BTreeSet::new();
+        loop {
+            let data = self.graphql(ListOperation::Catalog, json!({ "after": cursor }), false).await?;
+            check_graphql_viewer(&data, login)?;
+            let connection = &data["viewer"]["lists"];
+            for node in connection_nodes(connection)? {
+                let list = project_user_list(node, login)?;
+                let id = list["id"].as_str().ok_or("GitHub 分类编号缺失。")?.to_owned();
+                if !seen.insert(id) { return Err("GitHub 分类在读取时发生变化，请刷新重试。".into()); }
+                result.push(list);
+            }
+            let next = next_graphql_cursor(connection, &mut cursors)?;
+            if next.is_none() {
+                if result.len() as u64 != connection_total(connection)? {
+                    return Err("GitHub 分类尚未完整读取，请刷新重试。".into());
+                }
+                return Ok(result);
+            }
+            cursor = next;
+        }
+    }
+
+    async fn list_memberships(&self, login: &str, lists: &[Value]) -> Result<ListMemberships, String> {
+        let mut result = ListMemberships::default();
+        for list in lists {
+            let id = list["id"].as_str().ok_or("GitHub 分类编号缺失。")?;
+            let mut cursor: Option<String> = None;
+            let mut cursors = BTreeSet::new();
+            let mut members = BTreeSet::new();
+            loop {
+                let data = self.graphql(ListOperation::Members, json!({ "id": id, "after": cursor }), false).await?;
+                check_graphql_viewer(&data, login)?;
+                check_list_owner(&data["node"], login)?;
+                let connection = &data["node"]["items"];
+                for item in connection_nodes(connection)? {
+                    let repository = RepositoryName::parse(item["nameWithOwner"].as_str().ok_or("GitHub 分类中的仓库信息不完整。")?)?;
+                    let key = repository.full_name().to_ascii_lowercase();
+                    if !members.insert(key.clone()) { return Err("GitHub 分类内容在读取时发生变化，请刷新重试。".into()); }
+                    result.by_repository.entry(key.clone()).or_default().insert(id.to_owned());
+                    if item["viewerHasStarred"].as_bool() == Some(true) { result.starred.insert(key); }
+                }
+                let next = next_graphql_cursor(connection, &mut cursors)?;
+                if next.is_none() {
+                    if members.len() as u64 != connection_total(connection)? {
+                        return Err("GitHub 分类归属尚未完整读取；请刷新后再操作。".into());
+                    }
+                    break;
+                }
+                cursor = next;
+            }
+        }
+        Ok(result)
+    }
+}
+
+#[derive(Default)]
+struct ListMemberships {
+    by_repository: BTreeMap<String, BTreeSet<String>>,
+    starred: BTreeSet<String>,
+}
+
+impl GithubService {
+    async fn lists(&self, payload: &Value) -> Result<Value, String> {
+        fields(payload, &[])?;
+        let account = self.authenticated_account().await?;
+        Ok(json!(self.backend.list_catalog(&account.login).await?))
+    }
+
+    async fn save_list(&self, payload: &Value) -> Result<Value, String> {
+        fields(payload, &["id", "name", "description", "confirmed"])?;
+        require_confirmed(payload)?;
+        let name = list_text(payload, "name", 100, true)?;
+        let description = list_text(payload, "description", 1000, false)?;
+        let id = payload.get("id").map(|value| list_id(value.as_str().ok_or("GitHub 分类编号不正确。")?)).transpose()?;
+        let account = self.authenticated_account().await?;
+        let before = self.backend.list_catalog(&account.login).await?;
+        if let Some(id) = &id { require_owned_list(&before, id)?; }
+        let mut input = json!({ "name": name, "description": description });
+        let (operation, field) = if let Some(id) = id {
+            input["listId"] = json!(id);
+            (ListOperation::Update, "updateUserList")
+        } else { (ListOperation::Create, "createUserList") };
+        let saved = self.backend.graphql(operation, json!({ "input": input }), true).await?;
+        let id = saved[field]["list"]["id"].as_str().ok_or("分类提交后未返回编号，请刷新分类列表。")?;
+        let after = self.backend.list_catalog(&account.login).await
+            .map_err(|error| format!("分类已提交，回读失败：{error} 请先刷新列表。"))?;
+        let list = after.into_iter().find(|list| list["id"].as_str() == Some(id))
+            .ok_or("分类提交后尚未读到结果，请刷新列表。")?;
+        if list["name"].as_str() != Some(name.as_str()) || list["description"].as_str().unwrap_or("") != description {
+            return Err("GitHub 返回的分类名称或说明与提交内容不同，请刷新检查。".into());
+        }
+        Ok(list)
+    }
+
+    async fn delete_list(&self, payload: &Value) -> Result<Value, String> {
+        fields(payload, &["id", "confirmed"])?;
+        require_confirmed(payload)?;
+        let id = list_id(string_field(payload, "id")?)?;
+        let account = self.authenticated_account().await?;
+        let before = self.backend.list_catalog(&account.login).await?;
+        require_owned_list(&before, &id)?;
+        self.backend.graphql(ListOperation::Delete, json!({ "input": { "listId": id } }), true).await?;
+        let after = self.backend.list_catalog(&account.login).await
+            .map_err(|error| format!("删除已提交，回读失败：{error} 请先刷新列表。"))?;
+        if after.iter().any(|list| list["id"].as_str() == Some(&id)) {
+            return Err("GitHub 上仍能读到这个分类，请刷新检查。".into());
+        }
+        Ok(Value::Null)
+    }
+
+    async fn list_repositories(&self, payload: &Value) -> Result<Value, String> {
+        fields(payload, &["listId", "cursor", "query"])?;
+        let requested = string_field(payload, "listId")?;
+        let cursor = cursor_field(payload)?;
+        let query = query_field(payload)?;
+        let account = self.authenticated_account().await?;
+        let unlisted = requested == "unlisted";
+        let all = requested == "all" || unlisted;
+        let memberships = if unlisted {
+            let lists = self.backend.list_catalog(&account.login).await?;
+            Some(self.backend.list_memberships(&account.login, &lists).await?)
+        } else { None };
+        let data = if all {
+            self.backend.graphql(ListOperation::Stars, json!({ "after": cursor }), false).await?
+        } else {
+            let id = list_id(requested)?;
+            self.backend.graphql(ListOperation::Items, json!({ "id": id, "after": cursor }), false).await?
+        };
+        check_graphql_viewer(&data, &account.login)?;
+        if !all { check_list_owner(&data["node"], &account.login)?; }
+        let connection = if all { &data["viewer"]["starredRepositories"] } else { &data["node"]["items"] };
+        let mut items = Vec::new();
+        for item in connection_nodes(connection)? {
+            let repository = project_graphql_repository(item)?;
+            let key = repository["fullName"].as_str().unwrap_or("").to_ascii_lowercase();
+            if memberships.as_ref().is_some_and(|index| index.by_repository.contains_key(&key)) { continue; }
+            if repository_matches(&repository, &query) { items.push(repository); }
+        }
+        let mut cursors: BTreeSet<String> = cursor.into_iter().collect();
+        let end_cursor = next_graphql_cursor(connection, &mut cursors)?;
+        let total = connection_total(connection)?;
+        let total = total.saturating_sub(memberships.as_ref().map_or(0, |index| index.starred.len() as u64));
+        Ok(json!({ "items": items, "endCursor": end_cursor, "hasMore": end_cursor.is_some(), "totalCount": total }))
+    }
+
+    async fn repository_lists(&self, payload: &Value) -> Result<Value, String> {
+        fields(payload, &["repository"])?;
+        let repository = RepositoryName::parse(string_field(payload, "repository")?)?;
+        let account = self.authenticated_account().await?;
+        let lists = self.backend.list_catalog(&account.login).await?;
+        let memberships = self.backend.list_memberships(&account.login, &lists).await?;
+        let ids = memberships.by_repository.get(&repository.full_name().to_ascii_lowercase()).cloned().unwrap_or_default();
+        Ok(json!({ "listIds": ids }))
+    }
+
+    async fn assign_lists(&self, payload: &Value) -> Result<Value, String> {
+        fields(payload, &["repositories", "listIds", "mode", "confirmed"])?;
+        require_confirmed(payload)?;
+        let mode = string_field(payload, "mode")?;
+        if !matches!(mode, "add" | "remove" | "replace") { return Err("请选择添加、移出或替换分类。".into()); }
+        let targets = string_array(payload, "listIds", 1000)?.into_iter().map(|id| list_id(&id)).collect::<Result<BTreeSet<_>, _>>()?;
+        if targets.is_empty() && mode != "replace" { return Err("请至少选择一个分类。".into()); }
+        let names = string_array(payload, "repositories", 100)?;
+        if names.is_empty() { return Err("请至少选择一个仓库。".into()); }
+        let repositories = names.iter().map(|name| RepositoryName::parse(name)).collect::<Result<Vec<_>, _>>()?;
+        let account = self.authenticated_account().await?;
+        let lists = self.backend.list_catalog(&account.login).await?;
+        for id in &targets { require_owned_list(&lists, id)?; }
+        // Resolve every selected repository before the first write, so an invalid
+        // selection cannot cause a half-applied batch.
+        let mut identities = BTreeMap::new();
+        for repository in repositories {
+            let data = self.backend.graphql(ListOperation::Repository, json!({ "owner": repository.owner, "name": repository.name }), false).await?;
+            check_graphql_viewer(&data, &account.login)?;
+            let actual = &data["repository"];
+            let canonical = actual["nameWithOwner"].as_str().ok_or("没有找到所选仓库，请刷新 Stars。")?;
+            if !canonical.eq_ignore_ascii_case(&repository.full_name()) { return Err("仓库名称已变化，请刷新 Stars 后重试。".into()); }
+            if actual["viewerHasStarred"].as_bool() != Some(true) { return Err(format!("请先 Star {}，再整理分类。", repository.full_name())); }
+            let node_id = list_id(actual["id"].as_str().ok_or("GitHub 仓库编号缺失。")?)?;
+            identities.insert(canonical.to_ascii_lowercase(), node_id);
+        }
+        // listIds replaces the ENTIRE set. This scan follows every list and item
+        // cursor; never merge against a cached/first-page-only membership set.
+        let memberships = self.backend.list_memberships(&account.login, &lists).await?;
+        let mut expected = BTreeMap::new();
+        let mut submitted = 0usize;
+        for (name, node_id) in identities {
+            let current = memberships.by_repository.get(&name).cloned().unwrap_or_default();
+            let final_ids = merge_list_ids(&current, &targets, mode);
+            if final_ids != current {
+                let data = self.backend.graphql(ListOperation::Assign, json!({ "input": { "itemId": node_id, "listIds": final_ids } }), true).await
+                    .map_err(|error| format!("已提交 {submitted} 个仓库的分类。{error} 请刷新后再操作。"))?;
+                submitted += 1;
+                let result = &data["updateUserListsForItem"];
+                let returned: BTreeSet<String> = result["lists"].as_array().ok_or("分类提交后未返回归属，请刷新检查。")?
+                    .iter().map(|list| list_id(list["id"].as_str().ok_or("GitHub 分类编号缺失。")?)).collect::<Result<_, _>>()?;
+                if result["item"]["id"].as_str() != Some(&node_id) || returned != final_ids {
+                    return Err(format!("已提交 {submitted} 个仓库，GitHub 返回的归属不同，请刷新分类检查。"));
+                }
+            }
+            expected.insert(name, final_ids);
+        }
+        let after_lists = self.backend.list_catalog(&account.login).await
+            .map_err(|error| format!("已提交 {submitted} 个仓库，回读失败：{error}"))?;
+        let after = self.backend.list_memberships(&account.login, &after_lists).await
+            .map_err(|error| format!("已提交 {submitted} 个仓库，回读失败：{error}"))?;
+        for (name, ids) in expected {
+            if after.by_repository.get(&name).cloned().unwrap_or_default() != ids {
+                return Err(format!("GitHub 回读的 {name} 分类与提交内容不同，请刷新检查。"));
+            }
+        }
+        Ok(json!({ "updated": submitted }))
+    }
+}
+
+fn graphql_error(errors: &[Value]) -> String {
+    let kind = |wanted: &str| errors.iter().any(|error| error["type"].as_str() == Some(wanted) || error["extensions"]["code"].as_str() == Some(wanted));
+    if kind("INSUFFICIENT_SCOPES") || errors.iter().any(|error| error["message"].as_str().is_some_and(|message| message.contains("requires one of the following scopes") || message.contains("requires ['user']"))) {
+        "分类管理需要额外授权，请点击“授权分类管理”后重试。".into()
+    } else if kind("RATE_LIMITED") {
+        "GitHub 请求次数已用完，请稍后再试。".into()
+    } else if kind("FORBIDDEN") {
+        "GitHub 拒绝了分类操作，请点击“授权分类管理”并确认账号权限。".into()
+    } else if kind("NOT_FOUND") {
+        "这个 GitHub 分类或仓库已不存在，请刷新列表。".into()
+    } else {
+        "GitHub 分类操作未完成，请检查名称、说明和账号权限后重试。".into()
+    }
+}
+
+fn check_graphql_viewer(data: &Value, login: &str) -> Result<(), String> {
+    if !data["viewer"]["login"].as_str().is_some_and(|value| value.eq_ignore_ascii_case(login)) {
+        return Err(ACCOUNT_CHANGED.into());
+    }
+    Ok(())
+}
+
+fn check_list_owner(list: &Value, login: &str) -> Result<(), String> {
+    if !list["user"]["login"].as_str().is_some_and(|value| value.eq_ignore_ascii_case(login)) {
+        return Err("这个分类不属于当前账号，或已被删除，请刷新分类。".into());
+    }
+    Ok(())
+}
+
+fn list_id(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.len() > 512 || !value.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'+' | b'/' | b'=')) {
+        return Err("GitHub 分类或仓库编号不正确。".into());
+    }
+    Ok(value.to_owned())
+}
+
+fn cursor_field(payload: &Value) -> Result<Option<String>, String> {
+    match payload.get("cursor") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.is_empty() && value.len() <= 2048 && !value.chars().any(char::is_control) => Ok(Some(value.clone())),
+        _ => Err("GitHub 分页位置不正确，请刷新列表。".into()),
+    }
+}
+
+fn connection_nodes(connection: &Value) -> Result<&Vec<Value>, String> {
+    connection["nodes"].as_array().ok_or_else(|| "GitHub 分类内容不完整，请重试。".into())
+}
+
+fn connection_total(connection: &Value) -> Result<u64, String> {
+    connection["totalCount"].as_u64().ok_or_else(|| "GitHub 分类数量缺失，请重试。".into())
+}
+
+fn next_graphql_cursor(connection: &Value, seen: &mut BTreeSet<String>) -> Result<Option<String>, String> {
+    match connection["pageInfo"]["hasNextPage"].as_bool() {
+        Some(false) => Ok(None),
+        Some(true) => {
+            let cursor = connection["pageInfo"]["endCursor"].as_str().filter(|value| !value.is_empty() && value.len() <= 2048)
+                .ok_or("GitHub 分页位置缺失，请刷新重试。")?;
+            if !seen.insert(cursor.to_owned()) { return Err("GitHub 分页位置重复，请刷新重试。".into()); }
+            Ok(Some(cursor.to_owned()))
+        }
+        None => Err("GitHub 分页信息缺失，请重试。".into()),
+    }
+}
+
+fn list_text(payload: &Value, key: &str, max: usize, required: bool) -> Result<String, String> {
+    let value = string_field(payload, key)?.trim();
+    if (required && value.is_empty()) || value.chars().count() > max || value.chars().any(char::is_control) {
+        return Err(if key == "name" { "分类名称请填写 1–100 个字符。" } else { "分类说明最多 1000 个字符，请使用单段文字。" }.into());
+    }
+    Ok(value.to_owned())
+}
+
+fn string_array(payload: &Value, key: &str, max: usize) -> Result<Vec<String>, String> {
+    let values = payload[key].as_array().filter(|values| values.len() <= max).ok_or("选择数量过多或格式不正确。")?;
+    values.iter().map(|value| value.as_str().map(str::to_owned).ok_or_else(|| "选择内容格式不正确。".into())).collect()
+}
+
+fn require_owned_list(lists: &[Value], id: &str) -> Result<(), String> {
+    if !lists.iter().any(|list| list["id"].as_str() == Some(id)) { return Err("所选分类不属于当前账号或已被删除，请刷新分类。".into()); }
+    Ok(())
+}
+
+fn merge_list_ids(current: &BTreeSet<String>, targets: &BTreeSet<String>, mode: &str) -> BTreeSet<String> {
+    match mode {
+        "add" => current.union(targets).cloned().collect(),
+        "remove" => current.difference(targets).cloned().collect(),
+        _ => targets.clone(),
+    }
+}
+
+fn project_user_list(value: &Value, login: &str) -> Result<Value, String> {
+    check_list_owner(value, login)?;
+    let id = list_id(value["id"].as_str().ok_or("GitHub 分类编号缺失。")?)?;
+    let slug = value["slug"].as_str().filter(|slug| !slug.is_empty()).ok_or("GitHub 分类链接缺失。")?;
+    let mut url = Url::parse("https://github.com").map_err(|_| "无法生成 GitHub 分类链接。")?;
+    url.path_segments_mut().map_err(|_| "无法生成 GitHub 分类链接。")?.extend(["stars", login, "lists", slug]);
+    Ok(json!({
+        "id": id, "name": text(&value["name"], 100), "description": optional_text(&value["description"], 1000),
+        "url": url.as_str(), "itemCount": connection_total(&value["items"])?
+    }))
+}
+
+fn project_graphql_repository(value: &Value) -> Result<Value, String> {
+    let topics: Vec<Value> = value["repositoryTopics"]["nodes"].as_array().map(|nodes| nodes.iter().map(|node| node["topic"]["name"].clone()).collect()).unwrap_or_default();
+    project_repository(&json!({
+        "id": value["databaseId"], "full_name": value["nameWithOwner"], "description": value["description"],
+        "private": value["isPrivate"], "archived": value["isArchived"], "fork": value["isFork"],
+        "language": value["primaryLanguage"]["name"], "stargazers_count": value["stargazerCount"],
+        "forks_count": value["forkCount"], "open_issues_count": value["issues"]["totalCount"],
+        "updated_at": value["updatedAt"], "default_branch": value["defaultBranchRef"]["name"],
+        "homepage": value["homepageUrl"], "topics": topics,
+        "permissions": { "admin": value["viewerPermission"].as_str() == Some("ADMIN") }
+    }), value["viewerHasStarred"].as_bool())
 }
 
 fn repository_read_endpoint(
@@ -1323,12 +1778,15 @@ async fn login_worker(
     session: Arc<StdMutex<Session>>,
     generation: u64,
     mut cancel: oneshot::Receiver<()>,
+    lists: bool,
 ) {
     let deadline = Instant::now() + LOGIN_TIMEOUT;
     let result = async {
         // Piped stdout/stderr and null stdin make this non-interactive. Official
         // gh only prints its device URL in this mode; the host opens DEVICE_URI.
-        let mut command = backend.command(&["auth", "login", "--hostname", "github.com", "--web", "--skip-ssh-key"], false)?;
+        let mut args = vec!["auth", "login", "--hostname", "github.com", "--web", "--skip-ssh-key"];
+        if lists { args.extend(["--scopes", "user"]); }
+        let mut command = backend.command(&args, false)?;
         let mut child = command.spawn().map_err(|_| "无法启动官方 GitHub CLI 登录组件。")?;
         let stdout = child.stdout.take().ok_or("无法读取 GitHub 登录组件响应。")?;
         let stderr = child.stderr.take().ok_or("无法读取 GitHub 登录组件状态。")?;
@@ -1368,7 +1826,7 @@ async fn login_worker(
             state.login = Some(LoginView {
                 state: "complete",
                 user_code: None,
-                message: "已安全连接。断开只影响本应用，不会退出其他 GitHub 工具。".into(),
+                message: "已连接 GitHub。".into(),
             });
         }
         Err(error) => {
@@ -2186,11 +2644,86 @@ mod tests {
         assert!(!update_matches(&before, &after, "修改说明", ""));
     }
 
+    fn test_proxy() -> Arc<ProxyState> {
+        Arc::new(ProxyState::new(crate::proxy::ProxySettings { mode: "direct".into(), ..Default::default() }, None).unwrap())
+    }
+
+    #[test]
+    fn list_membership_merge_preserves_other_categories() {
+        let ids = |values: &[&str]| values.iter().map(|value| (*value).to_owned()).collect::<BTreeSet<_>>();
+        let existing = ids(&["list-a", "list-b"]);
+        assert_eq!(merge_list_ids(&existing, &ids(&["list-c"]), "add"), ids(&["list-a", "list-b", "list-c"]));
+        assert_eq!(merge_list_ids(&existing, &ids(&["list-a"]), "remove"), ids(&["list-b"]));
+        assert_eq!(merge_list_ids(&existing, &ids(&["list-c"]), "replace"), ids(&["list-c"]));
+        assert!(merge_list_ids(&existing, &BTreeSet::new(), "replace").is_empty());
+    }
+
+    #[test]
+    fn lists_use_official_fields_and_fixed_documents() {
+        let list = json!({ "id": "UL_example", "name": "Desktop", "description": null, "slug": "desktop-tools", "user": { "login": "octocat" }, "items": { "totalCount": 137 } });
+        let result = project_user_list(&list, "octocat").unwrap();
+        assert_eq!(result["url"], "https://github.com/stars/octocat/lists/desktop-tools");
+        assert_eq!(result["itemCount"], 137);
+        assert_eq!(result.as_object().unwrap().len(), 5);
+        assert!(project_user_list(&list, "someone-else").is_err());
+        assert!(ListOperation::Members.document().contains("after: $after"));
+        assert!(ListOperation::Members.document().contains("... on Repository"));
+        assert!(ListOperation::Stars.document().contains("starredRepositories(first: 100"));
+        assert!(ListOperation::Assign.document().contains("UpdateUserListsForItemInput!"));
+        assert!(ListOperation::Assign.is_mutation());
+        assert!(!ListOperation::Members.is_mutation());
+    }
+
+    #[test]
+    fn graphql_repository_projection_matches_the_shared_contract() {
+        let result = project_graphql_repository(&json!({
+            "databaseId": 42, "nameWithOwner": "octocat/Hello-World", "description": "Desktop tool",
+            "isPrivate": true, "isArchived": false, "isFork": false, "primaryLanguage": {"name": "Rust"},
+            "stargazerCount": 5, "forkCount": 2, "issues": {"totalCount": 1}, "updatedAt": "2026-01-01T00:00:00Z",
+            "defaultBranchRef": {"name": "main"}, "homepageUrl": "https://example.com", "viewerPermission": "ADMIN",
+            "repositoryTopics": {"nodes": [{"topic": {"name": "desktop"}}]}, "viewerHasStarred": true
+        })).unwrap();
+        assert_eq!(result["id"], 42);
+        assert_eq!(result["fullName"], "octocat/Hello-World");
+        assert_eq!(result["url"], "https://github.com/octocat/Hello-World");
+        assert_eq!(result["topics"], json!(["desktop"]));
+        assert_eq!(result["private"], true);
+        assert_eq!(result["starred"], true);
+        assert_eq!(result["canAdmin"], true);
+    }
+
+    #[test]
+    fn list_pagination_never_silently_accepts_a_missing_or_repeated_cursor() {
+        let mut seen = BTreeSet::new();
+        let page = json!({"pageInfo": {"hasNextPage": true, "endCursor": "page-two"}});
+        assert_eq!(next_graphql_cursor(&page, &mut seen).unwrap(), Some("page-two".into()));
+        assert!(next_graphql_cursor(&page, &mut seen).is_err());
+        assert!(next_graphql_cursor(&json!({"pageInfo": {"hasNextPage": true}}), &mut seen).is_err());
+        assert_eq!(next_graphql_cursor(&json!({"pageInfo": {"hasNextPage": false}}), &mut seen).unwrap(), None);
+        assert!(cursor_field(&json!({"cursor": "bad\nvalue"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn list_writes_require_confirmation_before_any_network() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = GithubService::new(temp.path().join("account"), None, test_proxy());
+        for (action, payload) in [
+            ("github_save_list", json!({"name": "Tools", "description": "", "confirmed": false})),
+            ("github_delete_list", json!({"id": "UL_test", "confirmed": false})),
+            ("github_assign_lists", json!({"repositories": ["octocat/Hello-World"], "listIds": ["UL_test"], "mode": "add", "confirmed": false})),
+        ] {
+            assert!(service.handle(action, payload).await.unwrap_err().contains("确认"));
+        }
+        assert!(service.handle("github_lists", json!({})).await.unwrap_err().contains("连接"));
+        assert!(service.handle("github_login", json!({"lists": "yes"})).await.is_err());
+        assert!(!service.backend.auth_root.exists());
+    }
+
     #[test]
     fn machine_local_marker_is_only_a_boolean_and_cleanup_is_exact() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("account");
-        let service = GithubService::new(root.clone(), None);
+        let service = GithubService::new(root.clone(), None, test_proxy());
         assert!(!root.exists());
         service.backend.ensure_layout().unwrap();
         service.backend.save_connected(true).unwrap();
@@ -2217,7 +2750,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let executable = temp.path().join("not-executed-gh.exe");
         fs::write(&executable, "test fixture; never executed").unwrap();
-        let service = GithubService::new(temp.path().join("account"), Some(executable.clone()));
+        let service = GithubService::new(temp.path().join("account"), Some(executable.clone()), test_proxy());
         let command = service
             .backend
             .command(
@@ -2314,7 +2847,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let executable = temp.path().join("not-executed-gh.exe");
         fs::write(&executable, "test fixture; never executed").unwrap();
-        let service = GithubService::new(temp.path().join("account"), Some(executable));
+        let service = GithubService::new(temp.path().join("account"), Some(executable), test_proxy());
         let status = service.handle("github_status", json!({})).await.unwrap();
         assert_eq!(status.as_object().unwrap().len(), 6);
         assert_eq!(status["available"], true);
@@ -2343,7 +2876,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_does_not_wait_for_the_network_operation_queue() {
         let temp = tempfile::tempdir().unwrap();
-        let service = GithubService::new(temp.path().join("account"), None);
+        let service = GithubService::new(temp.path().join("account"), None, test_proxy());
         let _busy_network = service.operation.lock().await;
         timeout(Duration::from_millis(250), service.shutdown())
             .await
