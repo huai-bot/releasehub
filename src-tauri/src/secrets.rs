@@ -28,6 +28,17 @@ impl SecretStore {
         Ok(Self { instance_id })
     }
 
+    /// Connectors may read an existing identity, but never create an application data directory.
+    pub fn open_existing(directory: &Path) -> Result<Self, String> {
+        let text = fs::read_to_string(directory.join("instance-id"))
+            .map_err(|_| "请先打开 ReleaseHub，并在设置中开启外部 AI 连接。")?;
+        let instance_id = Uuid::parse_str(text.trim())
+            .map_err(|_| "ReleaseHub 数据目录的身份标记无效。")?.to_string();
+        Ok(Self { instance_id })
+    }
+
+    pub fn instance_id(&self) -> &str { &self.instance_id }
+
     #[cfg(windows)]
     fn entry(&self, name: &str) -> Result<keyring::Entry, String> {
         keyring::Entry::new("ReleaseHub", &format!("{}:{name}", self.instance_id))

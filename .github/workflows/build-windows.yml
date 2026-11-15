@@ -42,11 +42,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare the pinned official GitHub login component
+        run: ./scripts/prepare-github-cli.ps1
       - name: Check and test the interface
         run: |
           pnpm check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec vitest run --config tests/github-ui.config.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -54,6 +58,11 @@ jobs:
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the read-only MCP connector
+        run: |
+          cargo build --locked --manifest-path src-tauri/Cargo.toml --release --bin releasehub-mcp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath 'src-tauri/target/release/releasehub-mcp.exe' -Destination 'src-tauri/tools/releasehub-mcp.exe'
       - name: Build executable and installer
         run: |
           node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --ci -- --locked

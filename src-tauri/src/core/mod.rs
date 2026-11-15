@@ -58,6 +58,7 @@ impl Core {
             checks: tokio::sync::Mutex::new(()), _data_lock: data_lock }))
     }
     pub fn set_github_token(&self, token: Option<String>) { self.github.set_token(token); }
+    pub(crate) fn set_github_service(&self, service: Arc<crate::github::GithubService>) { self.github.set_service(service); }
     pub(crate) fn changed(&self) { (self.events)("releasehub:changed", json!({})); }
     pub(crate) fn download_event(&self, record: &DownloadRecord) {
         if let Ok(value) = serde_json::to_value(record) { (self.events)("releasehub:download", value); }

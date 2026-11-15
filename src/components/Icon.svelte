@@ -6,6 +6,7 @@
     ShieldCheck, Shield, CircleAlert, CircleCheck, Info, FileDown, FileUp, Copy,
     Eye, EyeOff, Trash2, ArrowDownToLine, Package, HardDrive, Ban, Clock3,
     SlidersHorizontal, FileText, Code2, ListFilter, Wifi, WifiOff, RotateCcw,
+    Star, GitFork, Activity, UserRound, LogOut, BookOpen, Pencil, LockKeyhole,
   } from '@lucide/svelte';
 
   const icons = {
@@ -19,7 +20,8 @@
     eye: Eye, eyeOff: EyeOff, trash: Trash2, install: ArrowDownToLine, package: Package,
     drive: HardDrive, cancel: Ban, clock: Clock3, sliders: SlidersHorizontal,
     notes: FileText, code: Code2, filter: ListFilter, connected: Wifi, disconnected: WifiOff,
-    retry: RotateCcw,
+    retry: RotateCcw, star: Star, fork: GitFork, activity: Activity, user: UserRound,
+    logout: LogOut, readme: BookOpen, edit: Pencil, private: LockKeyhole,
   };
   let { name, size = 18, class: className = '', strokeWidth = 1.8 }: {
     name: keyof typeof icons; size?: number; class?: string; strokeWidth?: number;

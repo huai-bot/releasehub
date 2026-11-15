@@ -2,9 +2,9 @@
 
 ## Product boundaries
 
-ReleaseHub is a portable-first Windows x64 desktop application. Release monitoring is the first module; external Agent build coordination is a separate module. Future GitHub favorites/modules can use the same project identity/provider/storage layer, but are explicitly out of this version's scope. No generic plugin loader or speculative marketplace is needed.
+ReleaseHub is a portable-first Windows x64 desktop application. Release monitoring, a native GitHub workspace, and a read-only external-AI connector are the current modules. Codex / Claude Code run outside this application and connect through the bundled MCP stdio bridge; no model keys or model execution belong in ReleaseHub. The legacy build workboard remains for compatibility, not as the primary Agent workflow. No generic plugin loader or speculative marketplace is needed.
 
-The UI never talks to arbitrary remote APIs. It invokes one Tauri command `dispatch` with `{ action: string, payload: object }`. The core validates every payload. Public GitHub API access is anonymous unless the user explicitly configures a token in the OS credential manager. The UI's production CSP excludes remote scripts and frames. Rich release notes must be sanitized.
+The UI never talks to arbitrary remote APIs. It invokes one Tauri command `dispatch` with `{ action: string, payload: object }`. The host/core validate every payload. Public GitHub API access is anonymous until the user authorizes the bundled official GitHub CLI; a legacy manually configured token is retained only for compatibility. The UI's production CSP excludes remote scripts and frames. Rich release notes and repository READMEs are sanitized.
 
 ## Shared JSON contract
 
@@ -81,17 +81,39 @@ Install: EXE/MSI opens the official installer only with confirmed=true; do not m
 | open_managed_version | { projectId, downloadId } | null; validate against list_managed_versions, then open that managed directory only; no execution |
 | set_github_token | { token: string } | null (empty removes; OS credential storage, UI clears input) |
 | reveal_agent_connection | {} | AgentConnection (only explicit UI action, token never in logs/export) |
-| rotate_agent_token | {} | AgentConnection |
+| rotate_agent_token | {} | AgentConnection (legacy only; no normal UI entry) |
+| get_agent_integration | {} | AgentIntegration: command, args, claudeConfig, codexConfig, readOnly:true; no secrets |
+| github_status / github_login / github_cancel_login / github_logout | {} | GithubStatus; logout disconnects this application only |
+| github_repositories | { tab:'explore'\|'starred'\|'owned', query:string, page:number } | GithubRepositoryPage; 30/page, page 1..10; owned/starred filter the current page only |
+| github_repository | { repository:'owner/repo' } | GithubRepositoryDetail: repository and bounded README |
+| github_set_star | { repository, starred:boolean, confirmed:true } | { starred:boolean }; explicit 204 plus readback |
+| github_update_repository | { repository, description:string, homepage:string, confirmed:true } | GithubRepository; only two fields, current account/admin checked |
+| github_activity | { page:number } | GithubActivityPage; received_events, not a real-time all-Star feed |
 
 `save_settings` is intercepted by the host to start/stop/rebind the Agent server safely; on failure preserve previous enabled settings and report the error. `snapshot` is enriched by the host. The browser-only development preview must be clearly marked and never pretend real operations succeeded. Production must never silently fall back to demo data.
 
-## Agent interface
+## GitHub authorization and fixed operations
 
-Off by default. Bind only 127.0.0.1, default port 47831, adjustable in Settings. Require `Authorization: Bearer <locally-generated-random-token>` on every request. Reject Origin headers and invalid Host, do not enable CORS, bound request bodies and traffic, and compare token in constant time. Tokens live in the OS credential manager, keyed by a portable instance ID. No credentials accompany portable exports or releases; a new computer reconnects explicitly.
+`src-tauri/src/github.rs` owns `GithubService`, using official gh 2.100.0. Login is `gh auth login --hostname github.com --web --skip-ssh-key`; only its validated short code and the fixed GitHub device URL reach the UI. No borrowed OAuth client ID, token extraction, model configuration, shell interpolation, setup-git or auth logout. Before accepting a login, require exactly one active successful `github.com` account with `tokenSource=keyring`, then verify `/user` agrees. Mutations recheck identity, require confirmation, and validate their result instead of trusting process exit 0.
+
+The host passes `app_local_data_dir/accounts/<instance-id>` as the authorization root even in portable mode. gh config is isolated there, but Windows `gh:github.com` credentials remain shared by account with official CLI users. A non-keyring login is rejected and this application's exact hosts configuration removed without reading its token. Disconnect changes only the local connection flag and clears application UI state.
+
+Every gh call uses a direct executable plus argument array, a fixed constructed `https://api.github.com/...` URL, bounded output, fixed timeout, cleared token/debug/browser overrides, and no automatic write retry. Anonymous reqwest requests disable redirects; signed requests follow gh's own protection (not a claim of universally disabled redirects). No arbitrary endpoint/gh command is exposed. Core's internal optional `repository_api(owner,repo,tail,page)` shares this authorization for metadata/releases/commits/compare GETs without copying credentials. The outer None means disconnected; inner Ok(None) means 404. Signed reads bypass the old anonymous cache/cooldown. Download transport is unchanged and never receives authorization.
+
+## External-AI and legacy Agent interfaces
+
+Off by default. Bind only 127.0.0.1, default port 47831, adjustable in Settings. Require a locally generated bearer credential on every request. Reject Origin headers and invalid Host, do not enable CORS, bound request bodies and traffic, and compare credentials in constant time. Credentials live in Windows keyring under a portable instance ID. No credentials accompany portable exports/releases; a new computer reconnects explicitly.
+
+`tools/releasehub-mcp.exe` is a separate console executable using newline-delimited JSON-RPC over stdin/stdout; it does not initialize a WebView or open the SQLite database. The generated Claude JSON/Codex TOML config contains only this executable and `--data-dir`. A safe `agent-connection.json` descriptor stores schema version and loopback address; the helper reads the separate `agent-read` credential itself. It disables proxies/redirects and accepts only the local nonprivileged HTTP port. No arbitrary path or URL tools are exposed.
+
+Four tools: `releasehub_status`, `releasehub_list_software` (search, updatesOnly, offset, limit 1..100), `releasehub_get_software` (projectId), and `releasehub_saved_context`. They return saved data only, with explicit read-only annotations. The context endpoint projects allowed fields: software/releases/assets, install metadata, download records and selected preferences; never runtime credentials, account/private-repository lists or build-task instructions. Upstream text is untrusted data, not instructions.
+
+The distinct read credential can only GET health/projects/context. Legacy checks/task writes require the separate old credential, cannot be reached through MCP tools, and have no normal creation/secret-reveal UI in 0.2.
 
 Supported routes (lead implements):
 - GET /v1/health (authenticated, safe status only)
 - GET /v1/projects (metadata only)
+- GET /v1/context (allowlisted saved software/download/preferences, read-only)
 - POST /v1/check-updates (non-installing update check)
 - GET /v1/build-tasks
 - POST /v1/build-tasks/:id/claim

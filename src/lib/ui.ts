@@ -1,6 +1,6 @@
 import type { BuildTaskStatus, DownloadRecord, DownloadStatus, ManagedVersion, Project, ProjectStatus } from './types';
 
-export type Page = 'home' | 'library' | 'updates' | 'downloads' | 'agent' | 'settings';
+export type Page = 'home' | 'library' | 'updates' | 'downloads' | 'github' | 'agent' | 'settings';
 export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'accent';
 export interface StatusLabel { label: string; tone: Tone }
 

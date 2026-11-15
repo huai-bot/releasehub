@@ -2,7 +2,7 @@ use super::{models::*, selection};
 use futures_util::StreamExt;
 use reqwest::{header, Client, StatusCode};
 use serde_json::Value;
-use std::{collections::HashMap, sync::{Mutex, RwLock}, time::{Duration, Instant}};
+use std::{collections::HashMap, sync::{Arc, Mutex, RwLock}, time::{Duration, Instant}};
 use tokio::sync::{Notify, Semaphore};
 use url::Url;
 
@@ -13,6 +13,7 @@ struct Cached { json: Value, etag: Option<String>, until: Instant }
 pub struct Github {
     client: Client,
     token: RwLock<Option<String>>,
+    service: RwLock<Option<Arc<crate::github::GithubService>>>,
     cache: Mutex<HashMap<String, Cached>>,
     request_slots: Semaphore,
     next_request: Mutex<Instant>,
@@ -94,11 +95,14 @@ fn api_resource_available(status:StatusCode)->Result<bool,String> {
 }
 impl Github {
     pub fn new() -> Result<Self, String> {
-        let client = Client::builder().user_agent("ReleaseHub/0.1 public-release-manager")
+        let client = Client::builder().user_agent(concat!("ReleaseHub/", env!("CARGO_PKG_VERSION"), " public-release-manager"))
             .redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(45)).build().map_err(|_| "网络服务初始化失败".to_string())?;
-        Ok(Self { client, token:RwLock::new(None), cache:Mutex::new(HashMap::new()),
+        Ok(Self { client, token:RwLock::new(None), service:RwLock::new(None), cache:Mutex::new(HashMap::new()),
             request_slots:Semaphore::new(3), next_request:Mutex::new(Instant::now()), authorization_changed:Notify::new() })
+    }
+    pub(crate) fn set_service(&self, service: Arc<crate::github::GithubService>) {
+        if let Ok(mut current) = self.service.write() { *current = Some(service); }
     }
     pub fn set_token(&self, token: Option<String>) {
         let token = token.filter(|t| !t.trim().is_empty() && t.len()<=4096 && t.bytes().all(|b| b.is_ascii_graphic()));
@@ -117,7 +121,7 @@ impl Github {
             let wait={
                 let mut next=self.next_request.lock().map_err(|_|"网络队列不可用".to_string())?;
                 let now=Instant::now();let wait=next.saturating_duration_since(now);
-                if wait>Duration::from_secs(60) {return Err("GitHub 请求额度已用完，请等待恢复或配置 GitHub 只读访问令牌".into());}
+                if wait>Duration::from_secs(60) {return Err("GitHub 请求额度已用完，请稍后重试，或到 GitHub 页面登录".into());}
                 if wait.is_zero() {*next=now+Duration::from_millis(350);return Ok(());}
                 wait
             };
@@ -135,6 +139,12 @@ impl Github {
         self.api_optional(owner,repo,tail,page).await?.ok_or_else(||"公开项目或指定版本不存在".into())
     }
     async fn api_optional(&self, owner: &str, repo: &str, tail: &[&str], page: Option<u32>) -> Result<Option<Value>, String> {
+        let service = self.service.read().map_err(|_| "GitHub 连接暂时不可用".to_string())?.clone();
+        if let Some(service) = service {
+            let _slot = self.request_slots.acquire().await.map_err(|_| "网络队列已关闭".to_string())?;
+            // A connected account bypasses old anonymous cooldown/cache. Never copy its credential.
+            if let Some(result) = service.repository_api(owner, repo, tail, page).await { return result; }
+        }
         let mut url=Url::parse("https://api.github.com").map_err(|_| "GitHub 地址无效".to_string())?;
         { let mut p=url.path_segments_mut().map_err(|_| "GitHub 地址无效".to_string())?; p.extend(["repos",owner,repo]); p.extend(tail.iter().copied()); }
         if let Some(n)=page { url.query_pairs_mut().append_pair("per_page","100").append_pair("page",&n.to_string()); }
@@ -164,7 +174,7 @@ impl Github {
                 let reset=response.headers().get("x-ratelimit-reset").and_then(|h| h.to_str().ok()).and_then(|s| s.parse::<i64>().ok());
                 let seconds=retry.or_else(|| reset.map(|s| (s-chrono::Utc::now().timestamp()).max(1) as u64)).unwrap_or(60).min(3600);
                 if !self.defer_requests(&token,seconds)? {continue;}
-                return Err("GitHub 请求额度已用完，请等待恢复或配置 GitHub 只读访问令牌".into());
+                return Err("GitHub 请求额度已用完，请稍后重试，或到 GitHub 页面登录".into());
             }
             if status.is_server_error() && attempt<2 { tokio::time::sleep(Duration::from_secs(1<<attempt)).await; continue; }
             if !api_resource_available(status)? {return Ok(None);}

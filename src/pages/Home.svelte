@@ -34,5 +34,5 @@
   {#if failures}<div class="section-notice"><Icon name="alert" size={16} /><span>{failures} 款软件检查失败，先看看错误原因再重试。</span><button class="text-button" onclick={() => onpage('library')}>查看</button></div>{/if}
 </section>
 
-<div class="home-bottom-grid"><button class="quiet-card" onclick={() => onpage('settings')}><span class="quiet-icon"><Icon name="drive" size={24} /></span><span><strong>你的软件库，随身带走</strong><small>订阅与设置可迁移，凭据只留在这台电脑。</small></span><Icon name="chevronRight" size={17} /></button><button class="quiet-card" onclick={() => onpage('agent')}><span class="quiet-icon"><Icon name="agent" size={24} /></span><span><strong>源码构建，交给你的 Agent</strong><small>只协调任务，不在这里执行上游代码。</small></span><Icon name="chevronRight" size={17} /></button></div>
+<div class="home-bottom-grid"><button class="quiet-card" onclick={() => onpage('settings')}><span class="quiet-icon"><Icon name="drive" size={24} /></span><span><strong>你的软件库，随身带走</strong><small>订阅与设置可迁移，凭据只留在这台电脑。</small></span><Icon name="chevronRight" size={17} /></button><button class="quiet-card" onclick={() => onpage('agent')}><span class="quiet-icon"><Icon name="agent" size={24} /></span><span><strong>让 AI 了解你的软件近况</strong><small>连接 Codex / Claude Code，只读本机信息。</small></span><Icon name="chevronRight" size={17} /></button></div>
 <p class="page-footnote"><Icon name="shield" size={13} />不自动安装，不改动已有软件。每一次更新，由你确认。</p>

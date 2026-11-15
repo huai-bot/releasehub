@@ -2,7 +2,8 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isDownloadRecord } from './download-state';
 import type {
-  AddProjectInput, AgentConnection, BuildTask, CheckResult, DownloadRecord,
+  AddProjectInput, AgentConnection, AgentIntegration, BuildTask, CheckResult, DownloadRecord,
+  GithubActivityPage, GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubRepositoryTab, GithubStatus,
   InstallResult, ManagedVersion, Project, ProjectChanges, Settings, Snapshot,
 } from './types';
 
@@ -38,6 +39,16 @@ export interface Actions {
   open_download: { payload: { id: string }; result: null };
   open_data_directory: { payload: Record<string, never>; result: null };
   open_managed_version: { payload: { projectId: string; downloadId: string }; result: null };
+  get_agent_integration: { payload: Record<string, never>; result: AgentIntegration };
+  github_status: { payload: Record<string, never>; result: GithubStatus };
+  github_login: { payload: Record<string, never>; result: GithubStatus };
+  github_cancel_login: { payload: Record<string, never>; result: GithubStatus };
+  github_logout: { payload: Record<string, never>; result: GithubStatus };
+  github_repositories: { payload: { tab: GithubRepositoryTab; query: string; page: number }; result: GithubRepositoryPage };
+  github_repository: { payload: { repository: string }; result: GithubRepositoryDetail };
+  github_set_star: { payload: { repository: string; starred: boolean; confirmed: true }; result: { starred: boolean } };
+  github_update_repository: { payload: { repository: string; description: string; homepage: string; confirmed: true }; result: GithubRepository };
+  github_activity: { payload: { page: number }; result: GithubActivityPage };
   set_github_token: { payload: { token: string }; result: null };
   reveal_agent_connection: { payload: Record<string, never>; result: AgentConnection };
   rotate_agent_token: { payload: Record<string, never>; result: AgentConnection };

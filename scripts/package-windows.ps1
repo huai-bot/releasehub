@@ -38,6 +38,13 @@ $integrations = Join-Path $portable 'integrations'
 New-Item -ItemType Directory -Path $integrations | Out-Null
 Copy-Item -LiteralPath (Join-Path $root 'integrations/releasehub-agent.ps1') -Destination $integrations
 Copy-Item -LiteralPath (Join-Path $root 'docs/AGENT_GUIDE.md') -Destination (Join-Path $integrations 'AGENT_GUIDE.md')
+$tools = Join-Path $portable 'tools'
+New-Item -ItemType Directory -Path $tools | Out-Null
+foreach ($name in @('gh.exe', 'releasehub-mcp.exe', 'LICENSE.github-cli.txt', 'github-cli-version.txt')) {
+    $source = Join-Path $root ('src-tauri/tools/' + $name)
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing prepared public component: $name" }
+    Copy-Item -LiteralPath $source -Destination (Join-Path $tools $name)
+}
 Compress-Archive -LiteralPath $portable -DestinationPath $zipPath -CompressionLevel Optimal
 Copy-Item -LiteralPath $installers[0].FullName -Destination $setupPath
 $lines = foreach ($path in @($zipPath, $setupPath)) {

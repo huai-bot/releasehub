@@ -55,6 +55,6 @@ export function createPreviewSnapshot(): Snapshot {
       { id: 'preview-task1', projectId: 'preview-ff', projectName: 'FFmpegFreeUI', repository: 'Lake1059/FFmpegFreeUI', sourceRef: 'main', sourceCommit: null, target: 'windows-x64', instructions: '请在隔离环境编译 Windows x64 版本，并给出可追溯的构建结果。', status: 'queued', agentName: null, progress: null, artifactUrl: null, artifactSha256: null, error: null, createdAt: now, updatedAt: now },
     ],
     settings: { theme: 'system', checkIntervalMinutes: 60, notifications: true, autoDownload: false, maxConcurrentDownloads: 2, closeToTray: true, agentEnabled: false, agentPort: 47831 },
-    runtime: { appVersion: '0.1.0', dataDir: '.\\data（界面示例）', portable: true, githubTokenConfigured: false, agent: { enabled: false, address: null, tokenConfigured: false, error: null } },
+    runtime: { appVersion: '0.2.0', dataDir: '.\\data（界面示例）', portable: true, githubTokenConfigured: false, agent: { enabled: false, address: null, tokenConfigured: false, error: null } },
   };
 }

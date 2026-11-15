@@ -13,7 +13,8 @@
     { id: 'library', label: '软件库', icon: 'library' },
     { id: 'updates', label: '可更新', icon: 'updates' },
     { id: 'downloads', label: '下载', icon: 'download' },
-    { id: 'agent', label: 'Agent 任务', icon: 'agent' },
+    { id: 'github', label: 'GitHub', icon: 'github' },
+    { id: 'agent', label: 'AI 连接', icon: 'agent' },
   ] as const;
 </script>
 

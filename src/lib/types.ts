@@ -167,3 +167,88 @@ export interface ManagedVersion {
   path: string;
   active: boolean;
 }
+
+/** Contains launch configuration only, never a credential. */
+export interface AgentIntegration {
+  command: string;
+  args: string[];
+  claudeConfig: string;
+  codexConfig: string;
+  readOnly: true;
+}
+
+export interface GithubAccount {
+  login: string;
+  name: string | null;
+  avatarUrl: string | null;
+  url: string;
+}
+
+export interface GithubLogin {
+  state: 'waiting' | 'complete' | 'error';
+  userCode: string | null;
+  verificationUri: string;
+  message: string | null;
+}
+
+export interface GithubStatus {
+  available: boolean;
+  connected: boolean;
+  account: GithubAccount | null;
+  login: GithubLogin | null;
+  error: string | null;
+  provider: 'github-cli';
+}
+
+export type GithubRepositoryTab = 'explore' | 'starred' | 'owned';
+
+export interface GithubRepository {
+  id: number;
+  name: string;
+  fullName: string;
+  owner: string;
+  description: string | null;
+  url: string;
+  private: boolean;
+  archived: boolean;
+  fork: boolean;
+  language: string | null;
+  stars: number;
+  forks: number;
+  openIssues: number;
+  updatedAt: string;
+  defaultBranch: string;
+  homepage: string | null;
+  topics: string[];
+  canAdmin: boolean;
+  starred: boolean | null;
+}
+
+export interface GithubRepositoryPage {
+  items: GithubRepository[];
+  page: number;
+  hasMore: boolean;
+  totalCount: number | null;
+}
+
+export interface GithubRepositoryDetail {
+  repository: GithubRepository;
+  readme: string;
+}
+
+export interface GithubActivity {
+  id: string;
+  actor: string;
+  avatarUrl: string | null;
+  repository: string;
+  type: string;
+  summary: string;
+  url: string;
+  createdAt: string;
+}
+
+export interface GithubActivityPage {
+  items: GithubActivity[];
+  page: number;
+  hasMore: boolean;
+}

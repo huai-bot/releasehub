@@ -5,6 +5,8 @@ dist/
 target/
 src-tauri/target/
 src-tauri/gen/
+src-tauri/tools/
+.impeccable/review/
 src-tauri/icons/android/
 src-tauri/icons/ios/
 src-tauri/icons/Square*Logo.png

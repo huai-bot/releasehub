@@ -1,4 +1,4 @@
-use crate::{agent::{self, RunningAgent}, core::Core, secrets::{random_token, SecretStore}};
+use crate::{agent::{self, RunningAgent}, core::Core, github::GithubService, mcp, secrets::{random_token, SecretStore}};
 use serde_json::{json, Value};
 use std::{fs, path::{Path, PathBuf}, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{Duration, Instant}};
 use tauri::{Emitter, Manager};
@@ -13,6 +13,7 @@ struct HostState {
     portable: bool,
     secrets: SecretStore,
     github_configured: AtomicBool,
+    github: Arc<GithubService>,
     close_to_tray: AtomicBool,
     agent: Mutex<Option<RunningAgent>>,
     agent_error: Mutex<Option<String>>,
@@ -56,8 +57,21 @@ impl HostState {
             }
             None => return Err("这是另一台电脑的数据，或本机密钥已移除。请在设置中重新开启 Agent 接入。".into()),
         };
-        // Bind the new port before stopping the old listener, preserving a working connection on failure.
-        let next = agent::start(self.core.clone(), port, token).await?;
+        let read_token = match self.secrets.get("agent-read")? {
+            Some(token) => token,
+            None => {
+                let token = random_token();
+                self.secrets.set("agent-read", Some(&token))?;
+                token
+            }
+        };
+        // Read-only MCP and the legacy CLI use different credentials and permission sets.
+        // Bind/publish before stopping the previous listener, preserving it on failure.
+        let next = agent::start(self.core.clone(), port, token, read_token).await?;
+        if let Err(error) = mcp::publish_connection(&self.data_dir, &next.address) {
+            next.stop().await;
+            return Err(error);
+        }
         if let Some(previous) = running.replace(next) { previous.stop().await; }
         *self.agent_error.lock().await = None;
         Ok(())
@@ -88,6 +102,25 @@ impl HostState {
         let token = self.secrets.get("agent")?.ok_or("本机访问密钥不存在，请重新开启接入。")?;
         Ok(json!({"address": agent.address, "token": token}))
     }
+}
+
+fn bundled_tool(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource) = app.path().resource_dir() { candidates.push(resource.join("tools").join(name)); }
+    if let Ok(executable) = std::env::current_exe() {
+        if let Some(parent) = executable.parent() {
+            candidates.push(parent.join("tools").join(name));
+            candidates.push(parent.join(name));
+        }
+    }
+    #[cfg(debug_assertions)]
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools").join(name));
+    candidates.into_iter().find(|path| path.is_absolute() && path.is_file())
+}
+
+fn github_cli(app: &tauri::AppHandle) -> Option<PathBuf> {
+    // Always use the pinned, bundled component, never a different program from PATH.
+    bundled_tool(app, "gh.exe")
 }
 
 fn object_string<'a>(payload: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -141,6 +174,13 @@ async fn dispatch(app: tauri::AppHandle, state: tauri::State<'_, Arc<HostState>>
             let _ = app.emit("releasehub:changed", json!({}));
             Ok(Value::Null)
         }
+        "get_agent_integration" => {
+            if host.agent.lock().await.is_none() { return Err("请先在设置中开启外部 AI 连接。".into()); }
+            let command = bundled_tool(&app, "releasehub-mcp.exe")
+                .ok_or("外部 AI 连接组件缺失，请使用完整的新版安装包或便携包。")?;
+            mcp::integration_config(&command, &host.data_dir)
+        }
+        action if action.starts_with("github_") => host.github.handle(action, payload).await,
         "reveal_agent_connection" => host.connection().await,
         "rotate_agent_token" => {
             let _serial = host.settings_lock.lock().await;
@@ -357,8 +397,12 @@ pub fn run() {
             let token = secrets.get("github").unwrap_or(None);
             let github_configured = token.is_some();
             core.set_github_token(token);
+            // Account configuration is always machine-local, including in portable mode.
+            let auth_root = app.path().app_local_data_dir()?.join("accounts").join(secrets.instance_id());
+            let github = GithubService::new(auth_root, github_cli(app.handle()));
+            core.set_github_service(github.clone());
             let host = Arc::new(HostState {
-                core, data_dir, portable, secrets,
+                core, data_dir, portable, secrets, github,
                 github_configured: AtomicBool::new(github_configured),
                 close_to_tray: AtomicBool::new(false),
                 agent: Mutex::new(None), agent_error: Mutex::new(None), settings_lock: Mutex::new(()),
@@ -394,8 +438,17 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!());
-    if let Err(error) = result { startup_message(&format!("ReleaseHub 无法启动：{error}\n请确认文件夹可写、文件已完整解压。")); }
+        .build(tauri::generate_context!());
+    match result {
+        Ok(app) => app.run(|handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(host) = handle.try_state::<Arc<HostState>>() {
+                    tauri::async_runtime::block_on(host.github.shutdown());
+                }
+            }
+        }),
+        Err(error) => startup_message(&format!("ReleaseHub 无法启动：{error}\n请确认文件夹可写、文件已完整解压。")),
+    }
 }
 
 #[cfg(test)]
