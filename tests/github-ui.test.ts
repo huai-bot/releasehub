@@ -5,6 +5,7 @@ import AiConnection from '../src/components/AiConnection.svelte';
 import App from '../src/App.svelte';
 import { createPreviewGithubDetail, createPreviewGithubStatus, createPreviewAgentIntegration } from '../src/lib/github-preview';
 import { createPreviewSnapshot } from '../src/lib/preview';
+import { previewFeed } from '../src/lib/feed/preview';
 import { GITHUB_DEVICE_URL, githubAvatarUrl, isSubscribed, repositoryEditError } from '../src/lib/github';
 import type { GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubStatus } from '../src/lib/types';
 
@@ -29,6 +30,11 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 async function settle() { for (let i = 0; i < 10; i += 1) { await Promise.resolve(); flushSync(); } }
 function button(label: string) { const found = [...target.querySelectorAll('button')].find((item) => item.textContent?.trim() === label || item.getAttribute('aria-label') === label); if (!found) throw new Error(`Missing button: ${label}`); return found; }
 async function click(label: string) { button(label).click(); await settle(); }
+async function navigate(label: string) {
+  const item = [...target.querySelectorAll<HTMLButtonElement>('nav button')].find((item) => item.querySelector('span')?.textContent === label);
+  if (!item) throw new Error(`Missing navigation: ${label}`);
+  item.click(); await settle();
+}
 async function input(selector: string, value: string) { const field = target.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!; field.value = value; field.dispatchEvent(new Event('input', { bubbles: true })); await settle(); }
 async function search(value: string) { await input('#github-search', value); target.querySelector('.github-search')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle(); }
 function showGithub() { const instance = mount(Github, { target, props: { projects: [], preview: false, onadd, onopen, oncopy, onnotice } }); cleanup = async () => { await unmount(instance); }; flushSync(); }
@@ -196,6 +202,84 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
       await cleanup(); cleanup = null; late.resolve(createPreviewAgentIntegration()); await settle();
       expect(target.textContent).toBe(''); expect(oncopy).not.toHaveBeenCalled();
     });
+  });
+
+  it('retains the visited Stars workspace, filters, details and loaded pages without another request', async () => {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupGithubTab = 'starred';
+    const alpha = repo('demo/alpha', { id: 1 }); const beta = repo('demo/beta', { id: 2 });
+    dispatchMock.mockImplementation(async (action: string, payload: { cursor?: string }) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'github_status') return connected();
+      if (action === 'get_repository_notes' || action === 'github_lists') return [];
+      if (action === 'github_list_repositories') return { items: payload.cursor ? [beta] : [alpha], endCursor: payload.cursor ? null : 'next', hasMore: !payload.cursor, totalCount: 2 };
+      return base(action);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    expect(dispatchMock.mock.calls.some(([action]) => action.startsWith('github_'))).toBe(false);
+    await navigate('GitHub'); await click('继续加载 Stars'); await input('#github-search', 'alpha');
+    target.querySelector<HTMLInputElement>('input[aria-label="选择 demo/alpha"]')!.click(); await settle();
+    await click('查看 demo/alpha 详情');
+    const results = target.querySelector('#github-results');
+    const workspace = target.querySelector<HTMLElement>('#main-content')!; workspace.scrollTop = 260;
+    const requests = dispatchMock.mock.calls.length;
+    await navigate('软件库');
+    expect(workspace.hidden).toBe(true); expect(target.querySelector('#main-content')).not.toBe(workspace);
+    await navigate('GitHub');
+    expect(dispatchMock.mock.calls).toHaveLength(requests);
+    expect(target.querySelector('#github-results')).toBe(results);
+    expect(target.querySelector('#main-content')).toBe(workspace); expect(workspace.hidden).toBe(false); expect(workspace.scrollTop).toBe(260);
+    expect(target.querySelector('#github-tab-starred')?.getAttribute('aria-selected')).toBe('true');
+    expect(target.querySelector<HTMLInputElement>('#github-search')?.value).toBe('alpha');
+    expect(target.querySelector<HTMLInputElement>('input[aria-label="选择 demo/alpha"]')?.checked).toBe(true);
+    expect(target.querySelector('.github-detail')?.textContent).toContain('demo/alpha');
+    expect(workspace.textContent).toContain('已加载 2 批 · 2 / 2 个');
+    const reads = dispatchMock.mock.calls.filter(([action]) => action === 'github_list_repositories').length;
+    await click('刷新仓库列表');
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'github_list_repositories')).toHaveLength(reads + 1);
+    expect(workspace.textContent).toContain('已加载 1 批');
+  });
+
+  it('clears retained account content on logout and accepts a changed account on refresh', async () => {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'github'; snapshot.settings.startupGithubTab = 'owned';
+    let account = connected(); const logout = deferred<GithubStatus>();
+    dispatchMock.mockImplementation(async (action: string) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'github_status') return account;
+      if (action === 'get_repository_notes') return [];
+      if (action === 'github_repositories') return page([repo(`${account.account!.login}/private`, { private: true })]);
+      if (action === 'github_logout') return logout.promise;
+      return base(action);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    await navigate('软件库'); await navigate('GitHub');
+    expect(target.textContent).toContain('releasehub-demo/private');
+    account = { ...connected(), account: { ...connected().account!, login: 'other-demo' } };
+    await click('刷新 GitHub 账号状态');
+    expect(target.textContent).not.toContain('releasehub-demo/private'); expect(target.textContent).toContain('other-demo/private');
+    button('仅断开追新').click(); await settle();
+    expect(target.textContent).not.toContain('other-demo/private');
+    logout.resolve(anonymous()); await settle(); await navigate('软件库'); await navigate('GitHub');
+    expect(target.textContent).not.toContain('other-demo/private'); expect(target.textContent).toContain('登录后查看自己的仓库');
+  });
+
+  it('retains homepage feed content and pauses status polling while another workspace is visible', async () => {
+    vi.useFakeTimers();
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'github'; snapshot.settings.startupGithubTab = 'feed';
+    dispatchMock.mockImplementation(async (action: string) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'github_status') return connected();
+      if (action === 'get_repository_notes') return [];
+      if (action === 'feed_status') return previewFeed();
+      return base(action);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    const feed = target.querySelector('.feed-list'); expect(feed).not.toBeNull();
+    const reads = () => dispatchMock.mock.calls.filter(([action]) => action === 'feed_status').length;
+    const before = reads(); await navigate('软件库'); await vi.advanceTimersByTimeAsync(15000); await settle();
+    expect(reads()).toBe(before);
+    await navigate('GitHub'); expect(target.querySelector('.feed-list')).toBe(feed); expect(reads()).toBe(before);
+    expect(target.querySelector('#main-content')?.textContent).not.toContain('正在读取官网动态');
+    await vi.advanceTimersByTimeAsync(5000); await settle(); expect(reads()).toBe(before + 1);
   });
 
   it('adds a public repository via add_project without downloads and has no normal task-creation UI', async () => {

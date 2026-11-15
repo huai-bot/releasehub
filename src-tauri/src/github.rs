@@ -1353,7 +1353,8 @@ impl GithubService {
         fields(payload, &["listId", "cursor", "query"])?;
         let requested = string_field(payload, "listId")?;
         let cursor = cursor_field(payload)?;
-        let query = query_field(payload)?;
+        // Stars are filtered locally; an omitted search term means all repositories.
+        let query = if payload.get("query").is_some() { query_field(payload)? } else { String::new() };
         let account = self.authenticated_account().await?;
         let unlisted = requested == "unlisted";
         let all = requested == "all" || unlisted;
@@ -2701,6 +2702,27 @@ mod tests {
         assert!(next_graphql_cursor(&json!({"pageInfo": {"hasNextPage": true}}), &mut seen).is_err());
         assert_eq!(next_graphql_cursor(&json!({"pageInfo": {"hasNextPage": false}}), &mut seen).unwrap(), None);
         assert!(cursor_field(&json!({"cursor": "bad\nvalue"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn starred_lists_accept_the_ui_payload_without_a_search_term() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = GithubService::new(temp.path().join("account"), None, test_proxy());
+        // These are the real payloads sent by the Stars page, before any account or network access.
+        for payload in [
+            json!({"listId": "all"}),
+            json!({"listId": "unlisted"}),
+            json!({"listId": "UL_example", "cursor": "page-two"}),
+            json!({"listId": "all", "query": ""}),
+        ] {
+            let error = service.handle("github_list_repositories", payload).await.unwrap_err();
+            assert_eq!(error, "请先连接 GitHub 账号，再使用这个功能。");
+        }
+        for query in [json!(123), json!("bad\nquery"), json!("a".repeat(257))] {
+            let error = service.handle("github_list_repositories", json!({"listId": "all", "query": query})).await.unwrap_err();
+            assert!(!error.contains("请先连接"));
+        }
+        assert!(!service.backend.auth_root.exists());
     }
 
     #[tokio::test]

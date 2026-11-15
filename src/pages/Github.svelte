@@ -11,8 +11,8 @@
   import GithubFeed from '../components/GithubFeed.svelte';
   import type { GithubPreviewScenario } from '../lib/github-preview';
 
-  let { projects, preview, initialTab = 'explore', onadd, onopen, oncopy, onnotice }: {
-    projects: Project[]; preview: boolean; initialTab?: Tab;
+  let { projects, preview, active = true, initialTab = 'explore', onadd, onopen, oncopy, onnotice }: {
+    projects: Project[]; preview: boolean; active?: boolean; initialTab?: Tab;
     onadd: (repository: GithubRepository) => Promise<boolean>;
     onopen: (url: string) => void; oncopy: (text: string) => void; onnotice: (message: string, tone?: Tone) => void;
   } = $props();
@@ -95,7 +95,7 @@
   function stopLoginPoll() { if (loginTimer !== undefined) clearTimeout(loginTimer); loginTimer = undefined; }
   function scheduleLoginPoll() {
     stopLoginPoll();
-    if (!destroyed && !preview && !authBusy && status?.login?.state === 'waiting') {
+    if (!destroyed && active && !preview && !authBusy && status?.login?.state === 'waiting') {
       loginTimer = setTimeout(() => { loginTimer = undefined; void refreshStatus(); }, 2_000);
     }
   }
@@ -429,6 +429,10 @@
     stopLoginPoll(); statusRequest += 1; clearAccountContent(); status = null;
     void refreshStatus(true); void loadContent(); void loadNotes();
   }
+  $effect(() => {
+    if (active) untrack(scheduleLoginPoll);
+    else stopLoginPoll();
+  });
   onMount(() => {
     void refreshStatus(true); void loadContent(); void loadNotes();
     return () => { destroyed = true; statusRequest += 1; listRequest += 1; detailRequest += 1; catalogRequest += 1; assignmentRequest += 1; noteRequest += 1; sessionRevision += 1; stopLoginPoll(); };
@@ -461,7 +465,7 @@
 <div class="github-tabs" role="tablist" aria-label="GitHub 内容">{#each tabs as item, index}<button id={`github-tab-${item.id}`} role="tab" aria-selected={tab === item.id} aria-controls="github-results" tabindex={tab === item.id ? 0 : -1} class:active={tab === item.id} onclick={() => changeTab(item.id)} onkeydown={(event) => tabKey(event, index)}><Icon name={item.icon} size={16} />{item.label}</button>{/each}</div>
 
 {#if tab === 'feed'}
-  <div id="github-results" role="tabpanel" aria-labelledby="github-tab-feed" tabindex="0"><GithubFeed {preview} {onopen} {onadd} {onnotice} /></div>
+  <div id="github-results" role="tabpanel" aria-labelledby="github-tab-feed" tabindex="0"><GithubFeed {preview} {active} {onopen} {onadd} {onnotice} /></div>
 {:else}
   {#if tab === 'starred' && connected}
     <section class="lists-toolbar" aria-label="GitHub 分类">

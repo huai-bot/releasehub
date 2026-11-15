@@ -91,7 +91,7 @@ Install: EXE/MSI opens the official installer only with confirmed=true; do not m
 | get_agent_integration | {} | AgentIntegration: command, args, genericConfig, claudeConfig, codexConfig, cursorConfig, vscodeConfig, cliCommand, tools, readOnly:true |
 | get_agent_diagnostic | { projectId } | saved software diagnostic object, also available while MCP is off |
 | save_proxy | { proxy: ProxySettings, password?: string } | Settings; omitted password retains matching saved account, empty clears it |
-| test_proxy | { proxy?: ProxySettings, password?: string } | { ok, mode, source, target, status, latencyMs, message }; tests unsaved input without saving |
+| test_proxy | { proxy?: ProxySettings, password?: string } | { ok, mode, source, target, status, latencyMs, message, warning?, retryAt? }; tests unsaved input without saving |
 | github_status / github_cancel_login / github_logout | {} | GithubStatus; logout disconnects this application only |
 | github_login | { lists?: boolean } | GithubStatus; Lists management explicitly requests the additional user scope |
 | github_repositories | { tab:'explore'\|'starred'\|'owned', query:string, page:number } | GithubRepositoryPage; 30/page, page 1..10; owned/starred filter the current page only |
@@ -123,9 +123,13 @@ One shared `Arc<ProxyState>` builds the HTTP clients for metadata, update checks
 
 Proxy passwords are stored in the Windows credential manager as an account record bound to the exact URL and username. They are not saved in SQLite, snapshots, logs or export files. The host validates first, persists settings under its serial lock, rolls back on a failed save, and rebuilds the independent website window after a change. Existing downloads retain their current connection until cancelled/retried.
 
-The main window disables native decorations and uses the shared Slate/Cobalt theme for a single 52px title/search bar. Window controls use Tauri's scoped minimize, maximize, close, drag and theme APIs; close-to-tray remains a main-window behavior. Native file-drop handling is disabled so HTML sidebar dragging works. The application icon and sidebar mark use the same blue cube asset.
+The proxy test uses the unauthenticated `https://api.github.com/rate_limit` endpoint. Successful connectivity and exhausted GitHub quota are separate outcomes: `ok` stays true for a confirmed quota limit, with `warning` and optional ISO `retryAt`. Ordinary access denial, proxy authentication failure and server failures remain errors.
+
+The main window disables native decorations and uses the shared Slate/Cobalt theme for a single 52px title/search bar. Window controls use Tauri's scoped minimize, maximize, close, drag and theme APIs; close-to-tray remains a main-window behavior. Native file-drop handling is disabled so HTML sidebar dragging works. The application icon and sidebar mark use the same blue cube asset. Windows startup sends an item-specific shell notification for the current executable so in-place portable upgrades refresh its cached icon.
 
 ## GitHub Lists and homepage feed
+
+The GitHub workspace mounts lazily on its first visit and remains mounted but hidden when another workspace page is selected. Its dedicated scroll container retains the current tab, category, loaded cursor pages, filter, detail and scroll position without refetching on navigation. Cached content exists only in memory for this app session. Explicit refresh and existing mutations still reload affected content; account changes and logout clear account-scoped state and invalidate in-flight results. Login and feed status polling pause while the workspace is hidden and resume without clearing displayed content.
 
 Stars classification uses fixed official GraphQL queries for `User.lists`, `UserList.items`, `createUserList`, `updateUserList`, `deleteUserList`, and `updateUserListsForItem`. The last mutation replaces all membership: add/remove first read every list and membership cursor, merge the requested change, then verify the result. All/unlisted Stars use cursor pagination. List URLs are constructed from the authenticated login and list slug. Names/descriptions shown as local notes remain local.
 

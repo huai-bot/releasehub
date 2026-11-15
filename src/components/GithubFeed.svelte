@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { dispatch } from '../lib/bridge';
   import type { GithubFeedPage, GithubRepository } from '../lib/types';
   import { formatDate, readableError, safeGithubUrl, type Tone } from '../lib/ui';
@@ -7,8 +7,8 @@
   import Icon from './Icon.svelte';
   import GithubAvatar from './GithubAvatar.svelte';
 
-  let { preview, onopen, onadd, onnotice }: {
-    preview: boolean;
+  let { preview, active = true, onopen, onadd, onnotice }: {
+    preview: boolean; active?: boolean;
     onopen: (url: string) => void;
     onadd: (repository: GithubRepository) => Promise<boolean>;
     onnotice: (message: string, tone?: Tone) => void;
@@ -34,7 +34,7 @@
   function stopPoll() { if (timer !== undefined) clearTimeout(timer); timer = undefined; }
   function schedulePoll() {
     stopPoll();
-    if (destroyed || preview) return;
+    if (destroyed || !active || preview) return;
     timer = setTimeout(() => { timer = undefined; void refreshStatus(); }, page?.loading || pending === 'feed_connect' ? 1200 : 5000);
   }
   function accept(next: GithubFeedPage) {
@@ -45,7 +45,7 @@
     page = next;
   }
   async function refreshStatus() {
-    if (destroyed || pending) { schedulePoll(); return; }
+    if (destroyed || !active || pending) { schedulePoll(); return; }
     const current = ++request;
     try {
       const next = preview && import.meta.env.DEV
@@ -95,6 +95,10 @@
   }
   function toggleBody(id: string) { const next = new Set(expanded); if (next.has(id)) next.delete(id); else next.add(id); expanded = next; }
   function changePreview() { ++request; void refreshStatus(); }
+  $effect(() => {
+    if (active) untrack(schedulePoll);
+    else stopPoll();
+  });
   onMount(() => {
     void refreshStatus();
     return () => { destroyed = true; ++request; stopPoll(); };

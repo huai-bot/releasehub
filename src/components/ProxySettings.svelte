@@ -25,6 +25,11 @@
   const draft = $derived<ProxySettings>({ mode, url: url.trim(), username: username.trim() });
   const dirty = $derived(JSON.stringify(draft) !== JSON.stringify(settings) || !!password || clearPassword);
   const passwordValue = () => clearPassword ? '' : password || undefined;
+  const retryTime = $derived.by(() => {
+    if (!result?.retryAt) return '';
+    const date = new Date(result.retryAt);
+    return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+  });
   async function save(event: SubmitEvent) {
     event.preventDefault(); if (pending) return; error = ''; saving = true;
     try { if (await onsave(draft, passwordValue())) { password = ''; clearPassword = false; result = null; } }
@@ -53,7 +58,7 @@
     {:else if mode === 'system'}<p class="setting-description proxy-description">读取 Windows 的手动代理设置或当前启动环境的代理地址。使用自动配置脚本时，请在这里填写对应的本机代理端口。</p>
     {:else}<p class="setting-description proxy-description">GitHub 请求和文件下载直接连接网络。</p>{/if}
     {#if error}<p class="field-error" role="alert">{error}</p>{/if}
-    {#if result}<div class:success-text={result.ok} class:danger-text={!result.ok} class="proxy-result" role="status"><Icon name={result.ok ? 'success' : 'alert'} size={16} /><span>{result.message}{result.ok ? ` · ${result.latencyMs} ms` : ''}</span></div>{/if}
+    {#if result}<div class="proxy-feedback" role="status"><div class:success-text={result.ok} class:danger-text={!result.ok} class="proxy-result"><Icon name={result.ok ? 'success' : 'alert'} size={16} /><span>{result.message}{result.ok ? ` · ${result.latencyMs} ms` : ''}</span></div>{#if result.warning}<p class="proxy-warning">{result.warning}{#if retryTime}<span>预计 {retryTime} 恢复。</span>{/if}</p>{/if}</div>{/if}
     <div class="settings-bottom-line"><span class="field-hint">{preview ? '预览中的设置仅用于展示' : '本机 AI 连接始终直连'}</span><div class="proxy-actions"><button type="button" class="button secondary small" disabled={pending || preview} onclick={() => void test()}><Icon name={testing ? 'loader' : 'connected'} class={testing ? 'spinning' : ''} size={15} />{testing ? '正在测试' : '测试连接'}</button><button type="submit" class="button primary small" disabled={pending || !dirty}>{saving ? '正在保存' : '保存代理设置'}</button></div></div>
   </form>
 </section>
@@ -64,5 +69,8 @@
   .proxy-fields .password-clear { flex-direction: row; align-items: center; font-size: 12px; }
   .proxy-description { margin: 12px 0; }
   .proxy-actions { display: flex; gap: 8px; }
-  .proxy-result { display: flex; gap: 8px; align-items: center; margin: 12px 0; overflow-wrap: anywhere; }
+  .proxy-feedback { margin: 12px 0; }
+  .proxy-result { display: flex; gap: 8px; align-items: center; overflow-wrap: anywhere; }
+  .proxy-warning { margin: 7px 0 0; color: var(--warning); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+  .proxy-warning span { margin-left: 6px; }
 </style>

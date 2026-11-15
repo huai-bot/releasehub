@@ -30,7 +30,7 @@ async function input(selector: string, value: string) {
   item.value = value; item.dispatchEvent(new Event(item.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); await settle();
 }
 function submit() { target.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); }
-const success: ProxyTestResult = { ok: true, mode: 'manual', source: 'manual', target: 'https://api.github.com/', status: 200, latencyMs: 17, message: 'GitHub 连接正常' };
+const success: ProxyTestResult = { ok: true, mode: 'manual', source: 'manual', target: 'https://api.github.com/rate_limit', status: 200, latencyMs: 17, message: 'GitHub 连接正常' };
 
 beforeEach(() => {
   vi.clearAllMocks(); cleanup = undefined;
@@ -88,8 +88,8 @@ describe('startup and desktop navigation', () => {
 });
 
 describe('network proxy preferences', () => {
-  async function show(settings = { mode: 'system', url: '', username: '' } as Settings['proxy'], saved = false, save = vi.fn(async () => true)) {
-    const ontest = vi.fn(async (_proxy: Settings['proxy'], _password?: string) => success);
+  async function show(settings = { mode: 'system', url: '', username: '' } as Settings['proxy'], saved = false, save = vi.fn(async () => true), result = success) {
+    const ontest = vi.fn(async (_proxy: Settings['proxy'], _password?: string) => result);
     const instance = mount(ProxySettings, { target, props: { settings, passwordConfigured: saved, busy: false, preview: false, onsave: save, ontest } });
     cleanup = async () => { await unmount(instance); }; await settle(); return { save, ontest };
   }
@@ -110,6 +110,21 @@ describe('network proxy preferences', () => {
     expect(ontest.mock.calls[0][1]).toBeUndefined();
     target.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(); await settle(); submit(); await settle();
     expect(save).toHaveBeenCalledWith({ mode: 'manual', url: 'socks5://127.0.0.1:1080', username: 'demo' }, '');
+  });
+  it('shows exhausted GitHub quota separately from a successful proxy connection', async () => {
+    await show(undefined, false, undefined, { ...success, warning: '当前出口的 GitHub 未登录查询额度已用完。', retryAt: '2026-11-15T12:00:00Z' });
+    button('测试连接').click(); await settle();
+    expect(target.querySelector('.success-text')?.textContent).toContain('GitHub 连接正常');
+    expect(target.querySelector('.danger-text')).toBeNull();
+    expect(target.querySelector('.proxy-warning')?.textContent).toContain('未登录查询额度');
+    expect(target.querySelector('.proxy-warning')?.textContent).toContain('预计');
+    expect(target.querySelector('.proxy-warning')?.textContent).not.toContain('Invalid Date');
+  });
+  it('still displays a real proxy authentication failure as an error', async () => {
+    await show(undefined, false, undefined, { ...success, ok: false, status: 407, message: '代理验证未通过，请检查账号和密码', warning: null });
+    button('测试连接').click(); await settle();
+    expect(target.querySelector('.danger-text')?.textContent).toContain('账号和密码');
+    expect(target.querySelector('.proxy-warning')).toBeNull();
   });
   it('retains a failed draft and allows a corrected retry', async () => {
     const save = vi.fn().mockRejectedValueOnce(new Error('代理地址格式不正确')).mockResolvedValue(true);

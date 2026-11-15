@@ -9,7 +9,9 @@ use url::{Host, Url};
 
 const LOOPBACK_BYPASS: &str = "localhost,127.0.0.1,127.0.0.0/8,::1";
 const PROXY_ENV: [&str; 8] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"];
-const TEST_TARGET: &str = "https://api.github.com/";
+// This endpoint remains available when the anonymous core API quota is exhausted.
+const TEST_TARGET: &str = "https://api.github.com/rate_limit";
+const MAX_TEST_RESPONSE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
@@ -109,19 +111,21 @@ impl ProxyState {
             .connect_timeout(Duration::from_secs(8)).timeout(Duration::from_secs(12))
             .redirect(reqwest::redirect::Policy::none()).build().map_err(|_| "无法创建代理测试连接".to_string())?;
         let started = Instant::now();
-        let (ok, status, message) = match client.get(target).send().await {
+        let (ok, status, message, warning, retry_at) = match client.get(target)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json").send().await {
             Ok(response) => {
-                let status = response.status();
-                let message = if status.is_success() { "连接成功".to_string() }
-                    else if status.as_u16() == 407 { String::from("代理验证未通过，请检查账号和密码") }
-                    else { format!("已连接到网站，但网站返回 HTTP {}", status.as_u16()) };
-                (status.is_success(), Some(status.as_u16()), message)
+                let status = response.status().as_u16();
+                let headers = response.headers().clone();
+                let body = test_response_body(response).await;
+                let outcome = test_outcome(status, &headers, body.as_ref());
+                (outcome.ok, Some(status), outcome.message, outcome.warning, outcome.retry_at)
             }
             Err(error) => (false, None, if error.is_timeout() { "连接超时，请检查代理地址和网络" }
-                else { "连接失败，请检查代理地址、账号密码和网络" }.to_string()),
+                else { "连接失败，请检查代理地址、账号密码和网络" }.to_string(), None, None),
         };
         Ok(json!({"ok": ok, "mode": mode, "source": source, "target": target, "status": status,
-            "latencyMs": started.elapsed().as_millis() as u64, "message": message}))
+            "latencyMs": started.elapsed().as_millis() as u64, "message": message,
+            "warning": warning, "retryAt": retry_at}))
     }
     fn resolve(&self) -> Result<ResolvedProxy, String> {
         let current = self.current.read().map_err(|_| "代理设置暂时不可用".to_string())?;
@@ -140,6 +144,54 @@ impl ProxyState {
         }
     }
 }
+async fn test_response_body(mut response: reqwest::Response) -> Option<Value> {
+    if response.content_length().is_some_and(|length| length > MAX_TEST_RESPONSE_BYTES as u64) { return None; }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if bytes.len() + chunk.len() > MAX_TEST_RESPONSE_BYTES { return None; }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+struct TestOutcome { ok: bool, message: String, warning: Option<String>, retry_at: Option<String> }
+fn test_outcome(status: u16, headers: &reqwest::header::HeaderMap, body: Option<&Value>) -> TestOutcome {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let core = body.and_then(|body| body.pointer("/resources/core").or_else(|| body.get("rate")));
+    let remaining = core.and_then(|core| core["remaining"].as_u64())
+        .or_else(|| header("x-ratelimit-remaining").and_then(|value| value.parse::<u64>().ok()));
+    let limited = remaining == Some(0) || status == 429 || (status == 403 && (
+        header("retry-after").is_some() || body.and_then(|body| body["message"].as_str()).is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("api rate limit exceeded") || message.contains("secondary rate limit")
+        })
+    ));
+    if (200..300).contains(&status) || (matches!(status, 403 | 429) && limited) {
+        let reset = core.and_then(|core| core["reset"].as_i64())
+            .or_else(|| header("x-ratelimit-reset").and_then(|value| value.parse::<i64>().ok()));
+        let retry_at = if limited {
+            reset.and_then(|value| chrono::DateTime::<chrono::Utc>::from_timestamp(value, 0))
+                .or_else(|| header("retry-after").and_then(|value| value.parse::<i64>().ok())
+                    .filter(|seconds| (0..=86400).contains(seconds))
+                    .and_then(|seconds| chrono::Utc::now().checked_add_signed(chrono::Duration::seconds(seconds))))
+                .map(|time| time.to_rfc3339())
+        } else { None };
+        let warning = limited.then(|| if remaining == Some(0) {
+            "当前出口的 GitHub 未登录查询额度已用完。在 GitHub 页面登录后可使用账号额度，或等待额度恢复。".to_string()
+        } else {
+            "GitHub 暂时限制了请求频率，请稍后重试；代理连接正常。".to_string()
+        });
+        return TestOutcome { ok: true, message: "GitHub 连接正常".into(), warning, retry_at };
+    }
+    let message = match status {
+        407 => "代理验证未通过，请检查账号和密码".to_string(),
+        403 => "GitHub 拒绝了测试请求（HTTP 403），请检查代理的访问规则或稍后重试。".to_string(),
+        500..=599 => format!("已连接，但 GitHub 或代理服务暂时异常（HTTP {status}），请稍后重试。"),
+        _ => format!("测试地址返回 HTTP {status}，请检查代理设置后重试。"),
+    };
+    TestOutcome { ok: false, message, warning: None, retry_at: None }
+}
+
 fn validate_password(settings: &ProxySettings, password: Option<&str>) -> Result<(), String> {
     if let Some(password) = password {
         if !password.is_empty() && settings.username.is_empty() { return Err("填写代理密码时，也请填写代理账号".into()); }
@@ -392,6 +444,52 @@ mod tests {
         for (key, value) in command.as_std().get_envs() {
             if ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"].contains(&key.to_string_lossy().to_ascii_uppercase().as_str()) { assert!(value.is_none()); }
         }
+    }
+    #[test]
+    fn proxy_test_uses_quota_free_endpoint_and_reports_limits_separately() {
+        assert_eq!(TEST_TARGET, "https://api.github.com/rate_limit");
+        let headers = reqwest::header::HeaderMap::new();
+        let limited = json!({"resources": {"core": {"remaining": 0, "reset": 1794743011}}});
+        let outcome = test_outcome(200, &headers, Some(&limited));
+        assert!(outcome.ok);
+        assert_eq!(outcome.message, "GitHub 连接正常");
+        assert!(outcome.warning.as_ref().unwrap().contains("未登录查询额度"));
+        assert!(outcome.retry_at.is_some());
+        let available = json!({"resources": {"core": {"remaining": 42}}});
+        let outcome = test_outcome(200, &headers, Some(&available));
+        assert!(outcome.ok); assert!(outcome.warning.is_none()); assert!(outcome.retry_at.is_none());
+        let rate_limited = json!({"message": "API rate limit exceeded for synthetic-proxy."});
+        let outcome = test_outcome(403, &headers, Some(&rate_limited));
+        assert!(outcome.ok); assert!(outcome.warning.is_some());
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        assert!(test_outcome(403, &headers, None).ok);
+    }
+    #[test]
+    fn proxy_test_does_not_hide_access_denial_or_authentication_failure() {
+        let headers = reqwest::header::HeaderMap::new();
+        for status in [403, 407, 502] {
+            let outcome = test_outcome(status, &headers, None);
+            assert!(!outcome.ok); assert!(outcome.warning.is_none());
+        }
+        assert!(test_outcome(407, &headers, None).message.contains("账号和密码"));
+        let mut retry_headers = reqwest::header::HeaderMap::new();
+        retry_headers.insert("retry-after", "30".parse().unwrap());
+        let outcome = test_outcome(429, &retry_headers, None);
+        assert!(outcome.ok); assert!(outcome.warning.unwrap().contains("请求频率"));
+        assert!(outcome.retry_at.is_some());
+    }
+    #[tokio::test]
+    async fn quota_exhaustion_still_completes_the_real_proxy_request() {
+        let (proxy, work) = http_fixture(r#"{"resources":{"core":{"remaining":0,"reset":1794743011}}}"#, 200).await;
+        let state = ProxyState::new(manual(proxy, ""), None).unwrap();
+        let result = state.test_target("http://test-target.invalid/rate_limit").await.unwrap();
+        let headers = work.await.unwrap().to_ascii_lowercase();
+        assert!(headers.starts_with("get http://test-target.invalid/rate_limit http/1.1"));
+        assert!(!headers.contains("authorization:"));
+        assert_eq!(result["ok"], true); assert_eq!(result["status"], 200);
+        assert!(result["warning"].as_str().unwrap().contains("未登录查询额度"));
+        assert!(result["retryAt"].is_string());
     }
     #[tokio::test]
     async fn proxy_test_returns_status_without_any_credentials() {

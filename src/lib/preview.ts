@@ -56,6 +56,6 @@ export function createPreviewSnapshot(): Snapshot {
     ],
     repositoryNotes: [],
     settings: { theme: 'system', startupPage: 'home', startupGithubTab: 'explore', navigationOrder: ['home', 'library', 'updates', 'downloads', 'github', 'agent'], proxy: { mode: 'system', url: '', username: '' }, checkIntervalMinutes: 60, notifications: true, autoDownload: false, maxConcurrentDownloads: 2, closeToTray: true, agentEnabled: false, agentPort: 47831 },
-    runtime: { appVersion: '0.3.0', dataDir: '.\\data（界面示例）', portable: true, githubTokenConfigured: false, proxyPasswordConfigured: false, agent: { enabled: false, address: null, tokenConfigured: false, error: null } },
+    runtime: { appVersion: '0.3.1', dataDir: '.\\data（界面示例）', portable: true, githubTokenConfigured: false, proxyPasswordConfigured: false, agent: { enabled: false, address: null, tokenConfigured: false, error: null } },
   };
 }

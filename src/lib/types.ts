@@ -109,6 +109,8 @@ export interface ProxyTestResult {
   status: number | null;
   latencyMs: number;
   message: string;
+  warning?: string | null;
+  retryAt?: string | null;
 }
 export interface RepositoryNote {
   repository: string;

@@ -439,6 +439,15 @@ fn startup_message(message: &str) {
 #[cfg(not(windows))]
 fn startup_message(message: &str) { eprintln!("{message}"); }
 
+#[cfg(windows)]
+fn refresh_executable_icon(executable: &std::path::Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEITEM, SHCNF_FLUSHNOWAIT, SHCNF_PATHW};
+    let path: Vec<u16> = executable.as_os_str().encode_wide().chain(Some(0)).collect();
+    // Invalidate only this executable's icon after an in-place portable update.
+    unsafe { SHChangeNotify(SHCNE_UPDATEITEM as i32, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, path.as_ptr().cast(), std::ptr::null()); }
+}
+
 pub fn run() {
     if smoke_mode() { return; }
     if tauri::webview_version().is_err() {
@@ -489,6 +498,8 @@ pub fn run() {
                 .data_directory(webview_dir)
                 .build()?;
             setup_tray(app)?;
+            #[cfg(windows)]
+            refresh_executable_icon(&executable);
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(snapshot) = host.core.handle("snapshot", json!({})).await {
