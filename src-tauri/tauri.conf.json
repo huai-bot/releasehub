@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ReleaseHub",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "identifier": "io.github.huai-bot.releasehub",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -19,8 +19,8 @@
     "active": true,
     "targets": ["nsis"],
     "category": "Utility",
-    "shortDescription": "轻量、便携的 GitHub 软件更新中心",
-    "longDescription": "集中订阅 GitHub 软件发行版，管理 Stars 分类与项目备注，查看首页动态，通过 MCP 向外部 AI 提供软件资料。",
+    "shortDescription": "轻量、便携的 GitHub 发行资源管理器",
+    "longDescription": "集中订阅 GitHub 软件与文件，管理发行附件、Stars 分类与项目备注，查看首页动态，通过 MCP 向外部 AI 提供软件资料。",
     "resources": {
       "tools/": "tools/",
       "../docs/AGENT_GUIDE.md": "integrations/AGENT_GUIDE.md",
@@ -31,7 +31,7 @@
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper", "silent": false },
-      "nsis": { "displayLanguageSelector": true, "languages": ["SimpChinese", "English"], "installMode": "currentUser" }
+      "nsis": { "displayLanguageSelector": true, "languages": ["SimpChinese", "English"], "installMode": "currentUser", "installerIcon": "icons/icon.ico", "uninstallerIcon": "icons/icon.ico" }
     }
   }
 }

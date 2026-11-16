@@ -3,21 +3,63 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{path::Path, sync::Mutex};
 
-pub struct Store { db: Mutex<Connection> }
-fn storage_error(_: impl std::fmt::Display) -> String { "本地数据读写失败，请检查数据目录权限和空间".into() }
-impl Store {
-    pub fn new(path: &Path) -> Result<Self, String> {
-        let db = Connection::open(path).map_err(storage_error)?;
-        db.busy_timeout(std::time::Duration::from_secs(5)).map_err(storage_error)?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
-            CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+const SCHEMA_VERSION:i64=3;
+fn migrate(db:&mut Connection)->Result<(),String> {
+    let version:i64=db.pragma_query_value(None,"user_version",|r|r.get(0)).map_err(storage_error)?;
+    if version>SCHEMA_VERSION {return Err("资料库由更新版本创建，请升级 ReleaseHub 后打开".into());}
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;").map_err(storage_error)?;
+    let tx=db.transaction().map_err(storage_error)?;
+    if version<1 {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS downloads (id TEXT PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS preferences (id TEXT PRIMARY KEY, json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS download_digests (id TEXT PRIMARY KEY, digest TEXT);
-            CREATE TABLE IF NOT EXISTS repository_notes (repository TEXT PRIMARY KEY COLLATE NOCASE,
-                name TEXT NOT NULL, description TEXT NOT NULL, updated_at TEXT NOT NULL);
+            PRAGMA user_version=1;").map_err(storage_error)?;
+    }
+    if version<2 {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS repository_notes (repository TEXT PRIMARY KEY COLLATE NOCASE,
+            name TEXT NOT NULL, description TEXT NOT NULL, updated_at TEXT NOT NULL);
             PRAGMA user_version=2;").map_err(storage_error)?;
+    }
+    if version<3 {
+        tx.execute_batch("UPDATE preferences SET json=json_set(json,'$.colorScheme','blue')
+                WHERE id='settings' AND json_type(json,'$.colorScheme') IS NULL;
+            UPDATE projects SET json=json_set(json,'$.managementMode','software')
+                WHERE json_type(json,'$.managementMode') IS NULL;
+            UPDATE downloads SET json=json_set(json,'$.installable',json(CASE
+                WHEN json_extract(json,'$.kind') IN ('installer','portable') THEN 'true' ELSE 'false' END))
+                WHERE json_type(json,'$.installable') IS NULL;
+            UPDATE downloads SET json=json_set(json,'$.installable',json('false'))
+                WHERE json_extract(json,'$.projectId') IN (SELECT id FROM projects WHERE json_extract(json,'$.managementMode')='files');").map_err(storage_error)?;
+        let projects:Vec<(String,String)>={
+            let mut stmt=tx.prepare("SELECT id,json FROM projects").map_err(storage_error)?;
+            let rows=stmt.query_map([],|row|Ok((row.get(0)?,row.get(1)?))).map_err(storage_error)?;
+            rows.collect::<Result<_,_>>().map_err(storage_error)?
+        };
+        for (id,json) in projects {
+            let mut project:Project=serde_json::from_str(&json).map_err(storage_error)?;
+            super::models::validate_management_mode(&project.management_mode)?;
+            if project.management_mode=="files" {
+                project.installed_version=None;project.installed_path=None;project.installed_source=None;
+            }
+            if let Some(mut release)=project.release.take() {
+                for asset in &mut release.assets {super::selection::classify_for_mode(asset,&project);}
+                project.release=Some(release);
+            }
+            tx.execute("UPDATE projects SET json=?1 WHERE id=?2",params![serde_json::to_string(&project).map_err(storage_error)?,id]).map_err(storage_error)?;
+        }
+        tx.pragma_update(None,"user_version",3).map_err(storage_error)?;
+    }
+    tx.commit().map_err(storage_error)
+}
+pub struct Store { db: Mutex<Connection> }
+fn storage_error(_: impl std::fmt::Display) -> String { "本地数据读写失败，请检查数据目录权限和空间".into() }
+impl Store {
+    pub fn new(path: &Path) -> Result<Self, String> {
+        let mut db = Connection::open(path).map_err(storage_error)?;
+        db.busy_timeout(std::time::Duration::from_secs(5)).map_err(storage_error)?;
+        migrate(&mut db)?;
         let store = Self { db: Mutex::new(db) };
         for mut d in store.downloads()? {
             if ["queued", "downloading"].contains(&d.status.as_str()) {
@@ -62,6 +104,10 @@ impl Store {
         let mut value: T = serde_json::from_str(&json.ok_or_else(|| "记录不存在，可能已被删除".to_string())?).map_err(storage_error)?;
         f(&mut value)?;
         tx.execute(&format!("UPDATE {} SET json=?1 WHERE id=?2", table), params![serde_json::to_string(&value).map_err(storage_error)?, id]).map_err(storage_error)?;
+        if table=="projects" && serde_json::to_value(&value).map_err(storage_error)?.get("managementMode").and_then(serde_json::Value::as_str)==Some("files") {
+            // Revoke historical installation permission in the same transaction as the mode change.
+            tx.execute("UPDATE downloads SET json=json_set(json,'$.installable',json('false')) WHERE json_extract(json,'$.projectId')=?1",[id]).map_err(storage_error)?;
+        }
         tx.commit().map_err(storage_error)?;
         Ok(value)
     }
@@ -151,6 +197,45 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn version_two_migrates_old_records_once_without_losing_preferences() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");
+        let store=Store::new(&path).unwrap();
+        let mut settings=serde_json::to_value(Settings::default()).unwrap();settings.as_object_mut().unwrap().remove("colorScheme");settings["theme"]=serde_json::json!("dark");
+        store.put("preferences","settings",&settings).unwrap();
+        let mut project=serde_json::to_value(super::super::models::test_project("owner","repo")).unwrap();
+        project.as_object_mut().unwrap().remove("managementMode");
+        project["release"]=serde_json::json!({"id":1,"tag":"v1","name":"v1","body":"","publishedAt":now(),
+            "url":"https://github.com/owner/repo/releases/tag/v1","prerelease":false,"assets":[{"id":1,"name":"model.safetensors","size":10,
+                "url":"https://github.com/owner/repo/releases/download/v1/model.safetensors","contentType":"application/octet-stream",
+                "digest":null,"kind":"other","compatible":false,"score":0,"reason":"旧分类"}]});
+        let id=project["id"].as_str().unwrap().to_owned();store.put("projects",&id,&project).unwrap();
+        for kind in ["portable","installer","other"] {
+            let value=serde_json::json!({"id":kind,"projectId":id,"projectName":"repo","assetId":1,"fileName":"file",
+                "tag":"v1","url":"https://github.com/owner/repo/releases/download/v1/file","kind":kind,
+                "totalBytes":1,"receivedBytes":1,"status":"completed","verified":false,"createdAt":now(),"updatedAt":now()});
+            store.put("downloads",kind,&value).unwrap();
+        }
+        store.db.lock().unwrap().pragma_update(None,"user_version",2).unwrap();drop(store);
+        let migrated=Store::new(&path).unwrap();
+        assert_eq!(migrated.settings().unwrap().color_scheme,"blue");assert_eq!(migrated.settings().unwrap().theme,"dark");
+        let migrated_project=migrated.project(&id).unwrap();assert_eq!(migrated_project.management_mode,"software");
+        let asset=&migrated_project.release.as_ref().unwrap().assets[0];assert!(asset.downloadable);assert!(!asset.installable);
+        for kind in ["portable","installer","other"] {assert_eq!(migrated.download(kind).unwrap().installable,kind!="other");}
+        let version:i64=migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();assert_eq!(version,3);
+        let mut settings=migrated.settings().unwrap();settings.color_scheme="amber".into();migrated.save_settings(&settings).unwrap();drop(migrated);
+        let reopened=Store::new(&path).unwrap();assert_eq!(reopened.settings().unwrap().color_scheme,"amber");
+        reopened.db.lock().unwrap().pragma_update(None,"user_version",4).unwrap();drop(reopened);
+        assert!(Store::new(&path).err().unwrap().contains("更新版本"));
+        let db=Connection::open(path).unwrap();assert_eq!(db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),4);
+    }
+    #[test] fn migration_failure_rolls_back_data_and_version() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();
+        store.put("projects","bad",&serde_json::json!({"owner":"incomplete"})).unwrap();
+        store.db.lock().unwrap().pragma_update(None,"user_version",2).unwrap();drop(store);
+        assert!(Store::new(&path).is_err());
+        let db=Connection::open(path).unwrap();assert_eq!(db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),2);
+        let json:String=db.query_row("SELECT json FROM projects WHERE id='bad'",[],|r|r.get(0)).unwrap();assert!(!json.contains("managementMode"));
+    }
     #[test] fn settings_roundtrip() {
         let dir = tempfile::tempdir().unwrap(); let s = Store::new(&dir.path().join("db.sqlite")).unwrap();
         let mut settings = s.settings().unwrap(); settings.auto_download = true;
@@ -178,7 +263,7 @@ mod tests {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();
         for status in ["queued","downloading","installing","completed"]{
             let time=now();store.put_download(&DownloadRecord{id:status.into(),project_id:"project".into(),project_name:"app".into(),asset_id:1,
-                file_name:"app.zip".into(),tag:"v1".into(),url:"https://github.com/owner/app/releases/download/v1/app.zip".into(),kind:"portable".into(),
+                file_name:"app.zip".into(),tag:"v1".into(),url:"https://github.com/owner/app/releases/download/v1/app.zip".into(),kind:"portable".into(),installable:true,
                 total_bytes:10,received_bytes:4,status:status.into(),path:None,sha256:None,verified:false,error:None,created_at:time.clone(),updated_at:time}).unwrap();
         }
         drop(store);let reopened=Store::new(&path).unwrap();

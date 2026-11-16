@@ -15,6 +15,8 @@ const WINDOW_LABEL: &str = "github-feed";
 const SOURCE: &str = "https://github.com/dashboard-feed";
 const MAX_ITEMS: usize = 160;
 const MAX_PAYLOAD: usize = 2 * 1024 * 1024;
+const CACHE_FILE: &str = "feed-cache.json";
+const CACHE_MAX_AGE_DAYS: i64 = 30;
 const EXTRACTOR: &str = include_str!("../../src/lib/feed/dom-extractor.js");
 const RECEIVER: &str = include_str!("../../src/lib/feed/webview-receiver.js");
 
@@ -35,6 +37,8 @@ pub struct GithubFeedItem {
 #[serde(rename_all = "camelCase")]
 pub struct GithubFeedPage {
     pub connected: bool,
+    /// Saved cards are historical data, never proof of a live website login.
+    pub cached: bool,
     pub loading: bool,
     pub account: Option<String>,
     pub items: Vec<GithubFeedItem>,
@@ -47,7 +51,7 @@ pub struct GithubFeedPage {
 }
 impl Default for GithubFeedPage {
     fn default() -> Self {
-        Self { connected: false, loading: false, account: None, items: Vec::new(), has_more: false,
+        Self { connected: false, cached: false, loading: false, account: None, items: Vec::new(), has_more: false,
             last_updated: None, error: None, source_url: SOURCE.into(), request_id: Uuid::new_v4().to_string(), session_revision: 0 }
     }
 }
@@ -73,6 +77,19 @@ pub struct FeedReceivePayload {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileRecord { id: Uuid, proxy_fingerprint: String }
+
+/// One bounded, machine-local snapshot. No tokens, cookies, raw HTML or account
+/// authority are serialized. The profile UUID and account bind its ownership.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FeedCacheRecord {
+    version: u8,
+    profile: Uuid,
+    account: String,
+    saved_at: String,
+    source_url: String,
+    items: Vec<GithubFeedItem>,
+}
 struct FeedState {
     page: GithubFeedPage,
     window_token: Option<String>,
@@ -98,7 +115,41 @@ pub struct GitHubFeedService {
 }
 impl GitHubFeedService {
     pub fn new(machine_local_root: PathBuf, proxy: Arc<ProxyState>) -> Arc<Self> {
-        Arc::new(Self { machine_local_root, proxy, state: Mutex::new(FeedState::default()), operation: AsyncMutex::new(()) })
+        let service = Arc::new(Self { machine_local_root, proxy, state: Mutex::new(FeedState::default()), operation: AsyncMutex::new(()) });
+        // Disk-only restore: rendering saved cards never launches a WebView or
+        // treats remembered account metadata as a verified website session.
+        if let (Ok(root), Ok(settings), Ok(mut state)) = (service.profile_root(), service.proxy.settings(), service.state.lock()) {
+            if let Some(record) = read_profile(&root).filter(|record| record.proxy_fingerprint == proxy_fingerprint(&settings)) {
+                if let Some(cache) = read_feed_cache(&root, &record) {
+                    state.page.cached = true;
+                    state.page.account = Some(cache.account);
+                    state.page.items = cache.items;
+                    state.page.last_updated = Some(cache.saved_at);
+                    state.page.source_url = cache.source_url;
+                }
+            }
+        }
+        service
+    }
+
+    /// Feed disk I/O and invalidation share the state mutex with receive(). This
+    /// prevents a delayed accepted response from rewriting a cleared snapshot.
+    pub fn clear_cache(&self) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|_| "动态状态暂时不可用。")?;
+        let revision = state.page.session_revision + 1;
+        // Invalidate the window token too: a navigation already in flight must
+        // not mint a fresh accepted request and resurrect cleared private cards.
+        *state = FeedState::default();
+        state.page.session_revision = revision;
+        clear_feed_cache(&self.profile_root()?)
+    }
+
+    pub fn cache_stats(&self) -> Result<Value, String> {
+        let _state = self.state.lock().map_err(|_| "动态状态暂时不可用。")?;
+        let root = self.profile_root()?;
+        let valid = read_profile(&root).is_some_and(|profile| read_feed_cache(&root, &profile).is_some());
+        let bytes = if valid { fs::metadata(root.join(CACHE_FILE)).map(|metadata| metadata.len()).unwrap_or(0) } else { 0 };
+        Ok(json!({"entries": if valid { 1 } else { 0 }, "bytes": bytes}))
     }
 
     pub async fn handle(self: &Arc<Self>, app: &AppHandle, action: &str, payload: Value) -> Result<Value, String> {
@@ -146,15 +197,7 @@ impl GitHubFeedService {
 
     fn begin(&self, append: bool, clear: bool) -> Result<String, String> {
         let mut state = self.state.lock().map_err(|_| "动态状态暂时不可用。")?;
-        state.page.request_id = Uuid::new_v4().to_string();
-        state.page.loading = true;
-        state.page.error = None;
-        if clear { state.page.items.clear(); state.page.has_more = false; state.page.last_updated = None; }
-        state.append = append;
-        state.sequence = 0;
-        state.document_id = None;
-        state.started = Some(Instant::now());
-        Ok(state.page.request_id.clone())
+        Ok(begin_request(&mut state, append, clear))
     }
 
     fn reset_session(&self, error: Option<String>) -> Result<(), String> {
@@ -163,7 +206,7 @@ impl GitHubFeedService {
         *state = FeedState::default();
         state.page.session_revision = revision;
         state.page.error = error;
-        Ok(())
+        clear_feed_cache(&self.profile_root()?)
     }
 
     fn script(&self, token: &str) -> Option<String> {
@@ -183,7 +226,7 @@ impl GitHubFeedService {
             if let Some(window) = app.get_webview_window(WINDOW_LABEL) { window.destroy().map_err(|_| "无法重启 GitHub 网页窗口。")?; }
         }
         if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
-            self.begin(false, !visible)?;
+            self.begin(false, false)?;
             if visible {
                 // A deliberate reopen stays visible for account changes/site inspection.
                 self.state.lock().map_err(|_| "动态状态暂时不可用。")?.hide_when_ready = false;
@@ -204,13 +247,17 @@ impl GitHubFeedService {
             return Err("网页登录暂不使用带账号密码的手动代理。请在设置中选择系统代理，或使用本机无须密码的 HTTP / SOCKS5 代理，再连接网页。".into());
         }
         let profile = self.profile(&fingerprint)?;
+        let revision = self.state.lock().map_err(|_| "动态状态暂时不可用。")?.page.session_revision;
         // This runs under the operation lock: a delayed cleanup must never race a
         // newly rotated profile pointer and delete a newer login session.
         let cleanup_warning = remove_retired_profiles(&self.profile_root()?).await.err();
         let token = Uuid::new_v4().to_string();
-        self.begin(false, true)?;
         {
             let mut state = self.state.lock().map_err(|_| "动态状态暂时不可用。")?;
+            // Settings can clear caches while WebView cleanup awaits. Fence the
+            // old operation before it mints a new request/window authority.
+            if state.page.session_revision != revision { return Ok(()); }
+            begin_request(&mut state, false, false);
             state.window_token = Some(token.clone());
             state.proxy_fingerprint = Some(fingerprint);
             state.hide_when_ready = true;
@@ -235,7 +282,10 @@ impl GitHubFeedService {
                         state.page.request_id = Uuid::new_v4().to_string();
                         state.document_id = None; state.sequence = 0;
                         state.page.loading = true; state.started = Some(Instant::now());
-                        if is_login_url(event.url()) { clear_account(&mut state, None); }
+                        if is_login_url(event.url()) {
+                            clear_account(&mut state, None);
+                            if let Err(error) = service.profile_root().and_then(|root| clear_feed_cache(&root)) { state.page.error = Some(error); }
+                        }
                     }
                 } else if let Some(script) = service.script(&page_token) { let _ = window.eval(script); }
             });
@@ -315,7 +365,10 @@ impl GitHubFeedService {
     }
 
     fn rotate_profile(&self, fingerprint: &str) -> Result<ProfileRecord, String> {
+        let mut state = self.state.lock().map_err(|_| "动态状态暂时不可用。")?;
         let root = self.profile_root()?;
+        clear_account(&mut state, None);
+        clear_feed_cache(&root)?;
         let next = ProfileRecord { id: Uuid::new_v4(), proxy_fingerprint: fingerprint.into() };
         fs::write(root.join("current.json"), serde_json::to_vec(&next).map_err(|_| "无法保存网页登录配置。")?).map_err(|_| "无法保存本机网页登录配置。")?;
         Ok(next)
@@ -350,27 +403,38 @@ impl GitHubFeedService {
         if state.document_id.as_deref().is_some_and(|id| id != payload.document_id) || payload.sequence <= state.sequence { return Ok(()); }
         state.document_id = Some(payload.document_id); state.sequence = payload.sequence;
         let account = payload.account.filter(|name| valid_login(name));
-        if state.page.account != account {
+        // Missing metadata during navigation/loading is not a logout verdict.
+        // A positive different account, or an explicit login result, is.
+        if account.is_some() && state.page.account != account {
             clear_account(&mut state, account.clone());
+            clear_feed_cache(&self.profile_root()?)?;
         }
-        state.page.connected = payload.connected && account.is_some();
-        state.page.account = account;
+        let verified_report = payload.connected && account.is_some();
+        if verified_report {
+            state.page.connected = true;
+            state.page.account = account;
+        }
         if is_feed_url(&reported_url) { state.page.source_url = format!("https://github.com{}", reported_url.path()); }
         match payload.status.as_str() {
             "login" => {
                 clear_account(&mut state, None);
+                let cleanup_error = self.profile_root().and_then(|root| clear_feed_cache(&root)).err();
                 state.page.loading = false; state.started = None;
-                state.page.error = payload.error.map(|error| plain_text(&error, 400));
+                state.page.error = cleanup_error.or_else(|| payload.error.map(|error| plain_text(&error, 400)));
                 // An expired session needs the real page, not an invisible login wait.
                 drop(state); let _ = window.show(); return Ok(());
             }
-            "ready" if state.page.connected && is_feed_url(&reported_url) => {
+            "ready" if verified_report && is_feed_url(&reported_url) => {
                 let items: Vec<_> = payload.items.into_iter().filter_map(sanitize_item).collect();
                 if state.append { append_unique(&mut state.page.items, items); } else { state.page.items = unique_items(items); }
                 state.page.has_more = payload.has_more && state.page.items.len() < MAX_ITEMS;
                 state.page.loading = false;
                 state.page.error = None;
                 state.page.last_updated = Some(Utc::now().to_rfc3339()); state.started = None;
+                state.page.cached = false;
+                // Persist only the sanitized, accepted snapshot while still
+                // holding the same lock used by clear/account invalidation.
+                if let Err(error) = self.profile_root().and_then(|root| write_feed_cache(&root, &state.page)) { state.page.error = Some(error); }
                 let hide = state.hide_when_ready; state.hide_when_ready = false;
                 drop(state); if hide { let _ = window.hide(); } return Ok(());
             }
@@ -393,10 +457,19 @@ pub async fn feed_receive(window: WebviewWindow, service: State<'_, Arc<GitHubFe
     service.receive(&window, payload)
 }
 
+fn begin_request(state: &mut FeedState, append: bool, clear: bool) -> String {
+    state.page.request_id = Uuid::new_v4().to_string();
+    state.page.loading = true; state.page.error = None;
+    if clear { state.page.items.clear(); state.page.has_more = false; state.page.last_updated = None; state.page.cached = false; }
+    state.append = append; state.sequence = 0; state.document_id = None; state.started = Some(Instant::now());
+    state.page.request_id.clone()
+}
+
 fn clear_account(state: &mut FeedState, account: Option<String>) {
     if state.page.account != account { state.page.session_revision += 1; }
     state.page.account = account;
-    state.page.connected = state.page.account.is_some();
+    state.page.connected = false;
+    state.page.cached = false;
     state.page.items.clear(); state.page.has_more = false; state.page.last_updated = None;
     state.append = false;
 }
@@ -436,6 +509,62 @@ fn read_profile(root: &Path) -> Option<ProfileRecord> {
     if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 1024 { return None; }
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
+fn clear_feed_cache(root: &Path) -> Result<(), String> {
+    let path = root.join(CACHE_FILE);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("无法检查已保存的动态。".into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err("动态缓存文件不能是链接或目录。".into()),
+        Ok(_) => fs::remove_file(&path).or_else(|_| fs::write(&path, b""))
+            .map_err(|_| "无法清除已保存的动态，请检查本机目录权限。".into()),
+    }
+}
+
+fn read_feed_cache(root: &Path, profile: &ProfileRecord) -> Option<FeedCacheRecord> {
+    let path = root.join(CACHE_FILE);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() { return None; }
+    let result = (|| {
+        if metadata.len() > MAX_PAYLOAD as u64 { return None; }
+        // Bound the actual read as well as metadata (file size may have changed).
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::Read::take(fs::File::open(&path).ok()?, (MAX_PAYLOAD + 1) as u64), &mut bytes).ok()?;
+        if bytes.len() > MAX_PAYLOAD { return None; }
+        let mut cache: FeedCacheRecord = serde_json::from_slice(&bytes).ok()?;
+        let saved = DateTime::parse_from_rfc3339(&cache.saved_at).ok()?.with_timezone(&Utc);
+        let age = Utc::now().signed_duration_since(saved);
+        if cache.version != 1 || cache.profile != profile.id || !valid_login(&cache.account)
+            || age < chrono::Duration::zero() || age > chrono::Duration::days(CACHE_MAX_AGE_DAYS)
+            || cache.items.len() > MAX_ITEMS || !Url::parse(&cache.source_url).is_ok_and(|url| is_feed_url(&url)) { return None; }
+        cache.items = unique_items(cache.items.into_iter().filter_map(sanitize_item).collect());
+        cache.source_url = format!("https://github.com{}", Url::parse(&cache.source_url).ok()?.path());
+        Some(cache)
+    })();
+    if result.is_none() { let _ = clear_feed_cache(root); }
+    result
+}
+
+fn write_feed_cache(root: &Path, page: &GithubFeedPage) -> Result<(), String> {
+    let profile = read_profile(root).ok_or("无法确认动态所属的本机会话。")?;
+    let account = page.account.as_ref().filter(|account| valid_login(account)).ok_or("尚未确认动态所属的账号。")?;
+    if !page.connected || page.cached { return Err("尚未验证的历史动态不能覆盖缓存。".into()); }
+    let mut cache = FeedCacheRecord { version: 1, profile: profile.id, account: account.clone(),
+        saved_at: page.last_updated.clone().ok_or("动态更新时间不存在。")?, source_url: page.source_url.clone(),
+        items: unique_items(page.items.iter().cloned().filter_map(sanitize_item).collect()) };
+    let bytes = loop {
+        let bytes = serde_json::to_vec(&cache).map_err(|_| "无法保存动态内容。")?;
+        if bytes.len() <= MAX_PAYLOAD { break bytes; }
+        if cache.items.pop().is_none() { return Err("动态缓存超出大小限制。".into()); }
+    };
+    let path = root.join(CACHE_FILE);
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file()) {
+        return Err("动态缓存文件不能是链接或目录。".into());
+    }
+    // A single truncating file stays within the 2 MiB disk budget even while
+    // writing. Interrupted/corrupt writes are discarded on the next read.
+    fs::write(path, bytes).map_err(|_| "动态已读取，但未能保存到这台电脑。".into())
+}
+
 async fn remove_retired_profiles(root: &Path) -> Result<(), String> {
     let active = read_profile(root).ok_or("无法读取本机会话目录记录。")?.id;
     for attempt in 0..5 {
@@ -485,6 +614,63 @@ mod tests {
     fn account_change_clears_previous_private_content() {
         let mut state = FeedState::default(); state.page.account = Some("old-user".into()); state.page.items = vec![item("old")]; state.append = true;
         clear_account(&mut state, Some("new-user".into())); assert!(state.page.items.is_empty()); assert!(!state.append); assert_eq!(state.page.session_revision, 1);
+    }
+    fn cache_fixture(root: &Path) -> ProfileRecord {
+        let profile = ProfileRecord { id: Uuid::new_v4(), proxy_fingerprint: proxy_fingerprint(&ProxySettings::default()) };
+        fs::write(root.join("current.json"), serde_json::to_vec(&profile).unwrap()).unwrap();
+        profile
+    }
+    fn cache_page() -> GithubFeedPage {
+        GithubFeedPage { connected: true, account: Some("saved-user".into()), items: vec![item("saved")], last_updated: Some(Utc::now().to_rfc3339()), ..Default::default() }
+    }
+    #[test]
+    fn cache_restores_history_without_claiming_a_verified_login() {
+        let temp = tempfile::tempdir().unwrap(); let root = temp.path().join("github-feed-webview"); fs::create_dir(&root).unwrap();
+        cache_fixture(&root); write_feed_cache(&root, &cache_page()).unwrap();
+        let service = GitHubFeedService::new(temp.path().to_path_buf(), Arc::new(ProxyState::new(ProxySettings::default(), None).unwrap()));
+        let restored = service.snapshot().unwrap(); assert_eq!(restored["cached"], true); assert_eq!(restored["connected"], false);
+        assert_eq!(restored["account"], "saved-user"); assert_eq!(restored["items"].as_array().unwrap().len(), 1);
+        assert_eq!(service.cache_stats().unwrap()["entries"], 1);
+        let request = restored["requestId"].clone();
+        service.state.lock().unwrap().window_token = Some("old-window".into());
+        let revision = service.state.lock().unwrap().page.session_revision;
+        service.clear_cache().unwrap();
+        let cleared = service.snapshot().unwrap(); assert_eq!(cleared["items"].as_array().unwrap().len(), 0);
+        assert_ne!(cleared["requestId"], request); assert_eq!(service.cache_stats().unwrap()["entries"], 0);
+        assert_ne!(service.state.lock().unwrap().page.session_revision, revision);
+        assert!(service.script("old-window").is_none());
+    }
+    #[test]
+    fn cache_rejects_other_profiles_expiry_corruption_and_oversize() {
+        let temp = tempfile::tempdir().unwrap(); let root = temp.path(); let mut profile = cache_fixture(root);
+        write_feed_cache(root, &cache_page()).unwrap(); profile.id = Uuid::new_v4();
+        assert!(read_feed_cache(root, &profile).is_none()); assert!(!root.join(CACHE_FILE).exists());
+        profile = cache_fixture(root); let mut page = cache_page();
+        for days in [-31, 1] {
+            page.last_updated = Some((Utc::now() + chrono::Duration::days(days)).to_rfc3339());
+            write_feed_cache(root, &page).unwrap(); assert!(read_feed_cache(root, &profile).is_none());
+        }
+        fs::write(root.join(CACHE_FILE), b"not-json").unwrap(); assert!(read_feed_cache(root, &profile).is_none());
+        fs::write(root.join(CACHE_FILE), vec![b' '; MAX_PAYLOAD + 1]).unwrap(); assert!(read_feed_cache(root, &profile).is_none());
+    }
+    #[test]
+    fn cache_bounds_and_resanitizes_saved_items() {
+        let temp = tempfile::tempdir().unwrap(); let root = temp.path(); let profile = cache_fixture(root); let mut page = cache_page();
+        page.items = (0..300).map(|index| { let mut row = item(&index.to_string()); row.body = "中".repeat(1800); row.summary = "中".repeat(500); row.avatar_url = Some("https://evil.test/avatar".into()); row }).collect();
+        write_feed_cache(root, &page).unwrap(); assert!(fs::metadata(root.join(CACHE_FILE)).unwrap().len() <= MAX_PAYLOAD as u64);
+        let mut saved = read_feed_cache(root, &profile).unwrap(); assert!(saved.items.len() <= MAX_ITEMS); assert!(saved.items.iter().all(|row| row.avatar_url.is_none()));
+        saved.items[0].url = "javascript:alert(1)".into(); saved.items[1].body = "untrusted\u{202e}".into();
+        fs::write(root.join(CACHE_FILE), serde_json::to_vec(&saved).unwrap()).unwrap();
+        let restored = read_feed_cache(root, &profile).unwrap(); assert_eq!(restored.items.len(), saved.items.len() - 1); assert_eq!(restored.items[0].body, "untrusted");
+    }
+    #[test]
+    fn refresh_keeps_cards_until_success_and_profile_rotation_clears_them() {
+        let temp = tempfile::tempdir().unwrap(); let service = GitHubFeedService::new(temp.path().to_path_buf(), Arc::new(ProxyState::new(ProxySettings::default(), None).unwrap()));
+        let root = service.profile_root().unwrap(); cache_fixture(&root); write_feed_cache(&root, &cache_page()).unwrap();
+        service.state.lock().unwrap().page = cache_page(); service.begin(false, false).unwrap();
+        assert_eq!(service.snapshot().unwrap()["items"].as_array().unwrap().len(), 1);
+        service.rotate_profile("new-proxy").unwrap(); assert!(!root.join(CACHE_FILE).exists());
+        assert_eq!(service.snapshot().unwrap()["items"].as_array().unwrap().len(), 0);
     }
     #[tokio::test]
     async fn cleanup_only_removes_retired_uuid_profiles() {

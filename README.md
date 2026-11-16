@@ -1,6 +1,6 @@
 # ReleaseHub · 追新
 
-**把分散的 GitHub 软件更新放在一起。** 面向 Windows 10/11 x64，集中管理发行版、Stars 分类、项目备注和首页动态，通过 MCP 把软件资料交给你使用的 AI 平台。
+**把分散的 GitHub 软件和发行文件放在一起。** 面向 Windows 10/11 x64，集中管理发行版、Stars 分类、项目备注和首页动态，通过 MCP 把软件资料交给你使用的 AI 平台。
 
 [下载发布版本](<https://github.com/huai-bot/releasehub/releases>) · [便携使用说明](<docs/PORTABLE.txt>) · [连接 Agent](<docs/AGENT_GUIDE.md>) · [安全说明](<SECURITY.md>)
 
@@ -8,7 +8,7 @@
 
 1. 下载名称带 **windows-x64-portable.zip** 的文件，右键 → **全部解压**。
 2. 把 ReleaseHub 文件夹放到可写的位置，例如 `D:\TOOLS\ReleaseHub`，双击其中的应用程序。
-3. 点击 **添加软件**，粘贴 GitHub 项目地址，再点击 **检查更新**。
+3. 点击 **添加资源**，粘贴 GitHub 项目地址，选择“软件”或“文件”，再点击 **检查更新**。
 4. 核对 Windows 安装包并下载。下载结束后点击安装/准备按钮，按提示完成安装或打开程序目录。
 5. 在 **设置 → 启动与导航** 中选择默认页面；拖动左侧页面可调整顺序。
 
@@ -21,13 +21,13 @@
 | 日常操作 | 功能 |
 | --- | --- |
 | 集中追新 | 订阅仓库、正式/预览频道、集中检查、发布说明、按软件记住下载偏好 |
-| 选择与下载 | Windows/x64 文件识别、队列、进度、取消、失败重试、SHA-256 比对 |
+| 选择与下载 | Windows/x64 软件推荐；文档、模型、模组等 Releases 附件保存；队列、进度、重试、SHA-256 比对 |
 | 安装与版本 | 打开 EXE/MSI 安装向导，ZIP 和适配的独立 EXE 保存到受管目录；切换已准备版本 |
 | 网络代理 | 跟随系统、手动 HTTP/SOCKS5、直连，支持代理账号密码及连接测试 |
 | GitHub 管理 | 搜索、我的仓库、Star/取消 Star、Lists 分类同步、批量添加分类 |
 | 项目备注 | 为任意仓库记录本地名称和短说明，配合搜索和资料导入导出 |
 | 首页动态 | 登录 GitHub 官网，按原页面顺序显示 Dashboard feed；同时保留关注动态 |
-| 个人偏好 | 一体化浅色/深色标题栏、默认启动页、GitHub 默认栏目、侧栏拖动与键盘排序 |
+| 个人偏好 | 浅色/深色/系统模式，经典蓝、青绿、柔紫、暖琥珀配色，默认启动页、侧栏排序 |
 | AI 资料连接 | 通用 MCP、Claude Code、Codex、Cursor、VS Code 配置，10 个信息工具和配套命令行 |
 | 数据迁移 | 便携资料库，订阅、备注与偏好导入导出 |
 
@@ -53,11 +53,15 @@ EXE/MSI 安装向导完成后，可在软件详情中记录本机版本和位置
 4. 点开仓库 → **编辑本地备注**，填写便于记忆的项目名称和短说明。备注保存在追新；官网名称保持原样。
 5. 进入 **首页动态 → 连接官网**，在独立官方窗口登录一次。完成后，页面内容自动显示在追新，可刷新、加载更多和查看原文。
 
-切换到软件内其他页面再回到 **GitHub**，会保留已经加载的内容、当前分类、筛选和滚动位置，不重复加载。需要同步官网新内容时，点击列表或动态的 **刷新**；退出或更换账号会清掉旧账号内容。缓存仅在本次打开软件期间保留。
+切换到软件内其他页面再回到 **GitHub**，会保留已经加载的内容、当前分类、筛选和滚动位置，不重复加载。需要同步官网新内容时，点击列表或动态的 **刷新**；退出或更换账号会清掉旧账号内容。再次启动会先显示本机缓存，再在后台更新；刷新失败时保留原内容和保存时间。缓存最多 100 MiB、保留 30 天，可在设置中清理，不影响下载文件。
 
-日常管理由随包附带的官方 **GitHub CLI 2.100.0** 授权。Lists 使用 GitHub 官方 GraphQL；若现有授权缺少分类管理权限，按页面提示补充授权。官网动态使用单独的网页登录，与 CLI 登录分别管理。
+日常管理使用 **ReleaseHub 自己的 GitHub OAuth 应用**，通过官网短码授权，不需要安装 GitHub CLI。旧版用户需要重新授权一次；其他工具的 GitHub 登录保持不变。基础权限为账户读取与公开仓库；私有仓库和 Lists 分类按需追加授权。GitHub 的这些权限包含写入能力，请在授权页核对范围。官网动态仍使用单独的网页登录。
 
 **关注动态**来自 GitHub 的 received events；**首页动态**来自实际加载的 `github.com/dashboard-feed` 页面。网页读取适配随 GitHub 页面结构更新。私有仓库可浏览和修改说明，软件更新列表目前面向公开仓库。
+
+### 文件模式
+
+添加资源时选择 **文件**，进入项目的 **发行文件**，按需下载 PDF、ZIP、模型、模组等附件。每个附件分别记录版本与下载状态，完成后可打开所在文件夹。文件模式不安装、不解压、不运行；单个文件最大 4 GiB，仅限公开 GitHub Releases 附件。
 
 ## 连接自己的 AI
 
@@ -72,9 +76,9 @@ EXE/MSI 安装向导完成后，可在软件详情中记录本机版本和位置
 
 ## 便携与迁移
 
-- 便携包中的 `portable.flag` 使数据库、下载、受管版本和主界面缓存保存在旁边的 `data/` 中。
+- 便携包中的 `portable.flag` 使数据库、下载、受管版本和主界面浏览数据保存在旁边的 `data/` 中。
 - 移动前从托盘菜单选择 **退出**，再复制整个文件夹。只分享订阅与备注时使用 **设置 → 导出订阅与备注**。
-- GitHub 授权、代理密码和 AI 连接凭据保存在本机；官网动态会话也留在本机账户目录。换电脑后重新连接账号和代理。
+- GitHub 授权、代理密码和 AI 连接凭据保存在本机；GitHub 页面缓存和官网动态会话也留在本机账户目录。换电脑后重新连接账号和代理。
 - 分发给他人使用发布页中的原始 ZIP。
 
 ### 已适配的软件示例
@@ -98,7 +102,7 @@ pnpm exec vitest run --config tests/github-lists.config.ts
 pnpm exec vitest run --config tests/preferences-ui.config.ts
 pnpm exec vitest run --config src/lib/feed/ui.config.ts
 pnpm build
-.\scripts\prepare-github-cli.ps1
+New-Item -ItemType Directory -Force src-tauri/tools | Out-Null
 cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 cargo build --locked --manifest-path src-tauri/Cargo.toml --bin releasehub-mcp
 pnpm desktop

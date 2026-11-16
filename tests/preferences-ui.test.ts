@@ -57,7 +57,42 @@ describe('startup and desktop navigation', () => {
     expect(target.querySelector('h1')?.textContent).toBe('设置');
     await cleanup();
     instance = mount(App, { target }); await settle();
-    expect(target.querySelector('h1')?.textContent).toContain('软件库');
+    expect(target.querySelector('h1')?.textContent).toContain('资源库');
+  });
+
+  it('keeps resource filters and search when visiting another page', async () => {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library';
+    mocks.dispatch.mockImplementation(async (action: string) => { if (action === 'snapshot') return snapshot; throw new Error(`Unexpected action ${action}`); });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    const nav = (label: string) => [...target.querySelectorAll<HTMLButtonElement>('nav button')].find(item => item.querySelector('span')?.textContent === label)!;
+    const active = () => target.querySelector<HTMLElement>('#main-content')!;
+    [...active().querySelectorAll<HTMLButtonElement>('[aria-label="资源类型筛选"] button')].find(item => item.textContent === '文件')!.click(); await settle();
+    const search = target.querySelector<HTMLInputElement>('.titlebar input')!;
+    search.value = 'manual'; search.dispatchEvent(new Event('input', { bubbles: true })); await settle();
+    nav('下载').click(); await settle(); nav('资源库').click(); await settle();
+    expect(active().querySelector('[aria-label="资源类型筛选"] [aria-pressed="true"]')?.textContent).toBe('文件');
+    expect(search.value).toBe('manual');
+    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'snapshot')).toHaveLength(1);
+  });
+
+  it('saves independent color scheme and clears only page cache', async () => {
+    let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'home';
+    mocks.dispatch.mockImplementation(async (action: string, payload: { settings?: Partial<Settings> }) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'save_settings') { snapshot = { ...snapshot, settings: { ...snapshot.settings, ...payload.settings } }; return snapshot.settings; }
+      if (action === 'github_cache_stats') return { bytes: 4096, entries: 2 };
+      if (action === 'github_cache_clear') return null;
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    button('设置').click(); await settle();
+    button('青绿').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('save_settings', { settings: { colorScheme: 'teal' } });
+    expect(document.documentElement.dataset.colorScheme).toBe('teal');
+    expect(snapshot.settings.theme).toBe('system');
+    button('清理页面缓存').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('github_cache_clear', {});
+    expect(target.textContent).toContain('下载文件和订阅保持不变');
   });
 
   it('keeps every workspace page once and persists keyboard and drag ordering', async () => {

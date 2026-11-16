@@ -1,6 +1,9 @@
 export type Channel = 'stable' | 'preview';
 export type AssetPreference = 'auto' | 'portable' | 'installer';
 export type Theme = 'system' | 'light' | 'dark';
+export type ColorScheme = 'blue' | 'teal' | 'violet' | 'amber';
+export type ManagementMode = 'software' | 'files';
+export type FileStatus = 'notDownloaded' | 'downloaded' | 'updateAvailable' | 'missing';
 export type ProjectStatus = 'notChecked' | 'checking' | 'upToDate' | 'updateAvailable' | 'versionUnknown' | 'noRelease' | 'noCompatibleAsset' | 'error';
 export type AssetKind = 'installer' | 'portable' | 'other';
 
@@ -13,6 +16,8 @@ export interface ReleaseAsset {
   digest: string | null;
   kind: AssetKind;
   compatible: boolean;
+  downloadable?: boolean;
+  installable?: boolean;
   score: number;
   reason: string;
 }
@@ -29,6 +34,8 @@ export interface Release {
 }
 
 export interface Project {
+  managementMode?: ManagementMode;
+  fileStatus?: FileStatus;
   id: string;
   owner: string;
   repo: string;
@@ -55,6 +62,7 @@ export interface Project {
 
 export type DownloadStatus = 'queued' | 'downloading' | 'completed' | 'failed' | 'cancelled' | 'installing' | 'installed';
 export interface DownloadRecord {
+  installable?: boolean;
   id: string;
   projectId: string;
   projectName: string;
@@ -121,6 +129,7 @@ export interface RepositoryNote {
 
 export interface Settings {
   theme: Theme;
+  colorScheme?: ColorScheme;
   startupPage: WorkspacePage;
   startupGithubTab: GithubTab;
   navigationOrder: WorkspacePage[];
@@ -158,6 +167,7 @@ export interface Snapshot {
 }
 
 export interface AddProjectInput {
+  managementMode?: ManagementMode;
   repository: string;
   channel: Channel;
   preference: AssetPreference;
@@ -166,6 +176,7 @@ export interface AddProjectInput {
 }
 
 export interface ProjectChanges {
+  managementMode?: ManagementMode;
   channel?: Channel;
   preference?: AssetPreference;
   assetPattern?: string | null;
@@ -214,6 +225,7 @@ export interface AgentIntegration {
 }
 
 export interface GithubAccount {
+  id?: number;
   login: string;
   name: string | null;
   avatarUrl: string | null;
@@ -233,7 +245,10 @@ export interface GithubStatus {
   account: GithubAccount | null;
   login: GithubLogin | null;
   error: string | null;
-  provider: 'github-cli';
+  provider: 'github-oauth' | 'github-cli';
+  verified?: boolean;
+  sessionRevision?: number;
+  scopes?: string[];
 }
 
 export type GithubRepositoryTab = 'explore' | 'starred' | 'owned';
@@ -313,6 +328,7 @@ export interface GithubFeedItem {
   occurredAt: string | null;
 }
 export interface GithubFeedPage {
+  cached?: boolean;
   connected: boolean;
   loading: boolean;
   account: string | null;
@@ -324,3 +340,13 @@ export interface GithubFeedPage {
   requestId: string;
   sessionRevision: number;
 }
+
+/** A machine-local projection; contains neither credentials nor raw API headers. */
+export interface GithubCacheEntry<T = unknown> {
+  data: T;
+  updatedAt: number;
+  fresh: boolean;
+  sessionRevision: number;
+}
+export interface GithubCacheStats { bytes: number; entries: number }
+export type GithubCacheOperation = 'github_repositories' | 'github_repository' | 'github_activity' | 'github_lists' | 'github_list_repositories' | 'github_repository_lists';

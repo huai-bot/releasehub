@@ -27,7 +27,7 @@ const repo = (name: string, changes: Partial<GithubRepository> = {}) => ({ ...cr
 const detail = (name: string, changes: Partial<GithubRepository> = {}): GithubRepositoryDetail => ({ repository: repo(name, changes), readme: '# Example\n\nSynthetic test data.' });
 const page = (items: GithubRepository[], number = 1, more = false): GithubRepositoryPage => ({ items, page: number, hasMore: more, totalCount: items.length });
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => resolve = done); return { promise, resolve }; }
-async function settle() { for (let i = 0; i < 10; i += 1) { await Promise.resolve(); flushSync(); } }
+async function settle() { for (let i = 0; i < 20; i += 1) { await Promise.resolve(); flushSync(); } }
 function button(label: string) { const found = [...target.querySelectorAll('button')].find((item) => item.textContent?.trim() === label || item.getAttribute('aria-label') === label); if (!found) throw new Error(`Missing button: ${label}`); return found; }
 async function click(label: string) { button(label).click(); await settle(); }
 async function navigate(label: string) {
@@ -37,11 +37,13 @@ async function navigate(label: string) {
 }
 async function input(selector: string, value: string) { const field = target.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!; field.value = value; field.dispatchEvent(new Event('input', { bubbles: true })); await settle(); }
 async function search(value: string) { await input('#github-search', value); target.querySelector('.github-search')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle(); }
-function showGithub() { const instance = mount(Github, { target, props: { projects: [], preview: false, onadd, onopen, oncopy, onnotice } }); cleanup = async () => { await unmount(instance); }; flushSync(); }
+function showGithub(mountTarget: HTMLElement = target) { const instance = mount(Github, { target: mountTarget, props: { projects: [], preview: false, onadd, onopen, oncopy, onnotice } }); cleanup = async () => { await unmount(instance); }; flushSync(); }
 const base = (action: string): unknown => {
   if (action === 'github_status') return anonymous();
   if (action === 'github_repositories') return page([repo('demo/alpha')]);
   if (action === 'github_repository') return detail('demo/alpha');
+  if (action === 'github_cache_read') return null;
+  if (action === 'get_repository_notes') return [];
   throw new Error(`Unexpected action: ${action}`);
 };
 
@@ -112,16 +114,18 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
   });
 
   it('ignores old tab/detail responses and clears private content immediately on logout', async () => {
-    const oldTab = deferred<GithubRepositoryPage>(); const oldDetail = deferred<GithubRepositoryDetail>(); const logout = deferred<GithubStatus>();
+    const oldTab = deferred<{ items: GithubRepository[]; endCursor: null; hasMore: boolean; totalCount: number }>(); const oldDetail = deferred<GithubRepositoryDetail>(); const logout = deferred<GithubStatus>();
     dispatchMock.mockImplementation(async (action: string, payload: { tab?: string; repository?: string }) => {
       if (action === 'github_status') return connected();
       if (action === 'github_logout') return logout.promise;
-      if (action === 'github_repositories') return payload.tab === 'starred' ? oldTab.promise : page([repo('demo/private-a', { id: 1, private: true }), repo('demo/private-b', { id: 2, private: true })]);
+      if (action === 'github_lists') return [];
+      if (action === 'github_list_repositories') return oldTab.promise;
+      if (action === 'github_repositories') return page([repo('demo/private-a', { id: 1, private: true }), repo('demo/private-b', { id: 2, private: true })]);
       if (action === 'github_repository') return payload.repository === 'demo/private-a' ? oldDetail.promise : detail('demo/private-b', { private: true });
       return base(action);
     });
     showGithub(); await settle(); await click('Stars'); await click('我的仓库');
-    oldTab.resolve(page([repo('demo/stale-star')])); await settle(); expect(target.textContent).not.toContain('stale-star');
+    oldTab.resolve({ items: [repo('demo/stale-star')], endCursor: null, hasMore: false, totalCount: 1 }); await settle(); expect(target.textContent).not.toContain('stale-star');
     await click('查看 demo/private-a 详情'); await click('查看 demo/private-b 详情');
     oldDetail.resolve(detail('demo/private-a')); await settle();
     expect(target.querySelector('.github-detail')!.textContent).toContain('demo/private-b');
@@ -152,6 +156,101 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
     showGithub(); await settle(); expect(target.textContent).toContain('没有找到 GitHub 登录组件');
     expect(button('登录 GitHub').disabled).toBe(true); expect(target.textContent).toContain('Synthetic network failure');
     failed = false; await click('重试这一页'); expect(target.textContent).toContain('demo/alpha');
+  });
+
+  it('restores each tab query, page, filter, detail and scroll without refetching fresh data', async () => {
+    dispatchMock.mockImplementation(async (action: string, payload: { tab?: string; query?: string; page?: number; repository?: string }) => {
+      if (action === 'github_status') return connected();
+      if (action === 'github_repositories') return page([repo(payload.tab === 'owned' ? 'demo/owned' : `demo/${payload.query}-${payload.page}`)], payload.page, true);
+      if (action === 'github_repository') return detail(payload.repository!);
+      return base(action);
+    });
+    const main = document.createElement('main'); target.append(main); showGithub(main); await settle();
+    await search('tools'); await click('下一页'); await click('查看 demo/tools-2 详情'); main.scrollTop = 325;
+    const searchReads = dispatchMock.mock.calls.filter(([action, data]) => action === 'github_repositories' && data.tab === 'explore').length;
+    const detailReads = dispatchMock.mock.calls.filter(([action]) => action === 'github_repository').length;
+    await click('我的仓库'); await input('#github-search', 'owned'); main.scrollTop = 72;
+    await click('搜索仓库');
+    expect(target.querySelector<HTMLInputElement>('#github-search')?.value).toBe('tools');
+    expect(target.textContent).toContain('demo/tools-2'); expect(target.querySelector('.github-pagination')?.textContent).toContain('第 2 页');
+    expect(target.querySelector('.github-detail')?.textContent).toContain('demo/tools-2'); expect(main.scrollTop).toBe(325);
+    expect(dispatchMock.mock.calls.filter(([action, data]) => action === 'github_repositories' && data.tab === 'explore')).toHaveLength(searchReads);
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'github_repository')).toHaveLength(detailReads);
+    await click('我的仓库');
+    expect(target.querySelector<HTMLInputElement>('#github-search')?.value).toBe('owned'); expect(main.scrollTop).toBe(72);
+    expect(dispatchMock.mock.calls.filter(([action, data]) => action === 'github_repositories' && data.tab === 'owned')).toHaveLength(1);
+  });
+
+  it('shows disk content after remount before even a fresh entry finishes its network verification', async () => {
+    showGithub(); await settle(); await cleanup?.(); cleanup = null;
+    const network = deferred<GithubRepositoryPage>();
+    dispatchMock.mockImplementation(async (action: string) => {
+      if (action === 'github_cache_read') return { data: page([repo('demo/from-disk')]), updatedAt: Date.now(), fresh: true, sessionRevision: 0 };
+      if (action === 'github_repositories') return network.promise;
+      return base(action);
+    });
+    dispatchMock.mockClear(); showGithub(); await settle();
+    expect(target.textContent).toContain('demo/from-disk'); expect(target.textContent).toContain('正在后台更新');
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'github_repositories')).toHaveLength(1);
+    network.resolve(page([repo('demo/from-network')])); await settle();
+    expect(target.textContent).toContain('demo/from-network'); expect(target.textContent).not.toContain('demo/from-disk');
+  });
+
+  it('keeps old rows while paging and preserves them when a forced refresh fails', async () => {
+    const next = deferred<GithubRepositoryPage>(); let fail = false;
+    dispatchMock.mockImplementation(async (action: string, payload: { page?: number }) => {
+      if (action === 'github_repositories') { if (fail) throw new Error('模拟后台更新失败'); return payload.page === 2 ? next.promise : page([repo('demo/page-one')], 1, true); }
+      return base(action);
+    });
+    showGithub(); await settle(); await click('下一页');
+    expect(target.textContent).toContain('demo/page-one'); expect(target.querySelector('.skeleton-list')).toBeNull();
+    next.resolve(page([repo('demo/page-two')], 2)); await settle();
+    fail = true; await click('刷新仓库列表');
+    expect(target.textContent).toContain('demo/page-two'); expect(target.textContent).toContain('模拟后台更新失败');
+    expect(target.querySelector('.github-pagination')?.textContent).toContain('第 2 页');
+  });
+
+  it('does not let an old account request refill its view after switching accounts', async () => {
+    let account = connected(); const old = deferred<GithubRepositoryPage>();
+    dispatchMock.mockImplementation(async (action: string, payload: { tab?: string }) => {
+      if (action === 'github_status') return account;
+      if (action === 'github_repositories') return payload.tab === 'owned' && account.account!.login === 'releasehub-demo' ? old.promise : page([repo(`${account.account!.login}/current`)]);
+      return base(action);
+    });
+    showGithub(); await settle(); await click('我的仓库');
+    account = { ...connected(), account: { ...connected().account!, login: 'new-account' }, sessionRevision: 2 };
+    await click('刷新 GitHub 账号状态'); old.resolve(page([repo('old-account/private', { private: true })])); await settle();
+    expect(target.textContent).toContain('new-account/current'); expect(target.textContent).not.toContain('old-account/private');
+    await click('搜索仓库'); await click('我的仓库'); expect(target.textContent).not.toContain('old-account/private');
+  });
+
+  it('invalidates pending content on cache clear without discarding visible rows', async () => {
+    const stale = deferred<GithubRepositoryPage>(); let reads = 0;
+    dispatchMock.mockImplementation(async (action: string) => action === 'github_repositories' ? ++reads === 2 ? stale.promise : page([repo(reads === 1 ? 'demo/kept' : 'demo/new-read')]) : base(action));
+    showGithub(); await settle(); await click('刷新仓库列表');
+    window.dispatchEvent(new Event('releasehub:cache-cleared')); await settle();
+    expect(target.textContent).toContain('demo/kept');
+    stale.resolve(page([repo('demo/stale-refill')])); await settle();
+    expect(target.textContent).toContain('demo/kept'); expect(target.textContent).not.toContain('demo/stale-refill');
+    await click('刷新仓库列表'); expect(target.textContent).toContain('demo/new-read'); expect(reads).toBe(3);
+  });
+
+  it('keeps unsaved repository fields during background list refresh', async () => {
+    dispatchMock.mockImplementation(async (action: string) => action === 'github_status' ? connected() : action === 'github_repository' ? detail('demo/alpha', { canAdmin: true }) : base(action));
+    showGithub(); await settle(); await click('查看 demo/alpha 详情'); await click('修改说明与主页');
+    await input('dialog textarea', '尚未保存的说明'); await input('dialog input[type="url"]', 'https://example.com/draft');
+    await click('刷新仓库列表');
+    expect(target.querySelector<HTMLTextAreaElement>('dialog textarea')?.value).toBe('尚未保存的说明');
+    expect(target.querySelector<HTMLInputElement>('dialog input[type="url"]')?.value).toBe('https://example.com/draft');
+    expect(dispatchMock.mock.calls.some(([action]) => action === 'github_update_repository')).toBe(false);
+  });
+
+  it('labels a recovered account as unverified and requests private scope only explicitly', async () => {
+    dispatchMock.mockImplementation(async (action: string) => action === 'github_status' ? { ...connected(), provider: 'github-oauth', verified: false, scopes: ['read:user', 'public_repo', 'offline_access'], error: '暂未连通' } : action === 'github_login' ? createPreviewGithubStatus('waiting') : base(action));
+    showGithub(); await settle(); expect(target.textContent).toContain('已恢复本机账号，当前尚未验证');
+    expect(target.textContent).toContain('repo 权限允许读写公开与私有仓库');
+    expect(dispatchMock.mock.calls.some(([action]) => action === 'github_login')).toBe(false);
+    await click('授权私有仓库（repo）'); expect(dispatchMock).toHaveBeenCalledWith('github_login', { privateRepositories: true });
   });
 
   describe('AiConnection information sharing', () => {
@@ -222,7 +321,7 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
     const results = target.querySelector('#github-results');
     const workspace = target.querySelector<HTMLElement>('#main-content')!; workspace.scrollTop = 260;
     const requests = dispatchMock.mock.calls.length;
-    await navigate('软件库');
+    await navigate('资源库');
     expect(workspace.hidden).toBe(true); expect(target.querySelector('#main-content')).not.toBe(workspace);
     await navigate('GitHub');
     expect(dispatchMock.mock.calls).toHaveLength(requests);
@@ -251,14 +350,14 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
       return base(action);
     });
     const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
-    await navigate('软件库'); await navigate('GitHub');
+    await navigate('资源库'); await navigate('GitHub');
     expect(target.textContent).toContain('releasehub-demo/private');
     account = { ...connected(), account: { ...connected().account!, login: 'other-demo' } };
     await click('刷新 GitHub 账号状态');
     expect(target.textContent).not.toContain('releasehub-demo/private'); expect(target.textContent).toContain('other-demo/private');
     button('仅断开追新').click(); await settle();
     expect(target.textContent).not.toContain('other-demo/private');
-    logout.resolve(anonymous()); await settle(); await navigate('软件库'); await navigate('GitHub');
+    logout.resolve(anonymous()); await settle(); await navigate('资源库'); await navigate('GitHub');
     expect(target.textContent).not.toContain('other-demo/private'); expect(target.textContent).toContain('登录后查看自己的仓库');
   });
 
@@ -275,7 +374,7 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
     const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
     const feed = target.querySelector('.feed-list'); expect(feed).not.toBeNull();
     const reads = () => dispatchMock.mock.calls.filter(([action]) => action === 'feed_status').length;
-    const before = reads(); await navigate('软件库'); await vi.advanceTimersByTimeAsync(15000); await settle();
+    const before = reads(); await navigate('资源库'); await vi.advanceTimersByTimeAsync(15000); await settle();
     expect(reads()).toBe(before);
     await navigate('GitHub'); expect(target.querySelector('.feed-list')).toBe(feed); expect(reads()).toBe(before);
     expect(target.querySelector('#main-content')?.textContent).not.toContain('正在读取官网动态');
@@ -288,7 +387,7 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
     const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
     expect(target.textContent).not.toContain('Agent 任务'); expect(target.textContent).not.toContain('创建编译任务');
     const nav = [...target.querySelectorAll<HTMLButtonElement>('nav button')].find((item) => item.querySelector('span')?.textContent === 'GitHub')!; nav.click(); await settle();
-    await click('加入软件库');
+    await click('加入资源库');
     expect(dispatchMock).toHaveBeenCalledWith('add_project', { input: { repository: 'demo/alpha', channel: 'stable', preference: 'auto' } });
     expect(dispatchMock.mock.calls.some(([action]) => ['check_updates', 'download_asset', 'install_download', 'create_build_task', 'reveal_agent_connection', 'rotate_agent_token'].includes(action))).toBe(false);
   });

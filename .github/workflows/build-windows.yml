@@ -22,6 +22,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: '0'
+      RELEASEHUB_GITHUB_CLIENT_ID: ${{ vars.RELEASEHUB_GITHUB_CLIENT_ID || 'Ov23lia2v9F5yO8hPTYk' }}
     steps:
       - name: Check out source without storing credentials
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -42,8 +43,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Prepare the pinned official GitHub login component
-        run: ./scripts/prepare-github-cli.ps1
       - name: Check and test the interface
         run: |
           pnpm check
@@ -60,6 +59,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare the public connector resource directory
+        run: New-Item -ItemType Directory -Force -Path 'src-tauri/tools' | Out-Null
       - name: Test update core and local Agent protections
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
@@ -83,6 +84,10 @@ jobs:
           $result = Get-Content -Raw -Encoding utf8 (Join-Path $dir 'result.json') | ConvertFrom-Json
           if (-not $result.ok) { throw 'The application did not return a successful smoke test.' }
           if ($result.snapshot.settings.agentEnabled) { throw 'Agent access must be disabled by default.' }
+      - name: Verify blue icons in compiled Windows files
+        run: |
+          $files = @('src-tauri/target/release/releasehub.exe') + @(Get-ChildItem 'src-tauri/target/release/bundle/nsis/*-setup.exe' | ForEach-Object FullName)
+          ./scripts/check-windows-icons.ps1 -Paths $files
       - name: Package clean portable distribution
         run: ./scripts/package-windows.ps1
       - name: Upload only public distribution files

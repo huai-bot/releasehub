@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
+import { createClassComponent } from 'svelte/legacy';
 import GithubFeed from '../../components/GithubFeed.svelte';
 import { previewFeed } from './preview';
 import { createPreviewGithubDetail } from '../github-preview';
@@ -71,6 +72,79 @@ describe('homepage feed UI (synthetic fixtures only)', () => {
     await click('展开内容'); expect(target.querySelector('.feed-body')!.classList.contains('collapsed')).toBe(false);
     await click('加载更多'); expect(dispatchMock).toHaveBeenCalledWith('feed_more', {});
     expect(target.querySelectorAll('.feed-summary')[3].textContent).toBe('Last webpage item');
+  });
+  it('shows saved cards immediately without claiming login and validates once in the background', async () => {
+    const saved = { ...live(), connected: false, cached: true, hasMore: false };
+    const update = deferred<GithubFeedPage>();
+    dispatchMock.mockImplementation(async (action: string) => action === 'feed_refresh' ? update.promise : saved);
+    show(); await settle();
+    expect(target.querySelectorAll('.feed-row')).toHaveLength(3);
+    expect(target.textContent).toContain('已保存的历史内容，网页登录待验证');
+    expect(target.textContent).toContain('正在后台验证网页登录并更新');
+    expect(target.textContent).not.toContain('网站已登录');
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'feed_refresh')).toHaveLength(1);
+    expect([...target.querySelectorAll('button')].some((node) => node.textContent?.trim() === '加载更多')).toBe(false);
+    update.resolve({ ...saved, error: '离线，无法更新' }); await settle();
+    await vi.advanceTimersByTimeAsync(10000); await settle();
+    expect(target.querySelectorAll('.feed-row')).toHaveLength(3);
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'feed_refresh')).toHaveLength(1);
+  });
+  it('does not accept the connected flag on historical data as verified login', async () => {
+    const saved = { ...live(), cached: true, loading: true };
+    dispatchMock.mockResolvedValue(saved); show(); await settle();
+    expect(target.textContent).toContain('网页登录待验证'); expect(target.textContent).not.toContain('网站已登录');
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'feed_refresh')).toHaveLength(0);
+  });
+  it('does not fetch fresh content again when the component is revisited', async () => {
+    show(); await settle(); await cleanup?.(); cleanup = null;
+    show(); await settle();
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'feed_refresh')).toHaveLength(0);
+    expect(target.querySelectorAll('.feed-row')).toHaveLength(3);
+  });
+  it('keeps rows, expanded content and scroll position during refresh and on transport failure', async () => {
+    const page = live(); page.items[0].body = '保留长文本'.repeat(100);
+    let reject!: (reason: Error) => void;
+    const update = new Promise<GithubFeedPage>((_, fail) => reject = fail);
+    dispatchMock.mockImplementation(async (action: string) => action === 'feed_refresh' ? update : page);
+    show(); await settle(); await click('展开内容');
+    const content = target.querySelector('.feed-content')!; content.scrollTop = 120;
+    await click('刷新'); expect(target.querySelectorAll('.feed-row')).toHaveLength(3);
+    expect(target.querySelector('.feed-body')!.classList.contains('collapsed')).toBe(false);
+    expect(content.scrollTop).toBe(120);
+    reject(new Error('网络暂不可用')); await settle();
+    expect(target.textContent).toContain('网络暂不可用'); expect(target.querySelectorAll('.feed-row')).toHaveLength(3);
+    expect(target.querySelector('.feed-body')!.classList.contains('collapsed')).toBe(false);
+  });
+  it('clears saved private cards when website validation reports a logged-out session', async () => {
+    const update = deferred<GithubFeedPage>();
+    dispatchMock.mockImplementation(async (action: string) => action === 'feed_refresh' ? update.promise : { ...live(), connected: false, cached: true });
+    show(); await settle(); expect(target.querySelectorAll('.feed-row')).toHaveLength(3);
+    update.resolve({ ...previewFeed('login'), cached: false, sessionRevision: 2 }); await settle();
+    expect(target.querySelectorAll('.feed-row')).toHaveLength(0); expect(target.textContent).not.toContain('@real-account');
+  });
+  it('clears cards immediately after settings clears caches and ignores the in-flight update', async () => {
+    const update = deferred<GithubFeedPage>(); let cleared = false;
+    dispatchMock.mockImplementation(async (action: string) => action === 'feed_refresh' ? update.promise : cleared ? { ...previewFeed('login'), sessionRevision: 2 } : { ...live(), connected: false, cached: true });
+    show(); await settle(); expect(target.querySelectorAll('.feed-row')).toHaveLength(3);
+    cleared = true; window.dispatchEvent(new Event('releasehub:cache-cleared')); await settle();
+    expect(target.querySelectorAll('.feed-row')).toHaveLength(0);
+    update.resolve(live()); await settle(); expect(target.querySelectorAll('.feed-row')).toHaveLength(0);
+    expect(target.textContent).not.toContain('@real-account');
+  });
+  it('clears a hidden feed without fetching or repopulating on return', async () => {
+    let cleared = false;
+    dispatchMock.mockImplementation(async () => cleared ? { ...previewFeed('login'), sessionRevision: 2 } : live());
+    const instance = createClassComponent({ component: GithubFeed, target, props: { preview: false, active: true, onopen, onadd, onnotice } });
+    cleanup = async () => { instance.$destroy(); };
+    await settle(); expect(target.querySelectorAll('.feed-row')).toHaveLength(3);
+    instance.$set({ active: false }); await settle();
+    const count = dispatchMock.mock.calls.length;
+    cleared = true; window.dispatchEvent(new Event('releasehub:cache-cleared')); await settle();
+    expect(target.querySelectorAll('.feed-row')).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(10000); await settle(); expect(dispatchMock).toHaveBeenCalledTimes(count);
+    instance.$set({ active: true }); await settle(); await vi.advanceTimersByTimeAsync(5000); await settle();
+    expect(target.querySelectorAll('.feed-row')).toHaveLength(0);
+    expect(dispatchMock.mock.calls.filter(([action]) => action !== 'feed_status')).toHaveLength(0);
   });
   it('labels preview fixtures explicitly and never uses native commands in preview', async () => {
     show(true); await settle(); expect(target.textContent).toContain('以下内容为演示，不是真实账号动态');

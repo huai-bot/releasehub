@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { canActivateManagedVersion, downloadPercent, formatBytes, matchesProject, parseRepository, readableError, safeGithubUrl } from './ui';
+import { assetKindLabel, canActivateManagedVersion, canDownloadAsset, canInstallAsset, canInstallDownload, downloadPercent, formatBytes, getDownloadStatus, getProjectStatus, hasProjectUpdate, isFilesProject, matchesProject, needsProjectAttention, parseRepository, readableError, safeGithubUrl } from './ui';
 import { createPreviewManagedVersions, createPreviewSnapshot } from './preview';
 import { applyDownloadProgress, isDownloadRecord, mergeSnapshotDownloads } from './download-state';
-import type { DownloadRecord } from './types';
+import type { DownloadRecord, FileStatus, Project, ReleaseAsset } from './types';
 
 describe('GitHub input and host-bound links', () => {
   it('accepts a repository name and normalizes supported project links', () => {
@@ -136,6 +136,88 @@ describe('incremental download state', () => {
     const removed = { ...incoming, downloads: [] };
     expect(mergeSnapshotDownloads(current, removed, snapshot)).toBe(removed);
     expect(mergeSnapshotDownloads(null, incoming, null)).toBe(incoming);
+  });
+});
+
+describe('software and file resource capabilities', () => {
+  const software = createPreviewSnapshot().projects[0];
+  const files: Project = { ...software, managementMode: 'files', fileStatus: 'notDownloaded' };
+  const legacyAsset = software.release!.assets[0];
+  const plainZip: ReleaseAsset = { ...legacyAsset, name: 'reference-data.zip', kind: 'portable', compatible: false, downloadable: true, installable: false };
+
+  it('keeps legacy projects in software mode and separates file subscriptions', () => {
+    expect(isFilesProject(software)).toBe(false);
+    expect(isFilesProject({ managementMode: 'software' })).toBe(false);
+    expect(isFilesProject(files)).toBe(true);
+  });
+  it('downloads ordinary files even when they are not compatible software', () => {
+    expect(canDownloadAsset(plainZip)).toBe(true);
+    expect(canInstallAsset(plainZip, software)).toBe(false);
+    expect(assetKindLabel(plainZip.kind, canInstallAsset(plainZip, software), plainZip.name)).toBe('普通文件');
+  });
+  it('uses explicit download flags rather than the old compatible flag', () => {
+    expect(canDownloadAsset({ compatible: true, downloadable: false })).toBe(false);
+    expect(canDownloadAsset({ compatible: false, downloadable: true })).toBe(true);
+    expect(canDownloadAsset({ compatible: true })).toBe(true);
+    expect(canDownloadAsset({ compatible: false })).toBe(false);
+  });
+  it('keeps every downloadable attachment available within the same release', () => {
+    const attachments: ReleaseAsset[] = [
+      { ...plainZip, id: 601, name: 'reference-data.zip' },
+      { ...plainZip, id: 602, name: 'guide.pdf', kind: 'other' },
+      { ...plainZip, id: 603, name: 'over-limit.zip', size: 4 * 1024 ** 3 + 1, downloadable: false },
+    ];
+    expect(attachments.filter(canDownloadAsset).map((asset) => asset.id)).toEqual([601, 602]);
+    expect(attachments.map((asset) => canInstallAsset(asset, files))).toEqual([false, false, false]);
+  });
+  it('never installs in file mode, including old compatible ZIP fixtures', () => {
+    expect(canInstallAsset(legacyAsset, software)).toBe(true);
+    expect(canInstallAsset({ ...legacyAsset, installable: true }, files)).toBe(false);
+    expect(canInstallAsset(legacyAsset, files)).toBe(false);
+    expect(canInstallAsset({ ...legacyAsset, kind: 'other', installable: true }, software)).toBe(false);
+    expect(canActivateManagedVersion(files, createPreviewManagedVersions(software.id)[1], true)).toBe(false);
+  });
+  it('honors false installable on portable and installer download records', () => {
+    expect(canInstallDownload({ kind: 'portable', installable: false })).toBe(false);
+    expect(canInstallDownload({ kind: 'installer', installable: false })).toBe(false);
+    expect(canInstallDownload({ kind: 'other', installable: true })).toBe(false);
+  });
+  it('retains legacy software installation and labels unknown kinds as ordinary files', () => {
+    expect(canInstallDownload({ kind: 'portable' })).toBe(true);
+    expect(canInstallDownload({ kind: 'installer' })).toBe(true);
+    expect(canInstallDownload({ kind: 'other' })).toBe(false);
+    expect(assetKindLabel('future-kind', true)).toBe('普通文件');
+    expect(assetKindLabel('portable', false, 'data.zip')).toBe('普通文件');
+    expect(assetKindLabel('portable', true, 'app.EXE')).toBe('单文件免安装');
+    expect(assetKindLabel('installer', true)).toBe('安装程序');
+  });
+  it.each<[FileStatus, string]>([
+    ['notDownloaded', '未下载'], ['downloaded', '已下载'], ['updateAvailable', '有新版本'], ['missing', '文件已移走'],
+  ])('shows the file state %s without installed-version wording', (fileStatus, label) => {
+    expect(getProjectStatus({ ...files, fileStatus, status: 'versionUnknown' }).label).toBe(label);
+  });
+  it('preserves checking and error states while avoiding software-only warnings for files', () => {
+    expect(getProjectStatus({ ...files, status: 'checking' }).label).toBe('检查中');
+    expect(getProjectStatus({ ...files, status: 'error' }).label).toBe('检查失败');
+    expect(getProjectStatus({ ...files, status: 'noRelease' }).label).toBe('暂无发行版');
+    expect(getProjectStatus({ ...files, fileStatus: undefined, status: 'noCompatibleAsset' }).label).toBe('未下载');
+    expect(getProjectStatus({ ...software, status: 'versionUnknown' }).label).toBe('未记录版本');
+  });
+  it('filters file updates using downloaded-file state, not stale software state', () => {
+    expect(hasProjectUpdate({ ...files, status: 'updateAvailable', fileStatus: 'downloaded' })).toBe(false);
+    expect(hasProjectUpdate({ ...files, status: 'upToDate', fileStatus: 'updateAvailable' })).toBe(true);
+    expect(hasProjectUpdate({ ...software, status: 'updateAvailable' })).toBe(true);
+    expect(needsProjectAttention({ ...files, status: 'versionUnknown' })).toBe(false);
+    expect(needsProjectAttention({ ...files, fileStatus: 'missing' })).toBe(true);
+    expect(needsProjectAttention({ ...files, status: 'error' })).toBe(true);
+  });
+  it('labels saved files as downloaded rather than waiting for installation', () => {
+    expect(getDownloadStatus({ kind: 'portable', installable: false, status: 'completed' }).label).toBe('已下载');
+    expect(getDownloadStatus({ kind: 'installer', installable: false, status: 'installed' }).label).toBe('已下载');
+    expect(getDownloadStatus({ kind: 'other', status: 'completed' }).label).toBe('已下载');
+    expect(getDownloadStatus({ kind: 'portable', status: 'completed' }).label).toBe('已下载 · 待安装');
+    expect(getDownloadStatus({ kind: 'portable', status: 'installed' }).label).toBe('已准备');
+    expect(getDownloadStatus({ kind: 'other', status: 'failed' }).label).toBe('下载失败');
   });
 });
 

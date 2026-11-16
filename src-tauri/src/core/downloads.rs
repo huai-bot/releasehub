@@ -31,18 +31,33 @@ pub fn directory(data:&Path,id:&str)->Result<PathBuf,String> {
     }
     Ok(folder)
 }
+pub(crate) fn local_file_exists(data:&Path,d:&DownloadRecord)->bool {
+    if uuid::Uuid::parse_str(&d.id).is_err()||safe_name(&d.file_name)!=d.file_name {return false;}
+    let root=data.join("downloads");let folder=root.join(&d.id);let expected=folder.join(&d.file_name);
+    if d.path.as_deref().map(Path::new)!=Some(expected.as_path()) {return false;}
+    for path in [&root,&folder,&expected] {
+        let Ok(meta)=std::fs::symlink_metadata(path) else{return false;};
+        if meta.file_type().is_symlink(){return false;}
+        #[cfg(windows)] {use std::os::windows::fs::MetadataExt;if meta.file_attributes()&0x400!=0{return false;}}
+    }
+    expected.is_file()&&std::fs::canonicalize(&expected).is_ok_and(|p|p.parent()==Some(folder.as_path()))
+}
 impl Core {
     pub(crate) fn queue_download(self:&Arc<Self>,project_id:&str,asset_id:u64)->Result<DownloadRecord,String>{
         let queued={
             let _guard=self.download_queue.lock().map_err(|_|"下载队列不可用".to_string())?;
             let p=self.store.project(project_id)?;let release=p.release.as_ref().ok_or("请先检查项目发行版本")?;
             let a=release.assets.iter().find(|a|a.id==asset_id).ok_or("找不到此发行附件")?;
-            if !a.compatible{return Err(format!("无法下载：{}",a.reason));}
+            if !a.downloadable{return Err(format!("无法下载：{}",a.reason));}
             network::trusted_download_url(&a.url)?;
+            if a.size==0||a.size>network::MAX_DOWNLOAD_BYTES{return Err("发行附件大小无效或超过4GB限制".into());}
             let digest=expected_sha(a.digest.as_deref())?;
-            if let Some(existing)=self.store.downloads()?.into_iter().find(|d|d.project_id==p.id&&d.asset_id==asset_id&&d.tag==release.tag&&!["failed","cancelled"].contains(&d.status.as_str())){return Ok(existing);}
+            if let Some(existing)=self.store.downloads()?.into_iter().find(|d|d.project_id==p.id&&d.asset_id==asset_id&&d.tag==release.tag
+                &&(["queued","downloading","installing"].contains(&d.status.as_str())
+                    ||(["completed","installed"].contains(&d.status.as_str())&&local_file_exists(&self.data_dir,d)))){return Ok(existing);}
             let time=now();let record=DownloadRecord{id:uuid::Uuid::new_v4().to_string(),project_id:p.id,project_name:p.name,
                 asset_id,file_name:safe_name(&a.name),tag:release.tag.clone(),url:a.url.clone(),kind:a.kind.clone(),
+                installable:p.management_mode=="software"&&a.installable,
                 total_bytes:a.size,received_bytes:0,status:"queued".into(),path:None,sha256:None,verified:false,error:None,created_at:time.clone(),updated_at:time};
             self.store.set_digest(&record.id,digest.as_deref())?;self.store.put_download(&record)?;record
         };
@@ -52,9 +67,14 @@ impl Core {
         let record={
             let _guard=self.download_queue.lock().map_err(|_|"下载队列不可用".to_string())?;
             if self.active_downloads.lock().map_err(|_|"下载队列不可用".to_string())?.contains_key(id){return Err("下载仍在停止，请稍后重试".into());}
+            let previous=self.store.download(id)?;
+            let files=self.store.project(&previous.project_id)?.management_mode=="files";
             self.store.mutate("downloads",id,|d:&mut DownloadRecord|{
-                if !["failed","cancelled"].contains(&d.status.as_str()){return Err("只能重试失败或已取消的下载".into());}
+                let missing=["completed","installed"].contains(&d.status.as_str())&&!local_file_exists(&self.data_dir,d);
+                if !["failed","cancelled"].contains(&d.status.as_str())&&!missing{return Err("只能重试失败、已取消或文件缺失的下载；已有文件不会覆盖".into());}
                 network::trusted_download_url(&d.url)?;
+                if d.total_bytes==0||d.total_bytes>network::MAX_DOWNLOAD_BYTES{return Err("发行附件大小无效或超过4GB限制".into());}
+                if files {d.installable=false;}
                 d.status="queued".into();d.received_bytes=0;d.sha256=None;d.verified=false;d.path=None;d.error=None;d.updated_at=now();Ok(())
             })?
         };
@@ -175,8 +195,59 @@ mod tests{
             url:"https://github.com/owner/app/releases/tag/v1.0.0".into(),prerelease:false,
             assets:vec![ReleaseAsset{id:7,name:"app-win-x64.zip".into(),size:10,
                 url:"https://github.com/owner/app/releases/download/v1.0.0/app-win-x64.zip".into(),content_type:"application/zip".into(),
-                digest:Some(format!("sha256:{}","a".repeat(64))),kind:"portable".into(),compatible:true,score:80,reason:"test".into()}]});
+                digest:Some(format!("sha256:{}","a".repeat(64))),kind:"portable".into(),downloadable:true,installable:true,compatible:true,score:80,reason:"test".into()}]});
         core.store.put_project(&project).unwrap();(dir,core,project)
+    }
+    #[tokio::test]async fn files_download_multiple_assets_and_never_install_even_after_mode_switch(){
+        let (_dir,core,mut project)=paused_queue();
+        project.management_mode="files".into();
+        let mut release=project.release.take().unwrap();
+        release.assets[0].name="textures.zip".into();
+        let mut other=release.assets[0].clone();other.id=8;other.name="model.safetensors".into();other.url="https://github.com/owner/app/releases/download/v1.0.0/model.safetensors".into();
+        release.assets.push(other);
+        for a in &mut release.assets {super::super::selection::classify_for_mode(a,&project);}
+        project.release=Some(release);core.store.put_project(&project).unwrap();
+        core.update_project(&project.id,serde_json::from_value(serde_json::json!({"selectedAssetId":7})).unwrap()).unwrap();
+        assert_eq!(core.store.project(&project.id).unwrap().selected_asset_id,Some(7));
+        core.update_project(&project.id,serde_json::from_value(serde_json::json!({"assetPattern":"*.safetensors"})).unwrap()).unwrap();
+        assert_eq!(core.store.project(&project.id).unwrap().selected_asset_id,Some(8));
+        core.update_project(&project.id,serde_json::from_value(serde_json::json!({"assetPattern":null})).unwrap()).unwrap();
+        assert_eq!(core.store.project(&project.id).unwrap().selected_asset_id,None);
+        let first=core.queue_download(&project.id,7).unwrap();let second=core.queue_download(&project.id,8).unwrap();
+        assert!(!first.installable);assert!(!second.installable);assert_eq!(core.store.downloads().unwrap().len(),2);
+        assert_eq!(core.handle("snapshot",serde_json::json!({})).await.unwrap()["projects"][0]["fileStatus"],"notDownloaded");
+        let folder=directory(&core.data_dir,&first.id).unwrap();let file=folder.join(&first.file_name);std::fs::write(&file,b"test file").unwrap();
+        core.store.mutate("downloads",&first.id,|d:&mut DownloadRecord|{d.status="completed".into();d.path=Some(file.to_string_lossy().into_owned());Ok(())}).unwrap();
+        core.store.mutate("downloads",&second.id,|d:&mut DownloadRecord|{d.status="completed".into();d.path=None;Ok(())}).unwrap();
+        assert_eq!(core.handle("snapshot",serde_json::json!({})).await.unwrap()["projects"][0]["fileStatus"],"downloaded");
+        assert!(core.retry_download(&first.id).is_err());
+        for (action,payload) in [("install_download",serde_json::json!({"id":first.id,"confirmed":true})),
+            ("mark_installed",serde_json::json!({"projectId":project.id,"version":"v1"})),
+            ("activate_managed_version",serde_json::json!({"projectId":project.id,"downloadId":first.id,"confirmed":true}))] {
+            assert!(core.handle(action,payload).await.is_err(),"{action}");
+        }
+        assert!(core.store.project(&project.id).unwrap().installed_version.is_none());
+        assert_eq!(std::fs::read_dir(core.data_dir.join("apps")).unwrap().count(),0);
+        core.store.mutate("projects",&project.id,|p:&mut Project|{p.release.as_mut().unwrap().tag="v2".into();Ok(())}).unwrap();
+        assert_eq!(core.handle("snapshot",serde_json::json!({})).await.unwrap()["projects"][0]["fileStatus"],"updateAvailable");
+        core.store.mutate("projects",&project.id,|p:&mut Project|{p.release.as_mut().unwrap().tag="v1.0.0".into();Ok(())}).unwrap();
+        assert!(file.starts_with(&core.data_dir));std::fs::remove_file(&file).unwrap();
+        assert_eq!(core.handle("snapshot",serde_json::json!({})).await.unwrap()["projects"][0]["fileStatus"],"missing");
+        assert_eq!(core.retry_download(&first.id).unwrap().status,"queued");
+        core.update_project(&project.id,serde_json::from_value(serde_json::json!({"managementMode":"software"})).unwrap()).unwrap();
+        core.store.mutate("downloads",&first.id,|d:&mut DownloadRecord|{d.status="completed".into();Ok(())}).unwrap();
+        assert!(core.install_download(&first.id).await.unwrap_err().contains("仅供下载"));
+        let mut old=core.store.download(&second.id).unwrap();old.installable=true;core.store.put_download(&old).unwrap();
+        core.update_project(&project.id,serde_json::from_value(serde_json::json!({"managementMode":"files"})).unwrap()).unwrap();
+        core.update_project(&project.id,serde_json::from_value(serde_json::json!({"managementMode":"software"})).unwrap()).unwrap();
+        assert!(!core.store.download(&second.id).unwrap().installable);
+        core.installing.lock().unwrap().insert(project.id.clone());
+        assert!(core.update_project(&project.id,serde_json::from_value(serde_json::json!({"managementMode":"files"})).unwrap()).is_err());
+        core.installing.lock().unwrap().remove(&project.id);
+        core.update_project(&project.id,serde_json::from_value(serde_json::json!({"managementMode":"files"})).unwrap()).unwrap();
+        assert!(core.update_project(&project.id,serde_json::from_value(serde_json::json!({"installedVersion":"v3"})).unwrap()).is_err());
+        assert!(core.handle("add_project",serde_json::json!({"input":{"repository":"owner/no-network","channel":"stable","preference":"auto","managementMode":"files","installedVersion":"v1"}})).await.is_err());
+        assert_eq!(core.store.downloads().unwrap().len(),2);
     }
     #[test]fn queue_cancel_and_retry_preserve_identity_and_publisher_digest(){
         let (_dir,core,project)=paused_queue();let queued=core.queue_download(&project.id,7).unwrap();

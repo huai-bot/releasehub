@@ -37,6 +37,7 @@ function show(initialTab: 'explore' | 'starred' | 'feed' = 'starred') {
 function base(action: string, payload: Record<string, unknown> = {}): unknown {
   switch (action) {
     case 'github_status': return createPreviewGithubStatus('connected');
+    case 'github_cache_read': return null;
     case 'get_repository_notes': return notes;
     case 'github_lists': return catalog;
     case 'github_list_repositories': return page([alpha]);
@@ -187,6 +188,29 @@ describe('GitHub Lists, loaded Stars and local notes', () => {
     await input('dialog input[data-initial-focus]', '保留输入'); await submit('dialog form');
     expect(target.textContent).toContain('模拟保存失败');
     expect(target.querySelector<HTMLInputElement>('dialog input[data-initial-focus]')?.value).toBe('保留输入');
+  });
+
+  it('retains category, loaded cursor batches, filter and selection across internal tabs', async () => {
+    dispatchMock.mockImplementation(async (action: string, payload: Record<string, unknown>) => action === 'github_list_repositories' ? payload.listId === 'list-a' ? payload.cursor ? page([beta], null, 2) : page([alpha], 'next', 2) : page([alpha]) : base(action, payload));
+    show(); await settle();
+    const category = [...target.querySelectorAll<HTMLButtonElement>('.list-options button')].find((item) => item.textContent?.startsWith('桌面工具'))!;
+    category.click(); await settle(); await click('继续加载 Stars'); await input('#github-search', 'beta');
+    target.querySelector<HTMLInputElement>('input[aria-label="选择 demo/beta"]')!.click(); await settle();
+    const reads = dispatchMock.mock.calls.filter(([action]) => action === 'github_list_repositories').length;
+    await click('搜索仓库'); await click('Stars');
+    expect(target.querySelector<HTMLInputElement>('#github-search')?.value).toBe('beta');
+    expect(target.querySelector('.list-options button.active')?.textContent).toContain('桌面工具');
+    expect(target.textContent).toContain('已加载 2 批 · 2 / 2 个');
+    expect(target.querySelector<HTMLInputElement>('input[aria-label="选择 demo/beta"]')?.checked).toBe(true);
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'github_list_repositories')).toHaveLength(reads);
+  });
+
+  it('preserves unsaved category text when the catalog refreshes in the background', async () => {
+    show(); await settle(); await click('新建分类'); await input('.list-editor input', '待整理');
+    catalog = [...catalog, list('new-from-web', '官网新增')]; await click('刷新分类');
+    expect(target.querySelector<HTMLInputElement>('.list-editor input')?.value).toBe('待整理');
+    expect(target.textContent).toContain('官网新增');
+    expect(dispatchMock.mock.calls.some(([action]) => action === 'github_save_list')).toBe(false);
   });
 
   it('requests the optional list scope only from the authorization action', async () => {

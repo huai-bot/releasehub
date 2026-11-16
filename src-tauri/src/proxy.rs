@@ -1,4 +1,4 @@
-//! One in-memory proxy policy for HTTP requests and the bundled GitHub CLI.
+//! One in-memory proxy policy for HTTP requests and native WebViews.
 //! Passwords are supplied by the host; this module never persists them.
 use reqwest::{ClientBuilder, Proxy};
 use serde::{Deserialize, Serialize};
@@ -35,20 +35,20 @@ impl ProxySettings {
     }
 }
 
-struct Configuration { settings: ProxySettings, password: Option<String> }
-/// Share this Arc with every network service. Build a fresh client for each new request.
+struct Configuration { settings: ProxySettings, password: Option<String>, github_client: Option<(ResolvedProxy, reqwest::Client)> }
+/// Share this Arc with every network service; GitHub requests reuse a policy-bound connection pool.
 /// Deliberately has no Debug/Serialize implementation: the lock contains a password.
 pub struct ProxyState { current: RwLock<Configuration> }
 impl ProxyState {
     pub fn new(settings: ProxySettings, password: Option<String>) -> Result<Self, String> {
         settings.validate()?;
         validate_password(&settings, password.as_deref())?;
-        Ok(Self { current: RwLock::new(Configuration { settings, password }) })
+        Ok(Self { current: RwLock::new(Configuration { settings, password, github_client: None }) })
     }
     pub fn configure(&self, settings: ProxySettings, password: Option<String>) -> Result<(), String> {
         settings.validate()?;
         validate_password(&settings, password.as_deref())?;
-        *self.current.write().map_err(|_| "代理设置暂时不可用".to_string())? = Configuration { settings, password };
+        *self.current.write().map_err(|_| "代理设置暂时不可用".to_string())? = Configuration { settings, password, github_client: None };
         Ok(())
     }
     pub fn settings(&self) -> Result<ProxySettings, String> {
@@ -67,15 +67,34 @@ impl ProxyState {
         persist()?;
         if !same_account { current.password = None; }
         current.settings = settings;
+        current.github_client = None;
         Ok(())
     }
     pub(crate) fn set_password(&self, password: Option<String>) -> Result<(), String> {
         let mut current = self.current.write().map_err(|_| "代理设置暂时不可用".to_string())?;
         validate_password(&current.settings, password.as_deref())?;
         current.password = password;
+        current.github_client = None;
         Ok(())
     }
     pub fn client_builder(&self) -> Result<ClientBuilder, String> { Ok(builder(self.resolve()?)) }
+    /// Resolve system policy on every call, but reuse sockets until that policy changes.
+    /// No default authorization header: each request supplies its own account lease.
+    pub fn cached_github_client(&self) -> Result<reqwest::Client, String> {
+        let mut current = self.current.write().map_err(|_| "代理设置暂时不可用".to_string())?;
+        let resolved = Self::resolve_configuration(&current)?;
+        if let Some((policy, client)) = &current.github_client {
+            if policy == &resolved { return Ok(client.clone()); }
+        }
+        let client = builder(resolved.clone())
+            .user_agent(concat!("ReleaseHub/", env!("CARGO_PKG_VERSION")))
+            .https_only(true).redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(15)).timeout(Duration::from_secs(30))
+            .build().map_err(|_| "无法创建 GitHub 连接".to_string())?;
+        current.github_client = Some((resolved, client.clone()));
+        Ok(client)
+    }
+
     pub fn apply_command(&self, command: &mut Command) -> Result<(), String> {
         let resolved = self.resolve()?;
         // These changes belong only to this child process, never the application's environment.
@@ -129,6 +148,9 @@ impl ProxyState {
     }
     fn resolve(&self) -> Result<ResolvedProxy, String> {
         let current = self.current.read().map_err(|_| "代理设置暂时不可用".to_string())?;
+        Self::resolve_configuration(&current)
+    }
+    fn resolve_configuration(current: &Configuration) -> Result<ResolvedProxy, String> {
         match current.settings.mode.as_str() {
             "direct" => Ok(ResolvedProxy::empty("direct")),
             "manual" => {
@@ -220,6 +242,7 @@ fn builder(resolved: ResolvedProxy) -> ClientBuilder {
     reqwest::Client::builder().no_proxy().proxy(Proxy::custom(move |url| resolved.for_url(url).cloned()))
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct ResolvedProxy { http: Option<Url>, https: Option<Url>, all: Option<Url>, bypass: Bypass, source: &'static str }
 impl ResolvedProxy {
     fn empty(source: &'static str) -> Self { Self { http: None, https: None, all: None, bypass: Bypass::new(""), source } }
@@ -268,6 +291,7 @@ fn resolve_system(windows: Option<WindowsProxy>, lookup: impl Fn(&str) -> Option
     if resolved.http.is_none() && resolved.https.is_none() && resolved.all.is_none() { resolved.source = "direct"; }
     Ok(resolved)
 }
+#[derive(Clone, PartialEq, Eq)]
 struct Bypass { entries: Vec<String> }
 impl Bypass {
     fn new(value: &str) -> Self {
@@ -380,6 +404,27 @@ mod tests {
         assert_eq!(state.current.read().unwrap().password.as_deref(), Some("fixture-only-password"));
         state.configure_settings(direct()).unwrap();
         assert!(state.current.read().unwrap().password.is_none());
+    }
+    #[test]
+    fn github_pool_survives_failed_save_and_invalidates_with_policy() {
+        let state = ProxyState::new(direct(), None).unwrap();
+        state.cached_github_client().unwrap();
+        assert!(state.current.read().unwrap().github_client.is_some());
+        assert!(state.persist_settings(manual("http://127.0.0.1:9".into(), ""), || Err("fixture failure".into())).is_err());
+        assert!(state.current.read().unwrap().github_client.is_some());
+        state.configure(manual("http://127.0.0.1:9".into(), "fixture"), None).unwrap();
+        assert!(state.current.read().unwrap().github_client.is_none());
+        state.cached_github_client().unwrap();
+        state.set_password(Some("fixture-value".into())).unwrap();
+        assert!(state.current.read().unwrap().github_client.is_none());
+        state.cached_github_client().unwrap();
+        state.configure_settings(direct()).unwrap();
+        assert!(state.current.read().unwrap().github_client.is_none());
+    }
+    #[tokio::test]
+    async fn github_pool_rejects_plain_http_before_network() {
+        let state = ProxyState::new(direct(), None).unwrap();
+        assert!(state.cached_github_client().unwrap().get("http://127.0.0.1:9").send().await.is_err());
     }
     #[tokio::test]
     async fn manual_http_proxy_auth_and_changes_apply_to_new_clients() {

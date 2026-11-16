@@ -1,125 +1,54 @@
-//! The native GitHub page talks only to these fixed operations, never to a shell.
-//!
-//! `auth_root` is a host-selected, machine-local directory, NOT portable library data.
-//! Only gh's configuration is isolated: its `gh:github.com` keyring entries are still
-//! shared with the official CLI for the same account. Disconnecting here never runs
-//! `gh auth logout`, reads a token, or removes a shared keyring entry.
-//!
-//! Anonymous HTTP disables redirects. Authenticated HTTP is delegated to official
-//! gh: use a constructed absolute API URL (bypassing gh's api_host mapping), never
-//! --paginate, and rely on gh's cross-host credential protection. gh has no switch
-//! to disable every redirect; do not describe that transport as strictly no-follow.
-
-use crate::proxy::ProxyState;
+//! Fixed GitHub operations over direct, no-redirect REST/GraphQL.
+//! OAuth and cached projections live only under the host's machine-local identity.
+use crate::{github_cache::GithubCache, github_oauth::{self, OAuth, Poll, DEVICE_URI}, proxy::ProxyState, secrets::SecretStore};
 use reqwest::header;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    path::{Component, Path, PathBuf},
-    process::{ExitStatus, Stdio},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex as StdMutex, MutexGuard,
-    },
+    collections::{BTreeMap, BTreeSet}, fs, path::{Component, Path, PathBuf},
+    sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Weak, Mutex as StdMutex, MutexGuard},
     time::Duration,
 };
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    process::{Child, Command},
-    sync::{oneshot, Mutex},
-    task::JoinHandle,
-    time::{timeout, timeout_at, Instant},
-};
+use tokio::{sync::{oneshot, Mutex, Semaphore}, task::JoinHandle, time::{timeout, timeout_at, Instant}};
 use url::Url;
 
 const API_ORIGIN: &str = "https://api.github.com";
-const DEVICE_URI: &str = "https://github.com/login/device";
 const API_VERSION: &str = "2022-11-28";
 const PAGE_SIZE: usize = 30;
 const MAX_PAGE: u8 = 10;
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_HEADER_BYTES: usize = 32 * 1024;
-const MAX_PROCESS_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_README_BYTES: usize = 256 * 1024;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const ACCOUNT_CHANGED: &str = "GitHub 账号已变更，请重新连接，再重新确认操作。";
-const UNSAFE_STORAGE: &str =
-    "GitHub 授权未能保存在系统凭据库，本次连接已停止；请修复系统安全存储后重试。";
-const LOGIN_WAITING: &str =
-    "请在 GitHub 官方页面输入短码。系统凭据与官方 GitHub CLI 共用同名账号。";
-const COMPONENT_MISSING: &str = "未找到官方 GitHub CLI 登录组件；仍可浏览公开仓库。";
+const LOGIN_WAITING: &str = "请在 GitHub 官方页面输入短码并确认 ReleaseHub 授权。";
+tokio::task_local! { static CONDITIONAL_READ: bool; static EXPECTED_REVISION: u64; }
+type Flight = Mutex<Option<Result<Value, String>>>;
 
-/// A service with an explicitly consented, machine-local GitHub session.
-/// No subprocess, process output, credential, or arbitrary endpoint is exposed.
 pub struct GithubService {
-    backend: Arc<Backend>,
-    session: Arc<StdMutex<Session>>,
-    operation: Mutex<()>,
-    login_task: StdMutex<Option<LoginTask>>,
-    shutting_down: AtomicBool,
+    backend: Arc<Backend>, session: Arc<StdMutex<Session>>, operation: Mutex<()>,
+    login_task: StdMutex<Option<LoginTask>>, shutting_down: AtomicBool,
 }
-
 struct Backend {
-    auth_root: PathBuf,
-    config_dir: PathBuf,
-    gh_path: Option<PathBuf>,
-    proxy: Arc<ProxyState>,
-    configuration_error: Option<String>,
+    auth_root: PathBuf, proxy: Arc<ProxyState>, configuration_error: Option<String>,
+    oauth: Arc<OAuth>, cache: GithubCache, requests: Arc<Semaphore>, verify_at: AtomicU64,
+    flights: StdMutex<BTreeMap<String, Weak<Flight>>>,
+    etags: StdMutex<BTreeMap<String, (String, ApiResponse)>>,
 }
-
 #[derive(Default)]
-struct Session {
-    consent: bool,
-    account: Option<Account>,
-    login: Option<LoginView>,
-    error: Option<String>,
-    generation: u64,
-}
-
-#[derive(Clone)]
-struct Account {
-    login: String,
-    name: Option<String>,
-    avatar_url: Option<String>,
-}
-
+struct Session { login: Option<LoginView>, generation: u64 }
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Account { pub(crate) id: u64, login: String, name: Option<String>, avatar_url: Option<String> }
 impl Account {
+    pub(crate) fn valid(&self) -> bool { self.id > 0 && self.id <= MAX_SAFE_INTEGER && valid_login(&self.login) }
     fn value(&self) -> Value {
-        json!({
-            "login": self.login,
-            "name": self.name,
-            "avatarUrl": self.avatar_url,
-            "url": format!("https://github.com/{}", self.login),
-        })
+        json!({"id":self.id, "login":self.login, "name":self.name, "avatarUrl":self.avatar_url, "url":format!("https://github.com/{}", self.login)})
     }
 }
-
-struct LoginView {
-    state: &'static str,
-    user_code: Option<String>,
-    message: String,
-}
-
+struct LoginView { state: &'static str, user_code: Option<String>, message: String }
 impl LoginView {
-    fn value(&self) -> Value {
-        json!({
-            "state": self.state,
-            "userCode": self.user_code,
-            "verificationUri": DEVICE_URI,
-            "message": self.message,
-        })
-    }
+    fn value(&self) -> Value { json!({"state":self.state,"userCode":self.user_code,"verificationUri":DEVICE_URI,"message":self.message}) }
 }
-
-struct LoginTask {
-    cancel: oneshot::Sender<()>,
-    task: JoinHandle<()>,
-}
-
+struct LoginTask { cancel: oneshot::Sender<()>, task: JoinHandle<()> }
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RepositoryName {
     owner: String,
@@ -302,6 +231,7 @@ impl Endpoint {
     }
 }
 
+#[derive(Clone)]
 struct ApiResponse {
     status: u16,
     body: Vec<u8>,
@@ -317,304 +247,179 @@ impl ApiResponse {
     }
 }
 
-struct CapturedProcess {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum AuthStatusError {
-    Disconnected,
-    UnsafeStorage,
-    Invalid,
-}
-
 impl GithubService {
-    /// `auth_root` must be an absolute host-selected local authorization directory.
-    /// `gh_path` is the host-resolved official CLI executable; never search PATH here.
-    pub fn new(auth_root: PathBuf, gh_path: Option<PathBuf>, proxy: Arc<ProxyState>) -> Arc<Self> {
-        let configuration_error = validate_auth_root(&auth_root)
-            .and_then(|_| reject_link_ancestors(&auth_root))
-            .err();
-        let (consent, marker_error) = if configuration_error.is_none() {
-            match read_connected(&auth_root) {
-                Ok(value) => (value, None),
-                Err(error) => (false, Some(error)),
-            }
-        } else {
-            (false, None)
-        };
-        let config_dir = auth_root.join("github-cli");
+    /// auth_root is machine-local; secrets is ReleaseHub's own OS keyring namespace.
+    pub fn new(auth_root: PathBuf, secrets: SecretStore, proxy: Arc<ProxyState>) -> Arc<Self> {
+        let configuration_error = validate_auth_root(&auth_root).and_then(|_| reject_link_ancestors(&auth_root)).err();
+        let enabled = configuration_error.is_none();
+        let requests = Arc::new(Semaphore::new(4));
+        let oauth = OAuth::new(secrets, proxy.clone(), requests.clone(), enabled);
+        let cache = GithubCache::new(auth_root.clone(), enabled);
+        // A missing/invalid keyring record cannot leave readable private cache
+        // content waiting to be adopted by another local session.
+        if oauth.snapshot().account.is_none() {
+            if let Err(error) = cache.clear_protected() { oauth.local_error(error); }
+        }
         Arc::new(Self {
-            backend: Arc::new(Backend {
-                auth_root,
-                config_dir,
-                gh_path,
-                proxy,
-                configuration_error,
-            }),
-            session: Arc::new(StdMutex::new(Session {
-                consent,
-                error: marker_error,
-                ..Session::default()
-            })),
-            operation: Mutex::new(()),
-            login_task: StdMutex::new(None),
-            shutting_down: AtomicBool::new(false),
+            backend: Arc::new(Backend { cache, auth_root, proxy, configuration_error, oauth,
+                requests, verify_at: AtomicU64::new(0), flights: StdMutex::new(BTreeMap::new()), etags: StdMutex::new(BTreeMap::new()) }),
+            session: Arc::new(StdMutex::new(Session::default())), operation: Mutex::new(()),
+            login_task: StdMutex::new(None), shutting_down: AtomicBool::new(false),
         })
     }
-
     pub async fn handle(self: &Arc<Self>, action: &str, payload: Value) -> Result<Value, String> {
-        let _operation = self.operation.lock().await;
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err("应用正在退出，请稍后重新打开。".into());
-        }
+        if self.shutting_down.load(Ordering::Acquire) { return Err("应用正在退出，请稍后重新打开。".into()); }
         match action {
-            "github_status" => {
-                fields(&payload, &[])?;
-                if self.has_consent() {
-                    let _ = self.authenticated_account().await;
-                }
-                Ok(self.status_value())
+            "github_status" => { fields(&payload, &[])?; let result = self.status_value(); self.verify_in_background(); return Ok(result); }
+            "github_cache_read" => {
+                fields(&payload, &["operation", "parameters"])?;
+                let operation = string_field(&payload, "operation")?;
+                let parameters = payload.get("parameters").ok_or("缺少缓存请求参数。")?;
+                let ttl = validate_cache_read(operation, parameters)?;
+                let snapshot = self.backend.oauth.snapshot();
+                if protected_read(operation, parameters) && snapshot.account.is_none() { return Ok(Value::Null); }
+                let result = self.backend.cache.read(&cache_namespace(&snapshot), operation, parameters, snapshot.revision, ttl)?;
+                if self.backend.oauth.snapshot().revision != snapshot.revision { return Ok(Value::Null); }
+                return Ok(result);
             }
+            "github_cache_stats" => { fields(&payload, &[])?; return self.backend.cache.stats(); }
+            "github_cache_clear" => { fields(&payload, &[])?; self.backend.clear_cache()?; return Ok(Value::Null); }
+            _ => {}
+        }
+        if cache_operation(action) {
+            validate_cache_read(action, &payload)?;
+            return self.read_live(action, payload).await;
+        }
+        // Only account changes and writes serialize. Status, disk reads, and
+        // independent network reads never queue behind a mutation.
+        let _operation = self.operation.lock().await;
+        match action {
             "github_login" => {
-                fields(&payload, &["lists"])?;
-                let lists = match payload.get("lists") {
-                    None | Some(Value::Bool(false)) => false,
-                    Some(Value::Bool(true)) => true,
-                    _ => return Err("GitHub 授权选项不正确。".into()),
-                };
-                self.start_login(lists).await;
+                fields(&payload, &["lists", "privateRepositories"])?;
+                let lists = bool_option(&payload, "lists")?;
+                let private = bool_option(&payload, "privateRepositories")?;
+                self.start_login(private, lists).await;
                 Ok(self.status_value())
             }
             "github_cancel_login" => {
-                fields(&payload, &[])?;
-                let was_waiting = session_lock(&self.session)
-                    .login
-                    .as_ref()
-                    .is_some_and(|login| login.state == "waiting");
-                self.stop_login().await;
-                if was_waiting {
-                    let cleanup = self
-                        .backend
-                        .remove_app_hosts()
-                        .and_then(|_| self.backend.save_connected(false));
-                    let mut session = session_lock(&self.session);
-                    session.consent = false;
-                    session.account = None;
-                    session.error = cleanup.err();
-                }
-                session_lock(&self.session).login = None;
-                Ok(self.status_value())
+                fields(&payload, &[])?; self.stop_login().await;
+                session_lock(&self.session).login = None; Ok(self.status_value())
             }
             "github_logout" => {
-                fields(&payload, &[])?;
-                self.stop_login().await;
-                let error = self.backend.save_connected(false).err();
-                let mut session = session_lock(&self.session);
-                session.consent = false;
-                session.account = None;
-                session.login = None;
-                session.error = error;
-                drop(session);
-                Ok(self.status_value())
+                fields(&payload, &[])?; self.stop_login().await;
+                let result = self.backend.oauth.clear();
+                self.backend.clear_cache()?;
+                session_lock(&self.session).login = None;
+                result?; Ok(self.status_value())
             }
-            "github_repositories" => self.repositories(&payload).await,
-            "github_repository" => self.repository(&payload).await,
-            "github_set_star" => self.set_star(&payload).await,
-            "github_update_repository" => self.update_repository(&payload).await,
-            "github_activity" => self.activity(&payload).await,
-            "github_lists" => self.lists(&payload).await,
-            "github_save_list" => self.save_list(&payload).await,
-            "github_delete_list" => self.delete_list(&payload).await,
-            "github_list_repositories" => self.list_repositories(&payload).await,
-            "github_assign_lists" => self.assign_lists(&payload).await,
-            "github_repository_lists" => self.repository_lists(&payload).await,
+            "github_set_star" | "github_update_repository" | "github_save_list" | "github_delete_list" | "github_assign_lists" => {
+                // Fence reads already in flight before and after any attempted
+                // mutation, including partially applied batches/readback errors.
+                require_confirmed(&payload)?;
+                self.backend.invalidate_mutation(action, &payload)?;
+                let revision = self.backend.oauth.snapshot().revision;
+                let result = EXPECTED_REVISION.scope(revision, async { match action {
+                    "github_set_star" => self.set_star(&payload).await,
+                    "github_update_repository" => self.update_repository(&payload).await,
+                    "github_save_list" => self.save_list(&payload).await,
+                    "github_delete_list" => self.delete_list(&payload).await,
+                    _ => self.assign_lists(&payload).await,
+                }}).await;
+                self.backend.invalidate_mutation(action, &payload)?;
+                result
+            }
             _ => Err("不支持这个 GitHub 操作。".into()),
         }
     }
-
-    /// Internal GET-only bridge for subscribed public software. Raw API JSON is
-    /// consumed by Rust core's existing projection, never forwarded as a page or
-    /// credential. Outer None means no app consent; inner None means HTTP 404.
-    pub(crate) async fn repository_api(
-        &self,
-        owner: &str,
-        repo: &str,
-        tail: &[&str],
-        page: Option<u32>,
-    ) -> Option<Result<Option<Value>, String>> {
-        let _operation = self.operation.lock().await;
-        if !self.has_consent() {
-            return None;
-        }
-        Some(
-            async {
-                let endpoint = repository_read_endpoint(owner, repo, tail, page)?;
-                self.authenticated_account().await?;
-                let response = self
-                    .backend
-                    .api(&endpoint, Method::Get, true, false, None)
-                    .await?;
-                if response.status == 404 {
-                    return Ok(None);
-                }
-                response.json().map(Some)
+    async fn read_live(&self, action: &str, payload: Value) -> Result<Value, String> {
+        let snapshot = self.backend.oauth.snapshot();
+        let epoch = self.backend.cache.epoch();
+        let namespace = cache_namespace(&snapshot);
+        let key = format!("{}:{}:{}", snapshot.revision, epoch, GithubCache::key(&namespace, action, &payload));
+        let flight = self.backend.flight(&key);
+        let mut shared = flight.lock().await;
+        // A duplicate can wait across logout/re-authorization even when the
+        // original reader finished before the identity changed.
+        if self.backend.oauth.snapshot().revision != snapshot.revision { return Err(ACCOUNT_CHANGED.into()); }
+        if let Some(result) = shared.as_ref() { return result.clone(); }
+        let result = EXPECTED_REVISION.scope(snapshot.revision, CONDITIONAL_READ.scope(true, async {
+            match action {
+                "github_repositories" => self.repositories(&payload).await,
+                "github_repository" => self.repository(&payload).await,
+                "github_activity" => self.activity(&payload).await,
+                "github_lists" => self.lists(&payload).await,
+                "github_list_repositories" => self.list_repositories(&payload).await,
+                "github_repository_lists" => self.repository_lists(&payload).await,
+                _ => Err("不支持这个 GitHub 读取操作。".into()),
             }
-            .await,
-        )
-    }
-
-    /// The host must await this on application exit. A completed connection stays
-    /// remembered, but our own pending login child is killed and reaped.
-    pub async fn shutdown(&self) {
-        // Never queue application exit behind an unrelated 30-second API call.
-        // The flag and login_task mutex also prevent a late login spawn racing
-        // with this cancellation; stop_login only waits for our login child.
-        self.shutting_down.store(true, Ordering::Release);
-        self.stop_login().await;
-    }
-
-    fn has_consent(&self) -> bool {
-        session_lock(&self.session).consent
-    }
-
-    fn status_value(&self) -> Value {
-        let session = session_lock(&self.session);
-        let available = self.backend.available();
-        let error = session
-            .error
-            .clone()
-            .or_else(|| self.backend.configuration_error.clone())
-            .or_else(|| {
-                if available {
-                    None
-                } else {
-                    Some(COMPONENT_MISSING.into())
-                }
-            });
-        json!({
-            "available": available,
-            "connected": session.consent && session.account.is_some(),
-            "account": if session.consent { session.account.as_ref().map(Account::value) } else { None },
-            "login": session.login.as_ref().map(LoginView::value),
-            "error": error,
-            "provider": "github-cli",
-        })
-    }
-
-    fn disconnect_with_error(&self, error: String) {
-        let marker_error = self.backend.save_connected(false).err();
-        let mut session = session_lock(&self.session);
-        session.consent = false;
-        session.account = None;
-        session.login = None;
-        session.error = Some(marker_error.unwrap_or(error));
-    }
-
-    async fn authenticated_account(&self) -> Result<Account, String> {
-        let previous = {
-            let session = session_lock(&self.session);
-            if !session.consent {
-                return Err("请先连接 GitHub 账号，再使用这个功能。".into());
-            }
-            session.account.clone()
-        };
-        let account = match self.backend.authenticated_account().await {
-            Ok(account) => account,
-            Err(error) => {
-                self.disconnect_with_error(error.clone());
-                return Err(error);
-            }
-        };
-        if previous
-            .as_ref()
-            .is_some_and(|old| !old.login.eq_ignore_ascii_case(&account.login))
-        {
-            self.disconnect_with_error(ACCOUNT_CHANGED.into());
-            return Err(ACCOUNT_CHANGED.into());
+        })).await;
+        let result = if self.backend.oauth.snapshot().revision != snapshot.revision { Err(ACCOUNT_CHANGED.into()) } else { result };
+        if let Ok(data) = &result {
+            // A cache write failure does not discard a successful live response.
+            let _ = self.backend.cache.put(epoch, &namespace, action, &payload, data);
         }
-        let mut session = session_lock(&self.session);
-        session.account = Some(account.clone());
-        session.error = None;
-        Ok(account)
+        *shared = Some(result.clone());
+        result
     }
-
-    async fn start_login(&self, lists: bool) {
-        let running = self
-            .login_task
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_ref()
-            .is_some_and(|task| !task.task.is_finished());
-        if running {
-            return;
-        }
-        self.stop_login().await;
-        if !lists && self.has_consent() && self.authenticated_account().await.is_ok() {
-            return;
-        }
-        let prepared = if !self.backend.available() {
-            Err(COMPONENT_MISSING.into())
-        } else {
-            self.backend
-                .ensure_layout()
-                .and_then(|_| self.backend.save_connected(false))
-                .and_then(|_| self.backend.remove_app_hosts())
-        };
-        if let Err(error) = prepared {
-            let mut session = session_lock(&self.session);
-            session.consent = false;
-            session.account = None;
-            session.error = Some(error.clone());
-            session.login = Some(LoginView {
-                state: "error",
-                user_code: None,
-                message: error,
-            });
-            return;
-        }
-        let generation = {
-            let mut session = session_lock(&self.session);
-            session.generation = session.generation.wrapping_add(1);
-            session.consent = false;
-            session.account = None;
-            session.error = None;
-            session.login = Some(LoginView {
-                state: "waiting",
-                user_code: None,
-                message: LOGIN_WAITING.into(),
-            });
-            session.generation
-        };
+    pub(crate) async fn repository_api(&self, owner: &str, repo: &str, tail: &[&str], page: Option<u32>) -> Option<Result<Option<Value>, String>> {
+        if !self.has_consent() { return None; }
+        Some(async {
+            let endpoint = repository_read_endpoint(owner, repo, tail, page)?;
+            let response = self.backend.api(&endpoint, Method::Get, true, false, None).await?;
+            if response.status == 404 { Ok(None) } else { response.json().map(Some) }
+        }.await)
+    }
+    pub async fn shutdown(&self) { self.shutting_down.store(true, Ordering::Release); self.stop_login().await; }
+    fn verify_in_background(&self) {
+        if !self.has_consent() { return; }
+        let now = github_oauth::now_ms();
+        let previous = self.backend.verify_at.load(Ordering::Acquire);
+        if previous != 0 && now.saturating_sub(previous) < 60_000 { return; }
+        if self.backend.verify_at.compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire).is_err() { return; }
         let backend = self.backend.clone();
-        let session = self.session.clone();
-        let (cancel, receiver) = oneshot::channel();
-        let mut slot = self
-            .login_task
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if self.shutting_down.load(Ordering::Acquire) {
-            return;
-        }
-        let task = tokio::spawn(async move {
-            login_worker(backend, session, generation, receiver, lists).await;
+        tokio::spawn(async move {
+            let revision = backend.oauth.snapshot().revision;
+            let _ = backend.oauth.verify().await;
+            if backend.oauth.snapshot().revision != revision { let _ = backend.clear_cache(); }
         });
+    }
+    fn has_consent(&self) -> bool { self.backend.oauth.snapshot().account.is_some() }
+    fn status_value(&self) -> Value {
+        let state = self.backend.oauth.snapshot();
+        let session = session_lock(&self.session);
+        json!({"available":self.backend.oauth.available(), "connected":state.account.is_some(), "verified":state.verified,
+            "sessionRevision":state.revision,"scopes":state.scopes,"account":state.account.as_ref().map(Account::value),
+            "login":session.login.as_ref().map(LoginView::value),"error":state.error.or_else(||self.backend.configuration_error.clone()),"provider":"github-oauth"})
+    }
+    async fn authenticated_account(&self) -> Result<Account, String> {
+        self.backend.oauth.snapshot().account.ok_or_else(|| "请先连接 GitHub 账号，再使用这个功能。".into())
+    }
+    async fn verified_account(&self) -> Result<Account, String> {
+        self.authenticated_account().await?;
+        let before = self.backend.oauth.snapshot().revision;
+        let result = self.backend.oauth.verify().await;
+        if self.backend.oauth.snapshot().revision != before { let _ = self.backend.clear_cache(); }
+        result
+    }
+    async fn start_login(&self, private: bool, lists: bool) {
+        if self.login_task.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|task| !task.task.is_finished()) { return; }
+        self.stop_login().await;
+        let scopes = self.backend.oauth.requested_scopes(private, lists);
+        let generation = {
+            let mut state = session_lock(&self.session); state.generation = state.generation.wrapping_add(1);
+            state.login = Some(LoginView { state:"waiting", user_code:None, message:LOGIN_WAITING.into() }); state.generation
+        };
+        let backend = self.backend.clone(); let session = self.session.clone();
+        let (cancel, receiver) = oneshot::channel();
+        let mut slot = self.login_task.lock().unwrap_or_else(|e| e.into_inner());
+        if self.shutting_down.load(Ordering::Acquire) { return; }
+        let task = tokio::spawn(login_worker(backend, session, generation, receiver, scopes));
         *slot = Some(LoginTask { cancel, task });
     }
-
     async fn stop_login(&self) {
-        let task = self
-            .login_task
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
-        if let Some(task) = task {
-            let _ = task.cancel.send(());
-            let _ = task.task.await;
-        }
+        let task = self.login_task.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(task) = task { let _ = task.cancel.send(()); let _ = task.task.await; }
     }
-
     async fn repositories(&self, payload: &Value) -> Result<Value, String> {
         fields(payload, &["tab", "query", "page"])?;
         let tab = string_field(payload, "tab")?;
@@ -742,7 +547,7 @@ impl GithubService {
             .as_bool()
             .ok_or("请选择 Star 或取消 Star。")?;
         // Revalidate the active keyring account immediately before a mutation.
-        self.authenticated_account().await?;
+        self.verified_account().await?;
         let method = if starred { Method::Put } else { Method::Delete };
         let response = self
             .backend
@@ -757,7 +562,7 @@ impl GithubService {
         if response.status != 204 {
             return Err(http_error(response.status));
         }
-        // A redirected PUT/DELETE can become GET in gh's HTTP transport. Verify
+        // Verify
         // the desired state, not just process exit 0 or a generic 2xx response.
         if self.star_state(&repository).await? != starred {
             return Err("GitHub 的 Star 状态与本次操作不一致，请刷新后重新确认。".into());
@@ -774,7 +579,7 @@ impl GithubService {
         let repository = RepositoryName::parse(string_field(payload, "repository")?)?;
         let description = description_field(payload)?;
         let homepage = homepage_field(payload)?;
-        self.authenticated_account().await?;
+        self.verified_account().await?;
         let endpoint = Endpoint::Repository(repository.clone());
         let before = self
             .backend
@@ -794,9 +599,9 @@ impl GithubService {
         {
             return Err("仓库名称已变更，请重新打开仓库详情后再确认。".into());
         }
-        self.authenticated_account().await?;
+        self.verified_account().await?;
         // Only these two fields are serialized; no name/privacy/archive changes.
-        // JSON travels over stdin, never through a shell or -f/-F arguments.
+        // JSON is sent directly in the fixed HTTPS request body.
         let body = json!({ "description": description, "homepage": homepage });
         let response = self
             .backend
@@ -809,7 +614,13 @@ impl GithubService {
         if !update_matches(&before, &after, &description, &homepage) {
             return Err("GitHub 返回的信息与本次修改不一致，请刷新后重新确认。".into());
         }
-        project_repository(&after, None)
+        // Independently re-read the fixed REST endpoint; a successful PATCH
+        // response alone is not proof that the requested state was stored.
+        let verified = self.backend.api(&endpoint, Method::Get, true, false, None).await?.json()?;
+        if !update_matches(&before, &verified, &description, &homepage) {
+            return Err("GitHub 回读的信息与本次修改不一致，请刷新后重新确认。".into());
+        }
+        project_repository(&verified, None)
     }
 
     async fn activity(&self, payload: &Value) -> Result<Value, String> {
@@ -852,281 +663,103 @@ impl Drop for GithubService {
         {
             let _ = task.cancel.send(());
             // There is no strong service reference in the worker. Aborting drops
-            // its kill_on_drop child; shutdown() is preferred for awaited reaping.
+            // its pending HTTP request; shutdown() awaits cancellation.
             task.task.abort();
         }
     }
 }
 
 impl Backend {
-    fn available(&self) -> bool {
-        self.gh_path.as_ref().is_some_and(|path| {
-            path.is_absolute()
-                && !path
-                    .components()
-                    .any(|part| matches!(part, Component::ParentDir))
-                && path.is_file()
-        })
+    fn flight(&self, key: &str) -> Arc<Flight> {
+        let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
+        flights.retain(|_, weak| weak.strong_count() > 0);
+        if let Some(existing) = flights.get(key).and_then(Weak::upgrade) { existing }
+        else { let flight = Arc::new(Mutex::new(None)); flights.insert(key.to_owned(), Arc::downgrade(&flight)); flight }
     }
-
-    fn ensure_layout(&self) -> Result<(), String> {
-        if let Some(error) = &self.configuration_error {
-            return Err(error.clone());
-        }
-        validate_auth_root(&self.auth_root)?;
-        reject_link_ancestors(&self.auth_root)?;
-        fs::create_dir_all(&self.auth_root).map_err(|_| "无法创建本机 GitHub 授权目录。")?;
-        reject_link_ancestors(&self.config_dir)?;
-        fs::create_dir_all(&self.config_dir).map_err(|_| "无法创建 GitHub 登录配置目录。")?;
-        reject_link_ancestors(&self.config_dir)
-    }
-
-    fn save_connected(&self, connected: bool) -> Result<(), String> {
-        validate_auth_root(&self.auth_root)?;
-        reject_link_ancestors(&self.auth_root)?;
-        if !connected && !self.auth_root.exists() {
-            return Ok(());
-        }
-        if connected {
-            self.ensure_layout()?;
-        }
-        let path = self.auth_root.join("connected.json");
-        check_regular_file(&path)?;
-        let write = (|| -> std::io::Result<()> {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&path)?;
-            file.write_all(if connected { b"true\n" } else { b"false\n" })?;
-            file.sync_all()
-        })();
-        if write.is_err() {
-            // A failed disconnect must not leave a previous true marker active.
-            if !connected && remove_exact_file(&path).is_ok() {
-                return Ok(());
-            }
-            return Err("无法保存本机 GitHub 连接状态，请检查授权目录是否可写。".into());
-        }
-        Ok(())
-    }
-
-    fn remove_app_hosts(&self) -> Result<(), String> {
-        validate_auth_root(&self.auth_root)?;
-        reject_link_ancestors(&self.config_dir)?;
-        // gh writes both host and per-user plaintext fallback oauth_token fields
-        // into this exact app-only file. Remove it without reading any token. Do
-        // not touch config outside this directory or any shared keyring entry.
-        remove_exact_file(&self.config_dir.join("hosts.yml"))
-    }
-
-    fn command(&self, args: &[&str], input: bool) -> Result<Command, String> {
-        if !self.available() {
-            return Err(COMPONENT_MISSING.into());
-        }
-        self.ensure_layout()?;
-        let executable = self.gh_path.as_ref().ok_or(COMPONENT_MISSING)?;
-        let mut command = Command::new(executable);
-        command
-            .args(args)
-            .current_dir(&self.config_dir)
-            .stdin(if input { Stdio::piped() } else { Stdio::null() })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        // Clear only named settings; never inspect, copy or log the environment.
-        for key in [
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-            "GH_ENTERPRISE_TOKEN",
-            "GITHUB_ENTERPRISE_TOKEN",
-            "GH_DEBUG",
-            "GH_BROWSER",
-            "BROWSER",
-            "GH_HOST",
-            "GH_REPO",
-            "GH_HTTP_UNIX_SOCKET",
-            "GH_PAGER",
-            "PAGER",
-            "LESS",
-            "GH_EDITOR",
-            "GIT_EDITOR",
-            "VISUAL",
-            "EDITOR",
-            "GIT_ASKPASS",
-            "SSH_ASKPASS",
-            "SSH_ASKPASS_REQUIRE",
-            "GH_FORCE_TTY",
-            "CLICOLOR_FORCE",
-            "FORCE_COLOR",
-            "GH_FORCE_COLOR",
-            "GH_ACCESSIBLE_PROMPTER",
-            "GH_ACCESSIBLE_COLORS",
-            "GLAMOUR_STYLE",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-            "SSL_CERT_FILE",
-            "SSL_CERT_DIR",
-        ] {
-            command.env_remove(key);
-        }
-        command
-            .env("GH_CONFIG_DIR", &self.config_dir)
-            .env("GH_PROMPT_DISABLED", "1")
-            .env("NO_COLOR", "1")
-            .env("CLICOLOR", "0")
-            .env("TERM", "dumb")
-            .env("GH_NO_UPDATE_NOTIFIER", "1")
-            .env("GH_NO_EXTENSION_UPDATE_NOTIFIER", "1");
-        self.proxy.apply_command(&mut command)?;
-        #[cfg(windows)]
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        Ok(command)
-    }
-
-    async fn authenticated_account(&self) -> Result<Account, String> {
-        let command = self.command(
-            &[
-                "auth",
-                "status",
-                "--active",
-                "--hostname",
-                "github.com",
-                "--json",
-                "hosts",
-            ],
-            false,
-        )?;
-        let output = capture(command, None, MAX_PROCESS_MESSAGE_BYTES).await?;
-        let login = match parse_auth_status(&output.stdout) {
-            Ok(login) if output.status.success() => login,
-            Err(AuthStatusError::UnsafeStorage) => {
-                self.remove_app_hosts()?;
-                return Err(UNSAFE_STORAGE.into());
-            }
-            _ => return Err("GitHub 登录未生效或已失效，请重新连接。".into()),
+    fn invalidate_mutation(&self, action: &str, payload: &Value) -> Result<(), String> {
+        let namespace = cache_namespace(&self.oauth.snapshot());
+        let (operations, names): (&[&str], Option<Vec<String>>) = match action {
+            "github_set_star" => (&["github_repositories", "github_repository", "github_lists", "github_list_repositories", "github_repository_lists"],
+                Some(vec![RepositoryName::parse(string_field(payload, "repository")?)?.full_name()])),
+            "github_update_repository" => (&["github_repositories", "github_repository", "github_list_repositories"],
+                Some(vec![RepositoryName::parse(string_field(payload, "repository")?)?.full_name()])),
+            "github_assign_lists" => (&["github_lists", "github_list_repositories", "github_repository_lists"],
+                Some(string_array(payload, "repositories", 100)?)),
+            _ => (&["github_lists", "github_list_repositories", "github_repository_lists"], None),
         };
-        let value = self
-            .api(&Endpoint::Viewer, Method::Get, true, false, None)
-            .await?
-            .json()?;
-        let account = project_account(&value)?;
-        if !account.login.eq_ignore_ascii_case(&login) {
-            return Err(ACCOUNT_CHANGED.into());
-        }
-        Ok(account)
+        let result = self.cache.invalidate(&namespace, operations, names.as_deref());
+        self.etags.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        result
     }
-
-    async fn api(
-        &self,
-        endpoint: &Endpoint,
-        method: Method,
-        authenticated: bool,
-        confirmed: bool,
-        body: Option<&Value>,
-    ) -> Result<ApiResponse, String> {
-        if !endpoint.allows(method) || (method != Method::Get && (!authenticated || !confirmed)) {
-            return Err("这个 GitHub 操作未获确认。".into());
+    fn clear_cache(&self) -> Result<(), String> {
+        let result = self.cache.clear();
+        self.etags.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        result
+    }
+    async fn token(&self) -> Result<github_oauth::TokenLease, String> {
+        let before = self.oauth.snapshot().revision;
+        let result = self.oauth.token().await;
+        if self.oauth.snapshot().revision != before { let _ = self.clear_cache(); }
+        result
+    }
+    async fn api(&self, endpoint: &Endpoint, method: Method, authenticated: bool, confirmed: bool, body: Option<&Value>) -> Result<ApiResponse, String> {
+        if !endpoint.allows(method) || (method != Method::Get && (!authenticated || !confirmed)) { return Err("这个 GitHub 操作未获确认。".into()); }
+        if (method == Method::Patch) != body.is_some() { return Err("GitHub 请求内容不正确。".into()); }
+        if !authenticated && (method != Method::Get || !endpoint.is_public_read()) { return Err("请先连接 GitHub 账号。".into()); }
+        let url = endpoint.url()?;
+        let lease = if authenticated { Some(self.token().await?) } else { None };
+        let snapshot = self.oauth.snapshot();
+        if lease.as_ref().is_some_and(|lease| lease.revision != snapshot.revision) { return Err(ACCOUNT_CHANGED.into()); }
+        check_request_revision(snapshot.revision)?;
+        let epoch = self.cache.epoch();
+        let key = format!("{}:{}:{}", snapshot.revision, cache_namespace(&snapshot), url);
+        let conditional = method == Method::Get && CONDITIONAL_READ.try_with(|enabled| *enabled).unwrap_or(false) && !matches!(endpoint, Endpoint::Viewer | Endpoint::Star(_));
+        let previous = if conditional { self.etags.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned() } else { None };
+        let mut request = github_oauth::client(&self.proxy)?.request(reqwest::Method::from_bytes(method.as_str().as_bytes()).map_err(|_| "GitHub 方法不正确。")?, url)
+            .header(header::ACCEPT, endpoint.accept()).header("X-GitHub-Api-Version", API_VERSION);
+        if let Some(lease) = &lease { request = request.bearer_auth(&lease.access); }
+        if let Some((etag, _)) = &previous { request = request.header(header::IF_NONE_MATCH, etag); }
+        if let Some(body) = body { request = request.json(body); }
+        let _permit = self.requests.acquire().await.map_err(|_| "GitHub 请求队列已关闭。")?;
+        if self.oauth.snapshot().revision != snapshot.revision { return Err(ACCOUNT_CHANGED.into()); }
+        check_request_revision(snapshot.revision)?;
+        let response = request.send().await.map_err(|_| "暂时无法连接 GitHub，请检查网络后重试。")?;
+        let etag = response.headers().get(header::ETAG).and_then(|v| v.to_str().ok()).filter(|s| s.len() <= 1024).map(str::to_owned);
+        let status = response.status().as_u16();
+        if status == 401 {
+            if let Some(lease) = &lease { self.oauth.invalidate(lease); self.clear_cache()?; }
         }
-        if (method == Method::Patch) != body.is_some() {
-            return Err("GitHub 请求内容不正确。".into());
+        if self.oauth.snapshot().revision != snapshot.revision { return Err(ACCOUNT_CHANGED.into()); }
+        if status == 304 {
+            return previous.map(|(_, response)| response).ok_or_else(|| "GitHub 缓存校验响应不完整，请重试。".into());
         }
-        let target = endpoint.url()?;
-        if !authenticated {
-            if method != Method::Get || !endpoint.is_public_read() {
-                return Err("请先连接 GitHub 账号。".into());
+        let response = read_api_response(response).await?;
+        if self.oauth.snapshot().revision != snapshot.revision { return Err(ACCOUNT_CHANGED.into()); }
+        if conditional && status == 200 && self.cache.epoch() == epoch {
+            if let Some(etag) = etag {
+                let mut entries = self.etags.lock().unwrap_or_else(|e| e.into_inner());
+                if self.cache.epoch() != epoch { return Ok(response); }
+                // Keep raw conditional responses only in bounded memory, never on disk.
+                let size: usize = entries.values().map(|(_, response)| response.body.len()).sum();
+                if size + response.body.len() > 16 * 1024 * 1024 { entries.clear(); }
+                entries.insert(key, (etag, response.clone()));
             }
-            let client = self.proxy.client_builder()?
-                .https_only(true)
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(REQUEST_TIMEOUT)
-                .user_agent(concat!("ReleaseHub/", env!("CARGO_PKG_VERSION")))
-                .build()
-                .map_err(|_| "无法准备 GitHub 网络连接。")?;
-            let mut response = client
-                .get(target)
-                .header(header::ACCEPT, endpoint.accept())
-                .header("X-GitHub-Api-Version", API_VERSION)
-                .send()
-                .await
-                .map_err(|_| "暂时无法连接 GitHub，请检查网络后重试。")?;
-            let status = response.status().as_u16();
-            if (300..400).contains(&status) {
-                return Err("GitHub 返回了跳转地址，请使用仓库的当前完整名称。".into());
-            }
-            if response
-                .content_length()
-                .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-            {
-                return Err("GitHub 返回的内容过大，请到官网查看。".into());
-            }
-            let has_next = response
-                .headers()
-                .get(header::LINK)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(has_next_link);
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|_| "读取 GitHub 内容失败，请重试。")?
-            {
-                if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-                    return Err("GitHub 返回的内容过大，请到官网查看。".into());
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            return Ok(ApiResponse {
-                status,
-                body: bytes,
-                has_next,
-            });
-        }
-        let accept = format!("Accept: {}", endpoint.accept());
-        let version = format!("X-GitHub-Api-Version: {API_VERSION}");
-        let mut args = vec![
-            "api",
-            "--hostname",
-            "github.com",
-            "--method",
-            method.as_str(),
-            "--include",
-            "--header",
-            accept.as_str(),
-            "--header",
-            version.as_str(),
-        ];
-        if body.is_some() {
-            args.extend(["--header", "Content-Type: application/json", "--input", "-"]);
-        }
-        // Absolute, constructed URL: --hostname alone does not bypass api_host.
-        args.push(target.as_str());
-        let input = body
-            .map(serde_json::to_vec)
-            .transpose()
-            .map_err(|_| "无法准备仓库修改内容。")?;
-        let output = capture(
-            self.command(&args, input.is_some())?,
-            input,
-            MAX_RESPONSE_BYTES + MAX_HEADER_BYTES,
-        )
-        .await?;
-        let response = parse_cli_response(&output.stdout)?;
-        if !output.status.success() && (200..400).contains(&response.status) {
-            return Err("GitHub 请求没有正常完成，请刷新后重试。".into());
-        }
-        if (300..400).contains(&response.status) {
-            return Err("GitHub 返回了跳转地址，请刷新仓库信息后重试。".into());
         }
         Ok(response)
     }
 }
-
+async fn read_api_response(mut response: reqwest::Response) -> Result<ApiResponse, String> {
+    let status = response.status().as_u16();
+    if (300..400).contains(&status) { return Err("GitHub 返回了跳转地址，请使用仓库的当前完整名称。".into()); }
+    if response.content_length().is_some_and(|n| n > MAX_RESPONSE_BYTES as u64) { return Err("GitHub 返回的内容过大，请到官网查看。".into()); }
+    let has_next = response.headers().get(header::LINK).and_then(|v| v.to_str().ok()).is_some_and(has_next_link);
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| "读取 GitHub 内容失败，请重试。")? {
+        if body.len() + chunk.len() > MAX_RESPONSE_BYTES { return Err("GitHub 返回的内容过大，请到官网查看。".into()); }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(ApiResponse { status, body, has_next })
+}
 // Every document is compiled into the app. Callers supply validated variables,
 // never GraphQL text, endpoints, headers, or credentials.
 #[derive(Clone, Copy)]
@@ -1208,33 +841,22 @@ impl ListOperation {
 
 impl Backend {
     async fn graphql(&self, operation: ListOperation, variables: Value, confirmed: bool) -> Result<Value, String> {
-        if operation.is_mutation() && !confirmed {
-            return Err("请确认要保存的 GitHub 分类操作。".into());
-        }
-        let input = serde_json::to_vec(&json!({ "query": operation.document(), "variables": variables }))
-            .map_err(|_| "无法准备 GitHub 分类请求。")?;
-        let version = format!("X-GitHub-Api-Version: {API_VERSION}");
-        let output = capture(
-            self.command(&[
-                "api", "--hostname", "github.com", "--method", "POST", "--include",
-                "--header", "Accept: application/vnd.github+json", "--header", &version,
-                "--header", "Content-Type: application/json", "--input", "-",
-                "https://api.github.com/graphql",
-            ], true)?,
-            Some(input), MAX_RESPONSE_BYTES + MAX_HEADER_BYTES,
-        ).await?;
-        let response = parse_cli_response(&output.stdout)?;
-        let value = response.json()?;
-        if let Some(errors) = value["errors"].as_array().filter(|errors| !errors.is_empty()) {
-            return Err(graphql_error(errors));
-        }
-        if !output.status.success() {
-            return Err("GitHub 分类请求未完成，请刷新后重试。".into());
-        }
-        value.get("data").filter(|data| data.is_object()).cloned()
-            .ok_or_else(|| "GitHub 分类响应不完整，请重试。".into())
+        if operation.is_mutation() && !confirmed { return Err("请确认要保存的 GitHub 分类操作。".into()); }
+        let lease = self.token().await?;
+        check_request_revision(lease.revision)?;
+        let _permit = self.requests.acquire().await.map_err(|_| "GitHub 请求队列已关闭。")?;
+        check_request_revision(self.oauth.snapshot().revision)?;
+        let response = github_oauth::client(&self.proxy)?.post("https://api.github.com/graphql")
+            .header(header::ACCEPT, "application/vnd.github+json").header("X-GitHub-Api-Version", API_VERSION)
+            .bearer_auth(&lease.access).json(&json!({"query":operation.document(),"variables":variables}))
+            .send().await.map_err(|_| "暂时无法连接 GitHub，请检查网络后重试。")?;
+        if response.status().as_u16() == 401 { self.oauth.invalidate(&lease); self.clear_cache()?; }
+        if self.oauth.snapshot().revision != lease.revision { return Err(ACCOUNT_CHANGED.into()); }
+        let value = read_api_response(response).await?.json()?;
+        if self.oauth.snapshot().revision != lease.revision { return Err(ACCOUNT_CHANGED.into()); }
+        if let Some(errors) = value["errors"].as_array().filter(|errors| !errors.is_empty()) { return Err(graphql_error(errors)); }
+        value.get("data").filter(|data| data.is_object()).cloned().ok_or_else(|| "GitHub 分类响应不完整，请重试。".into())
     }
-
     async fn list_catalog(&self, login: &str) -> Result<Vec<Value>, String> {
         let mut result = Vec::new();
         let mut seen = BTreeSet::new();
@@ -1313,7 +935,7 @@ impl GithubService {
         let name = list_text(payload, "name", 100, true)?;
         let description = list_text(payload, "description", 1000, false)?;
         let id = payload.get("id").map(|value| list_id(value.as_str().ok_or("GitHub 分类编号不正确。")?)).transpose()?;
-        let account = self.authenticated_account().await?;
+        let account = self.verified_account().await?;
         let before = self.backend.list_catalog(&account.login).await?;
         if let Some(id) = &id { require_owned_list(&before, id)?; }
         let mut input = json!({ "name": name, "description": description });
@@ -1337,7 +959,7 @@ impl GithubService {
         fields(payload, &["id", "confirmed"])?;
         require_confirmed(payload)?;
         let id = list_id(string_field(payload, "id")?)?;
-        let account = self.authenticated_account().await?;
+        let account = self.verified_account().await?;
         let before = self.backend.list_catalog(&account.login).await?;
         require_owned_list(&before, &id)?;
         self.backend.graphql(ListOperation::Delete, json!({ "input": { "listId": id } }), true).await?;
@@ -1405,7 +1027,7 @@ impl GithubService {
         let names = string_array(payload, "repositories", 100)?;
         if names.is_empty() { return Err("请至少选择一个仓库。".into()); }
         let repositories = names.iter().map(|name| RepositoryName::parse(name)).collect::<Result<Vec<_>, _>>()?;
-        let account = self.authenticated_account().await?;
+        let account = self.verified_account().await?;
         let lists = self.backend.list_catalog(&account.login).await?;
         for id in &targets { require_owned_list(&lists, id)?; }
         // Resolve every selected repository before the first write, so an invalid
@@ -1625,335 +1247,78 @@ fn session_lock(session: &StdMutex<Session>) -> MutexGuard<'_, Session> {
     session.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-async fn capture(
-    mut command: Command,
-    input: Option<Vec<u8>>,
-    max_stdout: usize,
-) -> Result<CapturedProcess, String> {
-    let mut child = command
-        .spawn()
-        .map_err(|_| "无法启动官方 GitHub CLI，请检查登录组件。")?;
-    let stdout = child.stdout.take().ok_or("无法读取 GitHub 组件响应。")?;
-    let stderr = child.stderr.take().ok_or("无法读取 GitHub 组件状态。")?;
-    let stdin = child.stdin.take();
-    let result = timeout(REQUEST_TIMEOUT, async {
-        let writer = async move {
-            if let Some(bytes) = input {
-                let mut stdin = stdin.ok_or("无法向 GitHub 组件传送修改内容。")?;
-                stdin
-                    .write_all(&bytes)
-                    .await
-                    .map_err(|_| "无法向 GitHub 组件传送修改内容。")?;
-                stdin
-                    .shutdown()
-                    .await
-                    .map_err(|_| "无法结束 GitHub 请求输入。")?;
-            }
-            Ok::<(), String>(())
-        };
-        let wait = async {
-            child
-                .wait()
-                .await
-                .map_err(|_| "GitHub 组件没有正常结束。".to_owned())
-        };
-        // Both pipes are drained concurrently to avoid blocking the child. Stderr
-        // is bounded and discarded; no raw CLI error reaches the frontend/logs.
-        let (status, stdout, _, _) = tokio::try_join!(
-            wait,
-            read_bounded(stdout, max_stdout),
-            drain_bounded(stderr, MAX_PROCESS_MESSAGE_BYTES),
-            writer
-        )?;
-        Ok::<CapturedProcess, String>(CapturedProcess { status, stdout })
-    })
-    .await;
-    match result {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(error)) => {
-            kill_child(&mut child).await;
-            Err(error)
+async fn login_worker(backend: Arc<Backend>, session: Arc<StdMutex<Session>>, generation: u64, mut cancel: oneshot::Receiver<()>, scopes: Vec<String>) {
+    let revision = backend.oauth.snapshot().revision;
+    let work = async {
+        let grant = backend.oauth.begin(&scopes).await?;
+        let deadline = Instant::now() + Duration::from_secs(grant.expires_in);
+        {
+            let mut state = session_lock(&session);
+            if state.generation != generation { return Err("本次授权已取消。".to_owned()); }
+            if let Some(login) = &mut state.login { login.user_code = Some(grant.user_code.clone()); }
         }
-        Err(_) => {
-            kill_child(&mut child).await;
-            Err("GitHub 请求超时，请稍后重试。".into())
-        }
-    }
-}
-
-async fn kill_child(child: &mut Child) {
-    let _ = child.start_kill();
-    let _ = child.wait().await;
-}
-
-async fn read_bounded<R: AsyncRead + Unpin>(
-    mut reader: R,
-    maximum: usize,
-) -> Result<Vec<u8>, String> {
-    let mut output = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let count = reader
-            .read(&mut chunk)
-            .await
-            .map_err(|_| "读取 GitHub 组件响应失败。")?;
-        if count == 0 {
-            return Ok(output);
-        }
-        if output.len().saturating_add(count) > maximum {
-            return Err("GitHub 返回的内容过大，请到官网查看。".into());
-        }
-        output.extend_from_slice(&chunk[..count]);
-    }
-}
-
-async fn drain_bounded<R: AsyncRead + Unpin>(mut reader: R, maximum: usize) -> Result<(), String> {
-    let mut count = 0usize;
-    let mut chunk = [0u8; 4096];
-    loop {
-        let size = reader
-            .read(&mut chunk)
-            .await
-            .map_err(|_| "读取 GitHub 组件状态失败。")?;
-        if size == 0 {
-            return Ok(());
-        }
-        count = count.saturating_add(size);
-        if count > maximum {
-            return Err("GitHub 组件输出异常，本次操作已停止。".into());
-        }
-    }
-}
-
-async fn login_stderr<R: AsyncRead + Unpin>(
-    mut reader: R,
-    session: &StdMutex<Session>,
-    generation: u64,
-) -> Result<(), String> {
-    let mut total = 0usize;
-    let mut line = Vec::new();
-    let mut discard_line = false;
-    let mut chunk = [0u8; 1024];
-    loop {
-        let size = reader
-            .read(&mut chunk)
-            .await
-            .map_err(|_| "读取 GitHub 登录状态失败。")?;
-        if size == 0 {
-            return Ok(());
-        }
-        total = total.saturating_add(size);
-        if total > MAX_PROCESS_MESSAGE_BYTES {
-            return Err("GitHub 登录组件输出异常，本次登录已停止。".into());
-        }
-        for byte in &chunk[..size] {
-            if *byte == b'\n' {
-                if !discard_line {
-                    if let Some(code) = parse_device_code(&line) {
-                        let mut state = session_lock(session);
-                        if state.generation == generation {
-                            if let Some(login) = &mut state.login {
-                                if login.state == "waiting" {
-                                    login.user_code = Some(code);
-                                }
-                            }
-                        }
-                    }
-                }
-                line.clear();
-                discard_line = false;
-            } else if !discard_line {
-                if line.len() < 512 {
-                    line.push(*byte);
-                } else {
-                    line.clear();
-                    discard_line = true;
+        let mut interval = grant.interval;
+        let pending = timeout_at(deadline, async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+                match backend.oauth.poll(&grant, &scopes).await? {
+                    Poll::Pending => {}, Poll::SlowDown => { interval = interval.saturating_add(5); },
+                    Poll::Backoff(delay) => { interval = interval.saturating_add(5).max(delay); },
+                    Poll::Complete(pending) => return Ok::<_, String>(pending),
                 }
             }
-        }
-    }
-}
-
-async fn login_worker(
-    backend: Arc<Backend>,
-    session: Arc<StdMutex<Session>>,
-    generation: u64,
-    mut cancel: oneshot::Receiver<()>,
-    lists: bool,
-) {
-    let deadline = Instant::now() + LOGIN_TIMEOUT;
-    let result = async {
-        // Piped stdout/stderr and null stdin make this non-interactive. Official
-        // gh only prints its device URL in this mode; the host opens DEVICE_URI.
-        let mut args = vec!["auth", "login", "--hostname", "github.com", "--web", "--skip-ssh-key"];
-        if lists { args.extend(["--scopes", "user"]); }
-        let mut command = backend.command(&args, false)?;
-        let mut child = command.spawn().map_err(|_| "无法启动官方 GitHub CLI 登录组件。")?;
-        let stdout = child.stdout.take().ok_or("无法读取 GitHub 登录组件响应。")?;
-        let stderr = child.stderr.take().ok_or("无法读取 GitHub 登录组件状态。")?;
-        let process_result = {
-            let process = async {
-                let wait = async { child.wait().await.map_err(|_| "GitHub 登录组件没有正常结束。".to_owned()) };
-                let (status, _, _) = tokio::try_join!(wait, drain_bounded(stdout, MAX_PROCESS_MESSAGE_BYTES), login_stderr(stderr, &session, generation))?;
-                if status.success() { Ok(()) } else { Err("GitHub 登录没有完成，请重新发起登录。".into()) }
-            };
-            tokio::select! {
-                _ = &mut cancel => Err("已取消本次 GitHub 登录。".to_owned()),
-                value = timeout_at(deadline, process) => value.unwrap_or_else(|_| Err("GitHub 登录已超时，请重新获取短码。".into())),
-            }
-        };
-        if process_result.is_err() { kill_child(&mut child).await; }
-        process_result?;
-        // Success text/exit code is not sufficient: require keyring storage and
-        // verify /user agrees with the active account in --json hosts.
-        tokio::select! {
-            _ = &mut cancel => Err("已取消本次 GitHub 登录。".to_owned()),
-            value = timeout_at(deadline, backend.authenticated_account()) => value.unwrap_or_else(|_| Err("GitHub 登录已超时，请重新获取短码。".into())),
-        }
-    }.await;
-    let result = result.and_then(|account| {
-        backend.save_connected(true)?;
-        Ok(account)
-    });
-    match result {
-        Ok(account) => {
-            let mut state = session_lock(&session);
-            if state.generation != generation {
-                return;
-            }
-            state.consent = true;
-            state.account = Some(account);
-            state.error = None;
-            state.login = Some(LoginView {
-                state: "complete",
-                user_code: None,
-                message: "已连接 GitHub。".into(),
-            });
-        }
-        Err(error) => {
-            // Also clean up on cancel/timeout: gh may have saved a fallback just
-            // before the cancellation arrived. Never read or copy its contents.
-            let cleanup_error = backend.remove_app_hosts().err();
-            let marker_error = backend.save_connected(false).err();
-            let error = cleanup_error.or(marker_error).unwrap_or(error);
-            let mut state = session_lock(&session);
-            if state.generation != generation {
-                return;
-            }
-            state.consent = false;
-            state.account = None;
-            state.error = Some(error.clone());
-            state.login = Some(LoginView {
-                state: "error",
-                user_code: None,
-                message: error,
-            });
-        }
-    }
-}
-
-fn parse_device_code(line: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(line).ok()?.trim();
-    let code = text.strip_prefix("! First copy your one-time code: ")?;
-    let bytes = code.as_bytes();
-    if bytes.len() == 9
-        && bytes[4] == b'-'
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| index == 4 || byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    {
-        Some(code.to_owned())
-    } else {
-        None
-    }
-}
-
-fn parse_auth_status(bytes: &[u8]) -> Result<String, AuthStatusError> {
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| AuthStatusError::Invalid)?;
-    let hosts = value
-        .get("hosts")
-        .and_then(Value::as_object)
-        .ok_or(AuthStatusError::Invalid)?;
-    let entries = hosts
-        .get("github.com")
-        .and_then(Value::as_array)
-        .ok_or(AuthStatusError::Disconnected)?;
-    let mut active = entries
-        .iter()
-        .filter(|entry| entry["active"].as_bool() == Some(true));
-    let entry = active.next().ok_or(AuthStatusError::Disconnected)?;
-    if active.next().is_some() {
-        return Err(AuthStatusError::Invalid);
-    }
-    if entry["host"].as_str() != Some("github.com") || entry["state"].as_str() != Some("success") {
-        return Err(AuthStatusError::Disconnected);
-    }
-    if entry["tokenSource"].as_str() != Some("keyring") {
-        return Err(AuthStatusError::UnsafeStorage);
-    }
-    let login = entry["login"]
-        .as_str()
-        .filter(|login| valid_login(login))
-        .ok_or(AuthStatusError::Invalid)?;
-    Ok(login.to_owned())
-}
-
-fn parse_cli_response(bytes: &[u8]) -> Result<ApiResponse, String> {
-    let prefix = &bytes[..bytes.len().min(MAX_HEADER_BYTES + 4)];
-    let crlf = prefix
-        .windows(4)
-        .position(|part| part == b"\r\n\r\n")
-        .map(|index| (index, 4));
-    let lf = prefix
-        .windows(2)
-        .position(|part| part == b"\n\n")
-        .map(|index| (index, 2));
-    // gh's headers can use LF even when the raw README uses CRLF. The first
-    // separator wins; never reinterpret an empty line in the body as the header.
-    let (header_end, separator_len) = match (crlf, lf) {
-        (Some(a), Some(b)) => {
-            if a.0 <= b.0 {
-                a
-            } else {
-                b
-            }
-        }
-        (Some(value), None) | (None, Some(value)) => value,
-        (None, None) => return Err("GitHub 组件未返回有效的请求状态。".into()),
+        }).await.map_err(|_| "GitHub 授权短码已过期，请重新获取。".to_owned())??;
+        backend.oauth.finish(pending, revision).await?;
+        let _ = backend.clear_cache();
+        Ok::<_, String>(())
     };
-    if header_end > MAX_HEADER_BYTES
-        || bytes.len() - header_end - separator_len > MAX_RESPONSE_BYTES
-    {
-        return Err("GitHub 返回的内容过大，请到官网查看。".into());
-    }
-    let headers =
-        std::str::from_utf8(&bytes[..header_end]).map_err(|_| "GitHub 请求状态格式不正确。")?;
-    let mut lines = headers.lines();
-    let mut status_line = lines.next().unwrap_or("").split_whitespace();
-    if !status_line.next().is_some_and(|version| {
-        matches!(
-            version,
-            "HTTP/1.0" | "HTTP/1.1" | "HTTP/2.0" | "HTTP/2" | "HTTP/3.0"
-        )
-    }) {
-        return Err("GitHub 请求状态格式不正确。".into());
-    }
-    let status = status_line
-        .next()
-        .and_then(|value| value.parse::<u16>().ok())
-        .filter(|value| (100..=599).contains(value))
-        .ok_or("GitHub 请求状态格式不正确。")?;
-    let has_next = lines
-        .filter_map(|line| line.split_once(':'))
-        .any(|(key, value)| key.eq_ignore_ascii_case("link") && has_next_link(value));
-    Ok(ApiResponse {
-        status,
-        body: bytes[header_end + separator_len..].to_vec(),
-        has_next,
-    })
+    let result = tokio::select! {
+        biased;
+        _ = &mut cancel => Err("已取消本次 GitHub 授权，原有连接保持不变。".to_owned()),
+        result = work => result,
+    };
+    let mut state = session_lock(&session);
+    if state.generation != generation { return; }
+    state.login = Some(match result {
+        Ok(()) => LoginView {state:"complete",user_code:None,message:"已连接 GitHub。".into()},
+        Err(error) => LoginView {state:"error",user_code:None,message:error},
+    });
 }
-
+fn check_request_revision(revision: u64) -> Result<(), String> {
+    if EXPECTED_REVISION.try_with(|expected| *expected != revision).unwrap_or(false) { Err(ACCOUNT_CHANGED.into()) } else { Ok(()) }
+}
+fn bool_option(payload: &Value, field: &str) -> Result<bool, String> {
+    match payload.get(field) { None => Ok(false), Some(Value::Bool(value)) => Ok(*value), _ => Err("GitHub 授权选项不正确。".into()) }
+}
+fn cache_namespace(snapshot: &github_oauth::Snapshot) -> String {
+    match &snapshot.account { Some(account) => format!("{}:{}", account.id, snapshot.scopes.join(",")), None => "guest".into() }
+}
+fn cache_operation(operation: &str) -> bool {
+    matches!(operation, "github_repositories" | "github_repository" | "github_activity" | "github_lists" | "github_list_repositories" | "github_repository_lists")
+}
+fn protected_read(operation: &str, payload: &Value) -> bool {
+    !(operation == "github_repository" || (operation == "github_repositories" && payload["tab"] == "explore"))
+}
+fn validate_cache_read(operation: &str, payload: &Value) -> Result<u64, String> {
+    let ttl = match operation {
+        "github_repositories" => {
+            fields(payload, &["tab","query","page"])?; query_field(payload)?; page_field(payload)?;
+            match string_field(payload, "tab")? { "explore" => 600_000, "starred" | "owned" => 300_000, _ => return Err("请选择探索、已 Star 或自己的仓库。".into()) }
+        }
+        "github_repository" | "github_repository_lists" => {
+            fields(payload, &["repository"])?; RepositoryName::parse(string_field(payload,"repository")?)?;
+            if operation == "github_repository" { 3_600_000 } else { 300_000 }
+        }
+        "github_activity" => { fields(payload, &["page"])?; page_field(payload)?; 120_000 }
+        "github_lists" => { fields(payload, &[])?; 300_000 }
+        "github_list_repositories" => {
+            fields(payload, &["listId","cursor","query"])?; cursor_field(payload)?;
+            if payload.get("query").is_some() { query_field(payload)?; }
+            let id = string_field(payload,"listId")?; if !matches!(id,"all"|"unlisted") { list_id(id)?; } 300_000
+        }
+        _ => return Err("不支持这个 GitHub 缓存读取操作。".into()),
+    }; Ok(ttl)
+}
 fn has_next_link(value: &str) -> bool {
     // This is only a display hint. No returned Link URL is ever executed.
     value.split(',').any(|link| {
@@ -2094,12 +1459,14 @@ fn count(value: &Value) -> u64 {
     value.as_u64().unwrap_or(0).min(MAX_SAFE_INTEGER)
 }
 
-fn project_account(value: &Value) -> Result<Account, String> {
+pub(crate) fn project_account(value: &Value) -> Result<Account, String> {
     let login = value["login"]
         .as_str()
         .filter(|login| valid_login(login))
         .ok_or("GitHub 账号信息不完整，请重新连接。")?;
+    let id = value["id"].as_u64().filter(|id| *id > 0 && *id <= MAX_SAFE_INTEGER).ok_or("GitHub 账号编号不正确。")?;
     Ok(Account {
+        id,
         login: login.into(),
         name: optional_text(&value["name"], 100),
         avatar_url: avatar(&value["avatar_url"]),
@@ -2245,7 +1612,7 @@ fn http_error(status: u16) -> String {
     .into()
 }
 
-fn validate_auth_root(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_auth_root(path: &Path) -> Result<(), String> {
     if !path.is_absolute()
         || path.parent().is_none()
         || path
@@ -2279,7 +1646,7 @@ fn is_link(metadata: &fs::Metadata) -> bool {
     false
 }
 
-fn reject_link_ancestors(path: &Path) -> Result<(), String> {
+pub(crate) fn reject_link_ancestors(path: &Path) -> Result<(), String> {
     for ancestor in path.ancestors() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) if is_link(&metadata) || !metadata.is_dir() => {
@@ -2293,7 +1660,7 @@ fn reject_link_ancestors(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn check_regular_file(path: &Path) -> Result<(), String> {
+pub(crate) fn check_regular_file(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         reject_link_ancestors(parent)?;
     }
@@ -2304,33 +1671,6 @@ fn check_regular_file(path: &Path) -> Result<(), String> {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err("无法检查 GitHub 本机配置。".into()),
-    }
-}
-
-fn read_connected(auth_root: &Path) -> Result<bool, String> {
-    let path = auth_root.join("connected.json");
-    check_regular_file(&path)?;
-    let file = match File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(_) => return Err("无法读取本机 GitHub 连接状态。".into()),
-    };
-    let mut bytes = Vec::new();
-    file.take(33)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "无法读取本机 GitHub 连接状态。")?;
-    if bytes.len() > 32 {
-        return Ok(false);
-    }
-    Ok(serde_json::from_slice::<bool>(&bytes).unwrap_or(false))
-}
-
-fn remove_exact_file(path: &Path) -> Result<(), String> {
-    check_regular_file(path)?;
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err("无法清理本应用的 GitHub 登录配置，请检查授权目录是否可写。".into()),
     }
 }
 
@@ -2350,9 +1690,6 @@ mod tests {
         })
     }
 
-    fn status_entry() -> Value {
-        json!({ "hosts": { "github.com": [{ "active": true, "host": "github.com", "state": "success", "tokenSource": "keyring", "login": "octocat" }] } })
-    }
 
     #[test]
     fn repository_projection_has_exact_contract_and_no_raw_fields() {
@@ -2492,116 +1829,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auth_status_requires_active_success_keyring_not_exit_zero() {
-        assert_eq!(
-            parse_auth_status(&serde_json::to_vec(&status_entry()).unwrap()).unwrap(),
-            "octocat"
-        );
-        assert_eq!(
-            parse_auth_status(br#"{"hosts":{}}"#),
-            Err(AuthStatusError::Disconnected)
-        );
-        let mut status = status_entry();
-        status["hosts"]["github.com"][0]["active"] = json!(false);
-        assert_eq!(
-            parse_auth_status(&serde_json::to_vec(&status).unwrap()),
-            Err(AuthStatusError::Disconnected)
-        );
-        status = status_entry();
-        status["hosts"]["github.com"][0]["state"] = json!("error");
-        assert_eq!(
-            parse_auth_status(&serde_json::to_vec(&status).unwrap()),
-            Err(AuthStatusError::Disconnected)
-        );
-        for source in ["oauth_token", "GH_TOKEN", "some-directory/hosts.yml"] {
-            status = status_entry();
-            status["hosts"]["github.com"][0]["tokenSource"] = json!(source);
-            assert_eq!(
-                parse_auth_status(&serde_json::to_vec(&status).unwrap()),
-                Err(AuthStatusError::UnsafeStorage)
-            );
-        }
-        status = status_entry();
-        let duplicate = status["hosts"]["github.com"][0].clone();
-        status["hosts"]["github.com"]
-            .as_array_mut()
-            .unwrap()
-            .push(duplicate);
-        assert_eq!(
-            parse_auth_status(&serde_json::to_vec(&status).unwrap()),
-            Err(AuthStatusError::Invalid)
-        );
-    }
 
-    #[test]
-    fn device_parser_returns_only_a_short_code_from_the_official_line() {
-        assert_eq!(
-            parse_device_code(b"! First copy your one-time code: A1BC-D2EF\r"),
-            Some("A1BC-D2EF".into())
-        );
-        for line in [
-            "A1BC-D2EF",
-            "Open this URL: https://untrusted.example/A1BC-D2EF",
-            "! First copy your one-time code: a1bc-d2ef",
-            "! First copy your one-time code: A1BC-D2EF extra",
-            "! First copy your one-time code: ABCD-EFGH-IJKL",
-            "! First copy your one-time code: ABCD/EFGH",
-        ] {
-            assert!(parse_device_code(line.as_bytes()).is_none());
-        }
-    }
 
-    #[tokio::test]
-    async fn login_code_is_parsed_across_chunks_without_exposing_messages() {
-        let session = Arc::new(StdMutex::new(Session {
-            generation: 3,
-            login: Some(LoginView {
-                state: "waiting",
-                user_code: None,
-                message: LOGIN_WAITING.into(),
-            }),
-            ..Session::default()
-        }));
-        let (reader, mut writer) = tokio::io::duplex(16);
-        let state = session.clone();
-        let parser = tokio::spawn(async move { login_stderr(reader, &state, 3).await });
-        writer
-            .write_all(b"ignore arbitrary stderr\n! First copy your one-time code: ABCD-EFGH\n")
-            .await
-            .unwrap();
-        writer.shutdown().await.unwrap();
-        parser.await.unwrap().unwrap();
-        let state = session_lock(&session);
-        assert_eq!(
-            state.login.as_ref().unwrap().user_code.as_deref(),
-            Some("ABCD-EFGH")
-        );
-        assert_eq!(state.login.as_ref().unwrap().message, LOGIN_WAITING);
-    }
 
-    #[test]
-    fn response_parser_uses_http_status_and_does_not_follow_links() {
-        let response = parse_cli_response(b"HTTP/2.0 200 OK\r\nLink: <https://untrusted.example/?page=2>; rel=\"next\"\r\n\r\n{\"items\":[]}").unwrap();
-        assert_eq!(response.status, 200);
-        assert!(response.has_next);
-        assert_eq!(response.json().unwrap(), json!({ "items": [] }));
-        assert_eq!(
-            parse_cli_response(b"HTTP/2.0 204 No Content\n\n")
-                .unwrap()
-                .status,
-            204
-        );
-        let missing =
-            parse_cli_response(b"HTTP/2.0 404 Not Found\n\n{\"message\":\"remote content\"}")
-                .unwrap();
-        assert!(missing.json().unwrap_err().contains("未找到"));
-        let mixed =
-            parse_cli_response(b"HTTP/2.0 200 OK\n\n# Title\r\n\r\nKeep this body").unwrap();
-        assert_eq!(mixed.body, b"# Title\r\n\r\nKeep this body");
-        assert!(parse_cli_response(b"gh: arbitrary stderr, not an HTTP response").is_err());
-        assert!(parse_cli_response(b"HTTP/2.0 999 Wrong\n\n{}").is_err());
-    }
 
     #[test]
     fn readme_remains_markdown_and_is_bounded() {
@@ -2644,6 +1874,8 @@ mod tests {
         after["id"] = json!(43);
         assert!(!update_matches(&before, &after, "修改说明", ""));
     }
+
+    fn test_secrets(path: &Path) -> SecretStore { SecretStore::for_data_directory(path).unwrap() }
 
     fn test_proxy() -> Arc<ProxyState> {
         Arc::new(ProxyState::new(crate::proxy::ProxySettings { mode: "direct".into(), ..Default::default() }, None).unwrap())
@@ -2707,7 +1939,7 @@ mod tests {
     #[tokio::test]
     async fn starred_lists_accept_the_ui_payload_without_a_search_term() {
         let temp = tempfile::tempdir().unwrap();
-        let service = GithubService::new(temp.path().join("account"), None, test_proxy());
+        let service = GithubService::new(temp.path().join("account"), test_secrets(temp.path()), test_proxy());
         // These are the real payloads sent by the Stars page, before any account or network access.
         for payload in [
             json!({"listId": "all"}),
@@ -2728,7 +1960,7 @@ mod tests {
     #[tokio::test]
     async fn list_writes_require_confirmation_before_any_network() {
         let temp = tempfile::tempdir().unwrap();
-        let service = GithubService::new(temp.path().join("account"), None, test_proxy());
+        let service = GithubService::new(temp.path().join("account"), test_secrets(temp.path()), test_proxy());
         for (action, payload) in [
             ("github_save_list", json!({"name": "Tools", "description": "", "confirmed": false})),
             ("github_delete_list", json!({"id": "UL_test", "confirmed": false})),
@@ -2741,86 +1973,7 @@ mod tests {
         assert!(!service.backend.auth_root.exists());
     }
 
-    #[test]
-    fn machine_local_marker_is_only_a_boolean_and_cleanup_is_exact() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("account");
-        let service = GithubService::new(root.clone(), None, test_proxy());
-        assert!(!root.exists());
-        service.backend.ensure_layout().unwrap();
-        service.backend.save_connected(true).unwrap();
-        assert!(read_connected(&root).unwrap());
-        assert_eq!(
-            fs::read_to_string(root.join("connected.json")).unwrap(),
-            "true\n"
-        );
-        let outside = temp.path().join("hosts.yml");
-        let inside = root.join("github-cli").join("hosts.yml");
-        fs::write(&outside, "outside test configuration").unwrap();
-        fs::write(&inside, "app test configuration, no credentials").unwrap();
-        service.backend.remove_app_hosts().unwrap();
-        assert!(!inside.exists());
-        assert!(outside.is_file());
-        service.backend.save_connected(false).unwrap();
-        assert!(!read_connected(&root).unwrap());
-        assert!(validate_auth_root(Path::new("relative/account")).is_err());
-        assert!(validate_auth_root(&root.join("..").join("elsewhere")).is_err());
-    }
 
-    #[test]
-    fn command_is_direct_noninteractive_and_removes_credential_overrides() {
-        let temp = tempfile::tempdir().unwrap();
-        let executable = temp.path().join("not-executed-gh.exe");
-        fs::write(&executable, "test fixture; never executed").unwrap();
-        let service = GithubService::new(temp.path().join("account"), Some(executable.clone()), test_proxy());
-        let command = service
-            .backend
-            .command(
-                &[
-                    "auth",
-                    "login",
-                    "--hostname",
-                    "github.com",
-                    "--web",
-                    "--skip-ssh-key",
-                ],
-                false,
-            )
-            .unwrap();
-        let command = command.as_std();
-        assert_eq!(command.get_program(), executable.as_os_str());
-        let args: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy())
-            .collect();
-        assert!(!args.iter().any(|arg| arg.contains("git-protocol")
-            || arg.contains("with-token")
-            || arg.contains("insecure-storage")));
-        for key in [
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-            "GH_ENTERPRISE_TOKEN",
-            "GITHUB_ENTERPRISE_TOKEN",
-            "GH_DEBUG",
-            "GH_BROWSER",
-            "BROWSER",
-            "GH_PAGER",
-            "PAGER",
-            "GH_HTTP_UNIX_SOCKET",
-        ] {
-            assert!(command
-                .get_envs()
-                .any(|(name, value)| name == key && value.is_none()));
-        }
-        assert!(command
-            .get_envs()
-            .any(|(name, value)| name == "GH_PROMPT_DISABLED"
-                && value == Some(std::ffi::OsStr::new("1"))));
-        assert_eq!(
-            command.get_current_dir(),
-            Some(service.backend.config_dir.as_path())
-        );
-    }
 
     #[test]
     fn internal_repository_bridge_has_a_small_get_only_allowlist() {
@@ -2869,10 +2022,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let executable = temp.path().join("not-executed-gh.exe");
         fs::write(&executable, "test fixture; never executed").unwrap();
-        let service = GithubService::new(temp.path().join("account"), Some(executable), test_proxy());
+        let service = GithubService::new(temp.path().join("account"), test_secrets(temp.path()), test_proxy());
         let status = service.handle("github_status", json!({})).await.unwrap();
-        assert_eq!(status.as_object().unwrap().len(), 6);
-        assert_eq!(status["available"], true);
+        assert_eq!(status.as_object().unwrap().len(), 9);
+        assert_eq!(status["provider"], "github-oauth");
         assert_eq!(status["connected"], false);
         assert!(status["account"].is_null());
         assert!(status["error"].is_null());
@@ -2895,10 +2048,96 @@ mod tests {
         service.shutdown().await;
     }
 
+    #[test]
+    fn cache_allowlist_validates_every_operation_and_ttl() {
+        for (operation, payload, ttl) in [
+            ("github_repositories", json!({"tab":"explore","query":"","page":1}), 600_000),
+            ("github_repositories", json!({"tab":"owned","query":"","page":2}), 300_000),
+            ("github_repository", json!({"repository":"octocat/Hello-World"}), 3_600_000),
+            ("github_activity", json!({"page":1}), 120_000),
+            ("github_lists", json!({}), 300_000),
+            ("github_list_repositories", json!({"listId":"all"}), 300_000),
+            ("github_repository_lists", json!({"repository":"octocat/Hello-World"}), 300_000),
+        ] { assert_eq!(validate_cache_read(operation, &payload).unwrap(), ttl); }
+        assert!(validate_cache_read("github_set_star", &json!({})).is_err());
+        assert!(validate_cache_read("https://untrusted.example", &json!({})).is_err());
+        assert!(validate_cache_read("github_lists", &json!({"token":"fixture"})).is_err());
+        assert!(validate_cache_read("github_repository", &json!({"repository":"../x"})).is_err());
+        assert!(validate_auth_root(Path::new("relative/account")).is_err());
+    }
+
+    #[tokio::test]
+    async fn disk_cache_reads_and_status_do_not_wait_on_network_or_mutation_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = GithubService::new(temp.path().join("account"), test_secrets(temp.path()), test_proxy());
+        let args = json!({"tab":"explore","query":"","page":1});
+        service.backend.cache.put(service.backend.cache.epoch(), "guest", "github_repositories", &args, &json!({"items":[]})).unwrap();
+        let _busy = service.operation.lock().await;
+        let _network = service.backend.requests.acquire_many(4).await.unwrap();
+        let status = timeout(Duration::from_millis(250), service.handle("github_status", json!({}))).await.unwrap().unwrap();
+        assert_eq!(status["connected"], false); assert_eq!(status["verified"], false);
+        let cached = timeout(Duration::from_millis(250), service.handle("github_cache_read", json!({"operation":"github_repositories","parameters":args}))).await.unwrap().unwrap();
+        assert_eq!(cached["data"], json!({"items":[]}));
+        assert!(service.handle("github_cache_read", json!({"operation":"github_lists","parameters":{}})).await.unwrap().is_null());
+        service.handle("github_cache_clear", json!({})).await.unwrap();
+        assert_eq!(service.handle("github_cache_stats", json!({})).await.unwrap()["entries"], 0);
+    }
+
+    #[tokio::test]
+    async fn simultaneous_identical_reads_share_only_the_inflight_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = GithubService::new(temp.path().join("account"), test_secrets(temp.path()), test_proxy());
+        let first = service.backend.flight("same-request");
+        let duplicate = service.backend.flight("same-request");
+        let independent = service.backend.flight("other-request");
+        assert!(Arc::ptr_eq(&first, &duplicate)); assert!(!Arc::ptr_eq(&first, &independent));
+        let mut busy = first.lock().await;
+        assert!(duplicate.try_lock().is_err()); assert!(independent.try_lock().is_ok());
+        *busy = Some(Ok(json!({"items":[]}))); drop(busy);
+        assert_eq!(duplicate.lock().await.as_ref().unwrap().as_ref().unwrap(), &json!({"items":[]}));
+        drop(first); drop(duplicate);
+        // A later explicit refresh must perform a new live read, not reuse a
+        // finished request's result as a hidden freshness cache.
+        assert!(service.backend.flight("same-request").lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn shared_read_waiter_rejects_result_from_previous_session() {
+        use std::future::Future;
+        let temp = tempfile::tempdir().unwrap();
+        let service = GithubService::new(temp.path().join("account"), test_secrets(temp.path()), test_proxy());
+        let args = json!({"tab":"explore","query":"","page":1});
+        let snapshot = service.backend.oauth.snapshot();
+        let key = format!("{}:{}:{}", snapshot.revision, service.backend.cache.epoch(),
+            GithubCache::key(&cache_namespace(&snapshot), "github_repositories", &args));
+        let flight = service.backend.flight(&key);
+        let mut completed = flight.lock().await;
+        *completed = Some(Ok(json!({"items":["previous-session"]})));
+        let read = service.read_live("github_repositories", args);
+        tokio::pin!(read);
+        // Poll once to place the duplicate behind the held flight, without
+        // depending on timing or making any network/keyring write request.
+        std::future::poll_fn(|cx| {
+            assert!(read.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        }).await;
+        service.backend.oauth.clear().unwrap();
+        drop(completed);
+        assert_eq!(read.await.unwrap_err(), ACCOUNT_CHANGED);
+    }
+
+    #[tokio::test]
+    async fn mutation_revision_guard_rejects_changed_identity() {
+        EXPECTED_REVISION.scope(7, async {
+            assert!(check_request_revision(7).is_ok());
+            assert_eq!(check_request_revision(8).unwrap_err(), ACCOUNT_CHANGED);
+        }).await;
+    }
+
     #[tokio::test]
     async fn shutdown_does_not_wait_for_the_network_operation_queue() {
         let temp = tempfile::tempdir().unwrap();
-        let service = GithubService::new(temp.path().join("account"), None, test_proxy());
+        let service = GithubService::new(temp.path().join("account"), test_secrets(temp.path()), test_proxy());
         let _busy_network = service.operation.lock().await;
         timeout(Duration::from_millis(250), service.shutdown())
             .await
@@ -2906,10 +2145,4 @@ mod tests {
         assert!(service.shutting_down.load(Ordering::Acquire));
     }
 
-    #[tokio::test]
-    async fn pipe_readers_enforce_limits_without_real_processes() {
-        assert!(read_bounded(&b"12345"[..], 4).await.is_err());
-        assert_eq!(read_bounded(&b"1234"[..], 4).await.unwrap(), b"1234");
-        assert!(drain_bounded(&b"12345"[..], 4).await.is_err());
-    }
 }

@@ -1,4 +1,4 @@
-import type { BuildTaskStatus, DownloadRecord, DownloadStatus, ManagedVersion, Project, ProjectStatus } from './types';
+import type { BuildTaskStatus, DownloadRecord, DownloadStatus, FileStatus, ManagedVersion, Project, ProjectStatus, ReleaseAsset } from './types';
 
 export type Page = 'home' | 'library' | 'updates' | 'downloads' | 'github' | 'agent' | 'settings';
 export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'accent';
@@ -23,6 +23,56 @@ export const downloadStatus: Record<DownloadStatus, StatusLabel> = {
   installing: { label: '处理中', tone: 'accent' },
   installed: { label: '已安装', tone: 'success' },
 };
+export const fileStatus: Record<FileStatus, StatusLabel> = {
+  notDownloaded: { label: '未下载', tone: 'neutral' },
+  downloaded: { label: '已下载', tone: 'success' },
+  updateAvailable: { label: '有新版本', tone: 'accent' },
+  missing: { label: '文件已移走', tone: 'warning' },
+};
+
+export function isFilesProject(project: Pick<Project, 'managementMode'>): boolean {
+  return project.managementMode === 'files';
+}
+
+/** Old snapshots used compatible for both capabilities. Explicit flags always win. */
+export function canDownloadAsset(asset: Pick<ReleaseAsset, 'downloadable' | 'compatible'>): boolean {
+  return asset.downloadable ?? asset.compatible;
+}
+
+export function canInstallAsset(asset: Pick<ReleaseAsset, 'installable' | 'compatible' | 'kind'>, project: Pick<Project, 'managementMode'>): boolean {
+  return !isFilesProject(project) && (asset.kind === 'installer' || asset.kind === 'portable') && (asset.installable ?? asset.compatible);
+}
+
+export function canInstallDownload(download: Pick<DownloadRecord, 'installable' | 'kind'>): boolean {
+  return (download.kind === 'installer' || download.kind === 'portable') && (download.installable ?? true);
+}
+
+export function assetKindLabel(kind: string, installable: boolean, name = ''): string {
+  if (!installable) return '普通文件';
+  if (kind === 'installer') return '安装程序';
+  if (kind === 'portable') return name.toLowerCase().endsWith('.exe') ? '单文件免安装' : '免安装压缩包';
+  return '普通文件';
+}
+
+export function getProjectStatus(project: Pick<Project, 'managementMode' | 'fileStatus' | 'status'>): StatusLabel {
+  if (!isFilesProject(project) || ['notChecked', 'checking', 'noRelease', 'error'].includes(project.status)) return projectStatus[project.status];
+  return fileStatus[project.fileStatus ?? 'notDownloaded'];
+}
+
+export function hasProjectUpdate(project: Pick<Project, 'managementMode' | 'fileStatus' | 'status'>): boolean {
+  return isFilesProject(project) ? project.fileStatus === 'updateAvailable' : project.status === 'updateAvailable';
+}
+
+export function needsProjectAttention(project: Pick<Project, 'managementMode' | 'fileStatus' | 'status'>): boolean {
+  return ['error', 'noCompatibleAsset'].includes(project.status) || (isFilesProject(project) ? project.fileStatus === 'missing' : project.status === 'versionUnknown');
+}
+
+export function getDownloadStatus(download: Pick<DownloadRecord, 'status' | 'kind' | 'installable'>): StatusLabel {
+  if (!canInstallDownload(download) && ['completed', 'installed'].includes(download.status)) return { label: '已下载', tone: 'success' };
+  if (download.status === 'installed' && download.kind === 'portable') return { label: '已准备', tone: 'success' };
+  return downloadStatus[download.status];
+}
+
 export const buildStatus: Record<BuildTaskStatus, StatusLabel> = {
   queued: { label: '等待 Agent', tone: 'neutral' },
   claimed: { label: '已领取', tone: 'accent' },
@@ -54,8 +104,8 @@ export function downloadPercent(download: Pick<DownloadRecord, 'receivedBytes' |
   return Math.max(0, Math.min(100, Math.round(download.receivedBytes / download.totalBytes * 100)));
 }
 
-export function canActivateManagedVersion(project: Pick<Project, 'installedSource'> | null, version: ManagedVersion | undefined, confirmed: boolean): boolean {
-  return Boolean(confirmed && project?.installedSource === 'managed' && version && !version.active);
+export function canActivateManagedVersion(project: Pick<Project, 'installedSource' | 'managementMode'> | null, version: ManagedVersion | undefined, confirmed: boolean): boolean {
+  return Boolean(confirmed && project && !isFilesProject(project) && project.installedSource === 'managed' && version && !version.active);
 }
 
 export function matchesProject(project: Project, query: string): boolean {

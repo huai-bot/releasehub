@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Page } from '../lib/ui';
+  import { hasProjectUpdate, type Page } from '../lib/ui';
   import type { Snapshot, WorkspacePage } from '../lib/types';
   import { normalizeNavigation, moveNavigation, workspacePages } from '../lib/navigation';
   import Icon from './Icon.svelte';
@@ -9,7 +9,7 @@
     onnavigate: (page: Page) => void; onadd: () => void; ondata: () => void;
     onreorder: (order: WorkspacePage[]) => Promise<boolean>;
   } = $props();
-  const updateCount = $derived(snapshot.projects.filter((project) => project.status === 'updateAvailable').length);
+  const updateCount = $derived(snapshot.projects.filter(hasProjectUpdate).length);
   const downloadCount = $derived(snapshot.downloads.filter((download) => ['queued', 'downloading'].includes(download.status)).length);
   const order = $derived(normalizeNavigation(snapshot.settings.navigationOrder));
   const pages = $derived(order.map((id) => workspacePages.find((item) => item.id === id)!));
@@ -51,9 +51,9 @@
     {/each}
   </nav>
   <span id="navigation-help" class="sr-only">拖动页面调整顺序，也可聚焦页面后按 Alt 加上下方向键。</span><span class="sr-only" aria-live="polite">{announcement}</span>
-  <button class="sidebar-add" onclick={onadd}><Icon name="plus" size={17} />添加软件</button>
+  <button class="sidebar-add" onclick={onadd}><Icon name="plus" size={17} />添加资源</button>
   <div class="sidebar-spacer"></div>
-  <div class="workspace-note"><span class="note-icon"><Icon name="activity" size={18} /></span><strong>软件动态，一处掌握</strong><p>订阅发行动态，集中管理更新。</p></div>
+  <div class="sidebar-account"><Icon name="github" size={20} /><div><strong>GitHub 工作空间</strong><button class="text-button" onclick={() => onnavigate('github')}>账号与仓库<Icon name="chevronRight" size={13} /></button></div></div>
   <button class:active={page === 'settings'} class="nav-item settings-nav" aria-current={page === 'settings' ? 'page' : undefined} onclick={() => onnavigate('settings')}><Icon name="settings" size={19} /><span>设置</span></button>
   <div class="sidebar-footer"><button class="storage-button" onclick={ondata} title="打开数据目录"><span class="status-dot"></span>{preview ? '界面预览' : snapshot.runtime.portable ? '便携工作空间' : '本机工作空间'}<Icon name="chevronRight" size={13} /></button><span>v{snapshot.runtime.appVersion} <span class="footer-dot">·</span> Windows x64</span></div>
 </aside>

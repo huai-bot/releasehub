@@ -16,6 +16,7 @@ export function isDownloadRecord(value: unknown): value is DownloadRecord {
     && optionalTextFields.every((key) => record[key] === null || typeof record[key] === 'string')
     && numericFields.every((key) => { const number = record[key]; return typeof number === 'number' && Number.isSafeInteger(number) && number >= 0; })
     && typeof record.verified === 'boolean'
+    && (record.installable === undefined || typeof record.installable === 'boolean')
     && typeof record.status === 'string' && statuses.includes(record.status)
     && typeof record.kind === 'string' && kinds.includes(record.kind)
     && validTime(record.createdAt) && validTime(record.updatedAt);

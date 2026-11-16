@@ -5,7 +5,11 @@ use std::sync::Arc;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-struct Subscription { repository:String, channel:String, preference:String, asset_pattern:Option<String> }
+struct Subscription {
+    repository:String, channel:String, preference:String, asset_pattern:Option<String>,
+    #[serde(default = "default_management_mode")]
+    management_mode:String,
+}
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct Library {
@@ -17,6 +21,8 @@ struct Library {
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 struct LibrarySettings {
     theme: String, check_interval_minutes: u32, notifications: bool, auto_download: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color_scheme: Option<String>,
     max_concurrent_downloads: usize, close_to_tray: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     startup_page: Option<String>,
@@ -29,7 +35,7 @@ fn empty_project(owner:String,repo:String,channel:String,preference:String) -> P
     let time=now();
     Project { id:uuid::Uuid::new_v4().to_string(), name:repo.clone(),
         url:format!("https://github.com/{owner}/{repo}"),owner,repo,description:String::new(),avatar_url:None,
-        channel,preference,asset_pattern:None,installed_version:None,installed_path:None,installed_source:None,
+        channel,preference,management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,installed_source:None,
         release:None,selected_asset_id:None,status:"notChecked".into(),checked_at:None,error:None,
         default_branch:"main".into(),source_head_sha:None,source_ahead:None,created_at:time }
 }
@@ -45,9 +51,14 @@ fn metadata(p:&mut Project,raw:&Value)->Result<(),String> {
 }
 impl Core {
     pub(crate) async fn add_project(&self,input:AddProjectInput)->Result<Project,String> {
-        validate_choices(&input.channel,&input.preference)?;
+        validate_choices(&input.channel,&input.preference)?;validate_management_mode(&input.management_mode)?;
+        if input.management_mode=="files"&&(input.installed_version.is_some()||input.installed_path.is_some()) {
+            return Err("文件项目不能填写已安装版本或路径".into());
+        }
         let (owner,repo)=network::repository(&input.repository)?;
         let mut p=empty_project(owner,repo,input.channel,input.preference);
+        p.management_mode=input.management_mode;
+        if p.management_mode=="files" {p.file_status=Some("notDownloaded".into());}
         let raw=self.github.api(&p.owner,&p.repo,&[],None).await?; metadata(&mut p,&raw)?;
         p.installed_version=input.installed_version.map(|s| bounded_text(&s,200,"已安装版本")).transpose()?;
         p.installed_path=input.installed_path.map(|s| bounded_text(&s,4096,"已安装路径")).transpose()?;
@@ -56,28 +67,48 @@ impl Core {
         self.changed(); Ok(p)
     }
     pub(crate) fn update_project(&self,id:&str,changes:ProjectChanges)->Result<Project,String> {
+        let installing=self.installing.lock().map_err(|_|"安装状态不可用".to_string())?;
+        if changes.management_mode.is_some()&&installing.contains(id){return Err("正在安装，完成后才能切换管理模式".into());}
+        let _queue=self.download_queue.lock().map_err(|_|"下载队列不可用".to_string())?;
+        let downloads=self.store.downloads()?;
         let p=self.store.mutate("projects",id,|p:&mut Project| {
+            if let Some(mode)=changes.management_mode {
+                validate_management_mode(&mode)?;
+                if p.management_mode!=mode {p.selected_asset_id=None;}
+                p.management_mode=mode;
+            }
+            if p.management_mode=="files" {
+                if changes.installed_version.as_ref().is_some_and(Option::is_some)||changes.installed_path.as_ref().is_some_and(Option::is_some) {
+                    return Err("文件项目不能填写已安装版本或路径".into());
+                }
+                p.installed_version=None;p.installed_path=None;p.installed_source=None;
+            }
             if let Some(c)=changes.channel { p.channel=c; p.release=None;p.selected_asset_id=None; p.status="notChecked".into(); }
             if let Some(v)=changes.preference { p.preference=v; }
             validate_choices(&p.channel,&p.preference)?;
-            if let Some(pattern)=changes.asset_pattern { p.asset_pattern=pattern.map(|s| bounded_text(&s,200,"文件名规则")).transpose()?; }
+            if let Some(pattern)=changes.asset_pattern {
+                p.asset_pattern=pattern.map(|s| bounded_text(&s,200,"文件名规则")).transpose()?;
+                if p.management_mode=="files" {p.selected_asset_id=None;}
+            }
             if let Some(v)=changes.installed_version {
                 p.installed_version=v.map(|s| bounded_text(&s,200,"已安装版本")).transpose()?;
                 p.installed_source=p.installed_version.as_ref().map(|_| "manual".into());
             }
             if let Some(path)=changes.installed_path { p.installed_path=path.map(|s| bounded_text(&s,4096,"已安装路径")).transpose()?; }
-            if let Some(r)=&mut p.release {
-                for a in &mut r.assets { selection::classify_for_project(a,&p.preference,p.asset_pattern.as_deref(),&p.owner,&p.repo); }
-                p.selected_asset_id=selection::choose(&r.assets);
+            if let Some(mut r)=p.release.take() {
+                for a in &mut r.assets { selection::classify_for_mode(a,p); }
+                p.selected_asset_id=if p.management_mode=="files" {selection::select_for_project(p,&r.assets,p.selected_asset_id)}else{selection::choose(&r.assets)};
+                p.release=Some(r);
             }
             if let Some(selected)=changes.selected_asset_id {
                 if let Some(id)=selected {
-                    if !p.release.as_ref().is_some_and(|r| r.assets.iter().any(|a| a.id==id && a.compatible)) {
+                    if !p.release.as_ref().is_some_and(|r| r.assets.iter().any(|a| a.id==id && if p.management_mode=="files"{a.downloadable}else{a.compatible})) {
                         return Err("附件不适用于当前项目或 Windows x64".into());
                     }
                 }
                 p.selected_asset_id=selected;
             }
+            selection::update_file_status(p,&downloads,&self.data_dir);
             if p.release.is_some() { selection::update_status(p); }
             p.error=None; Ok(())
         })?;
@@ -103,6 +134,7 @@ impl Core {
                 Ok::<_,String>((release,head,tag_commit))
             }.await;
             checked+=1;
+            let downloads=self.store.downloads()?;
             let updated=self.store.mutate("projects",&id,|current:&mut Project| {
                 current.checked_at=Some(now());
                 match fetched {
@@ -110,11 +142,12 @@ impl Core {
                         // A concurrent user change of channel must not receive data from the previous channel.
                         if current.channel!=p.channel {current.status="notChecked".into();return Ok(());}
                         current.name=p.name;current.description=p.description;current.avatar_url=p.avatar_url;current.default_branch=p.default_branch;
-                        if let Some(r)=&mut release { for a in &mut r.assets {selection::classify_for_project(a,&current.preference,current.asset_pattern.as_deref(),&current.owner,&current.repo);} }
+                        if let Some(r)=&mut release { for a in &mut r.assets {selection::classify_for_mode(a,current);} }
                         let previous=current.selected_asset_id;
-                        current.selected_asset_id=release.as_ref().and_then(|r| previous.filter(|id| r.assets.iter().any(|a| a.id==*id&&a.compatible)).or_else(||selection::choose(&r.assets)));
+                        current.selected_asset_id=release.as_ref().and_then(|r|selection::select_for_project(current,&r.assets,previous));
                         current.release=release;current.source_ahead=head.as_ref().zip(tag_commit.as_ref()).map(|(a,b)|a!=b);
-                        current.source_head_sha=head;current.error=None;selection::update_status(current);
+                        current.source_head_sha=head;current.error=None;
+                        selection::update_file_status(current,&downloads,&self.data_dir);selection::update_status(current);
                     }
                     Err(error)=> {current.status="error".into();current.error=Some(error);errors+=1;}
                 }
@@ -138,9 +171,9 @@ impl Core {
     pub(crate) fn export_library(&self)->Result<String,String> {
         let s=self.store.settings()?;
         let library=Library {version:1,projects:self.store.projects()?.into_iter().map(|p|Subscription{
-            repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern}).collect(),
+            repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern,management_mode:p.management_mode}).collect(),
             repository_notes:self.store.repository_notes()?,
-            settings:LibrarySettings{theme:s.theme,check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
+            settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
                 auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray,
                 startup_page:Some(s.startup_page),startup_github_tab:Some(s.startup_github_tab),navigation_order:Some(s.navigation_order)}};
         serde_json::to_string_pretty(&library).map_err(|_|"订阅导出失败".into())
@@ -151,6 +184,7 @@ impl Core {
         if library.version!=1 || library.projects.len()>1000 || library.repository_notes.len()>1000 {return Err("订阅文件版本无效或项目、备注过多".into());}
         let mut settings=self.store.settings()?;
         settings.theme=library.settings.theme;settings.check_interval_minutes=library.settings.check_interval_minutes;
+        if let Some(color)=library.settings.color_scheme {settings.color_scheme=color;}
         settings.notifications=library.settings.notifications;settings.auto_download=library.settings.auto_download;
         settings.max_concurrent_downloads=library.settings.max_concurrent_downloads;settings.close_to_tray=library.settings.close_to_tray;
         if let Some(page)=library.settings.startup_page {settings.startup_page=page;}
@@ -168,8 +202,11 @@ impl Core {
         }
         let mut ready=Vec::new();
         for input in library.projects {
-            validate_choices(&input.channel,&input.preference)?;let (owner,repo)=network::repository(&input.repository)?;
+            validate_choices(&input.channel,&input.preference)?;validate_management_mode(&input.management_mode)?;
+            let (owner,repo)=network::repository(&input.repository)?;
             let mut p=empty_project(owner,repo,input.channel,input.preference);
+            p.management_mode=input.management_mode;
+            if p.management_mode=="files" {p.file_status=Some("notDownloaded".into());}
             p.asset_pattern=input.asset_pattern.map(|s|bounded_text(&s,200,"文件名规则")).transpose()?;ready.push(p);
         }
         let notes:Vec<_>=notes.into_values().collect();
@@ -180,6 +217,17 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn file_mode_and_color_roundtrip_and_old_exports_still_import() {
+        let dir=tempfile::tempdir().unwrap();let source=Core::new(dir.path().join("source"),true,Arc::new(|_,_|{})).unwrap();
+        let mut project=empty_project("owner".into(),"assets".into(),"stable".into(),"auto".into());project.management_mode="files".into();source.store.put_project(&project).unwrap();
+        let mut settings=source.store.settings().unwrap();settings.color_scheme="violet".into();source.store.save_settings(&settings).unwrap();
+        let exported=source.export_library().unwrap();let target=Core::new(dir.path().join("target"),true,Arc::new(|_,_|{})).unwrap();target.import_library(&exported).unwrap();
+        assert_eq!(target.store.projects().unwrap()[0].management_mode,"files");assert_eq!(target.store.settings().unwrap().color_scheme,"violet");
+        let mut old:Value=serde_json::from_str(&exported).unwrap();old["projects"][0].as_object_mut().unwrap().remove("managementMode");old["settings"].as_object_mut().unwrap().remove("colorScheme");
+        let legacy=Core::new(dir.path().join("legacy"),true,Arc::new(|_,_|{})).unwrap();legacy.import_library(&old.to_string()).unwrap();
+        assert_eq!(legacy.store.projects().unwrap()[0].management_mode,"software");assert_eq!(legacy.store.settings().unwrap().color_scheme,"blue");
+        old["settings"]["colorScheme"]=json!("red");assert!(legacy.import_library(&old.to_string()).is_err());
+    }
     #[test] fn exports_only_subscriptions() {
         let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().into(),true,Arc::new(|_,_|{})).unwrap();
         let mut p=empty_project("owner".into(),"repo".into(),"stable".into(),"portable".into());

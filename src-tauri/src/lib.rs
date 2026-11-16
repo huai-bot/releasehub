@@ -3,6 +3,8 @@ pub mod core;
 mod host;
 mod mcp;
 mod github;
+mod github_oauth;
+mod github_cache;
 mod github_feed;
 pub mod proxy;
 mod secrets;

@@ -236,8 +236,8 @@ impl Github {
                 name:field(a,"name",512)?, size:a.get("size").and_then(Value::as_u64).ok_or("附件大小无效")?,
                 url:field(a,"browser_download_url",4096)?, content_type:field(a,"content_type",200)?,
                 digest:a.get("digest").and_then(Value::as_str).filter(|s| s.len()<=200).map(str::to_owned),
-                kind:"other".into(),compatible:false,score:0,reason:String::new() };
-            selection::classify_for_project(&mut asset,&p.preference,p.asset_pattern.as_deref(),&p.owner,&p.repo); assets.push(asset);
+                kind:"other".into(),downloadable:false,installable:false,compatible:false,score:0,reason:String::new() };
+            selection::classify_for_mode(&mut asset,p); assets.push(asset);
         }
         Ok(Some(Release {id:raw.get("id").and_then(Value::as_u64).ok_or("发行编号无效")?,tag,
             name:raw.get("name").and_then(Value::as_str).unwrap_or("").chars().take(300).collect(),

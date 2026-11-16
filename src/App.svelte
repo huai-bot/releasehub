@@ -5,7 +5,7 @@
   import BrandMark from './components/BrandMark.svelte';
   import { desktopAvailable, dispatch, watchChanges, type Action, type Actions } from './lib/bridge';
   import { applyDownloadProgress, mergeSnapshotDownloads } from './lib/download-state';
-  import type { AddProjectInput, AgentIntegration, AssetPreference, Channel, DownloadRecord, GithubRepository, ManagedVersion, Project, ProjectChanges, ProxySettings, Settings, Snapshot, WorkspacePage } from './lib/types';
+  import type { AddProjectInput, AgentIntegration, AssetPreference, Channel, DownloadRecord, GithubRepository, ManagedVersion, ManagementMode, Project, ProjectChanges, ProxySettings, Settings, Snapshot, WorkspacePage } from './lib/types';
   import { canActivateManagedVersion, formatBytes, parseRepository, readableError, safeGithubUrl, type Page, type Tone } from './lib/ui';
   import ManagedVersions from './components/ManagedVersions.svelte';
   import Icon from './components/Icon.svelte';
@@ -44,6 +44,10 @@
   let destroyed = false;
   let startupPageApplied = false;
   let githubVisited = $state(false);
+  let visitedLocal = $state(new Set<Page>());
+  $effect(() => {
+    if (['library', 'updates', 'downloads'].includes(page) && !visitedLocal.has(page)) visitedLocal = new Set([...visitedLocal, page]);
+  });
   // Keep the visited GitHub workspace in memory; it owns its loaded rows and scroll position.
   $effect(() => { if (page === 'github') githubVisited = true; });
   let refreshRequested = false;
@@ -56,9 +60,10 @@
   const managedProjectId = $derived(modal?.kind === 'managed' ? modal.projectId : null);
   const managedProject = $derived(snapshot?.projects.find((project) => project.id === managedProjectId) ?? null);
   const showingDetails = $derived(selectedProject !== null && ['home', 'library', 'updates'].includes(page));
-  const pageLabels: Record<Page, string> = { home: '首页', library: '软件库', updates: '可更新', downloads: '下载', github: 'GitHub', agent: 'AI 连接', settings: '设置' };
+  const pageLabels: Record<Page, string> = { home: '首页', library: '资源库', updates: '可更新', downloads: '下载', github: 'GitHub', agent: 'AI 连接', settings: '设置' };
 
   let addRepository = $state('');
+  let addMode = $state<ManagementMode>('software');
   let addChannel = $state<Channel>('stable');
   let addPreference = $state<AssetPreference>('auto');
   let addVersion = $state('');
@@ -75,6 +80,7 @@
     const theme = snapshot?.settings.theme ?? 'system';
     const resolved = theme === 'system' ? systemDark ? 'dark' : 'light' : theme;
     document.documentElement.dataset.theme = resolved;
+    document.documentElement.dataset.colorScheme = snapshot?.settings.colorScheme ?? 'blue';
     document.documentElement.style.colorScheme = resolved;
     if (desktopAvailable()) void getCurrentWindow().setTheme(resolved).catch(() => {});
   });
@@ -169,20 +175,30 @@
     snapshot = createPreviewSnapshot(); preview = true; startupError = ''; operationError = '';
   }
   function exitPreview() { modal = null; selectedId = null; snapshot = null; preview = false; page = 'home'; query = ''; startupError = '界面预览已退出。真实操作请使用 ReleaseHub 桌面版。'; }
-  function navigate(next: Page) { page = next; query = ''; if (!['home', 'library', 'updates'].includes(next)) selectedId = null; }
+  const pageState = new Map<Page, { query: string; selectedId: string | null; scrollTop: number }>();
+  async function navigate(next: Page) {
+    if (next === page) return;
+    const content = document.querySelector<HTMLElement>('#main-content');
+    pageState.set(page, { query, selectedId, scrollTop: content?.scrollTop ?? 0 });
+    const previous = pageState.get(next);
+    page = next; query = previous?.query ?? ''; selectedId = previous?.selectedId ?? null;
+    await tick();
+    const restored = document.querySelector<HTMLElement>('#main-content');
+    if (restored && page === next) restored.scrollTop = previous?.scrollTop ?? 0;
+  }
   function chooseProject(project: Project) { selectedId = project.id; }
-  function openProject(id: string) { if (!snapshot?.projects.some((project) => project.id === id)) { notify('这个软件已取消订阅，下载记录仍然保留。', 'warning'); return; } page = 'library'; query = ''; selectedId = id; }
+  function openProject(id: string) { if (!snapshot?.projects.some((project) => project.id === id)) { notify('这个资源已取消订阅，下载记录仍然保留。', 'warning'); return; } page = 'library'; query = ''; selectedId = id; }
   function openDialog(value: DialogState) { formError = ''; modal = value; }
   function closeDialog() { if (busy) return; modal = null; formError = ''; importContents = ''; managedRequestId += 1; managedVersions = []; managedError = ''; managedLoading = false; }
-  function showAdd() { addRepository = ''; addChannel = 'stable'; addPreference = 'auto'; addVersion = ''; addPath = ''; addAdvanced = false; openDialog({ kind: 'add' }); }
-  function showMark(project: Project, suggestion?: string) { markVersion = suggestion ?? project.installedVersion ?? ''; markPath = project.installedPath ?? ''; markConfirmed = false; openDialog({ kind: 'mark', project }); }
+  function showAdd() { addMode = 'software'; addRepository = ''; addChannel = 'stable'; addPreference = 'auto'; addVersion = ''; addPath = ''; addAdvanced = false; openDialog({ kind: 'add' }); }
+  function showMark(project: Project, suggestion?: string) { if (project.managementMode === 'files') return; markVersion = suggestion ?? project.installedVersion ?? ''; markPath = project.installedPath ?? ''; markConfirmed = false; openDialog({ kind: 'mark', project }); }
   function markDownloaded(id: string, version: string) { const project = snapshot?.projects.find((item) => item.id === id); if (project) showMark(project, version); else notify('请先重新订阅这个软件，再记录本机版本。', 'warning'); }
-  function showInstall(download: DownloadRecord) { installConfirmed = false; openDialog({ kind: 'install', download }); }
+  function showInstall(download: DownloadRecord) { if (download.installable === false || download.kind === 'other') return; installConfirmed = false; openDialog({ kind: 'install', download }); }
 
   function showManagedVersions(projectId: string) {
     if (busy) return;
     const project = snapshot?.projects.find((item) => item.id === projectId);
-    if (!project) { notify('这个软件已取消订阅，已准备的文件仍然保留。请先重新订阅。', 'warning'); return; }
+    if (!project) { notify('这个资源已取消订阅，已准备的文件仍然保留。请先重新订阅。', 'warning'); return; }
     if (project.installedSource !== 'managed') { notify('当前没有由追新管理的安装记录。手动记录的外部软件不在这里切换。', 'warning'); return; }
     openDialog({ kind: 'managed', projectId });
     void loadManagedVersions();
@@ -224,11 +240,11 @@
 
   async function checkUpdates(ids?: string[]) {
     const result = await operate('check_updates', { ...(ids ? { projectIds: ids } : {}), allowAutoDownload: true });
-    if (result) notify(`已检查 ${result.checked} 款软件，发现 ${result.updates} 项更新${result.errors ? `，${result.errors} 项未完成，请查看软件详情` : '。'}`, result.errors ? 'warning' : 'success');
+    if (result) notify(`已检查 ${result.checked} 项资源，发现 ${result.updates} 项更新${result.errors ? `，${result.errors} 项未完成，请查看资源详情` : '。'}`, result.errors ? 'warning' : 'success');
   }
   async function downloadProject(project: Project, quiet = false): Promise<boolean> {
-    const asset = project.release?.assets.find((item) => item.id === project.selectedAssetId && item.compatible);
-    if (!asset) { chooseProject(project); if (!quiet) notify('请先在详情的“安装包”中选择适合 Windows x64 的文件。', 'warning'); return false; }
+    const asset = project.release?.assets.find((item) => item.id === project.selectedAssetId && (item.downloadable ?? item.compatible));
+    if (!asset) { chooseProject(project); if (!quiet) notify('请先在详情的“发行附件”中选择需要下载的文件。', 'warning'); return false; }
     const result = await operate('download_asset', { projectId: project.id, assetId: asset.id }, { refresh: !quiet, key: `download:${project.id}` });
     if (result && !quiet) notify(`${project.name} 已加入下载队列。`);
     return result !== undefined;
@@ -240,7 +256,7 @@
     try { for (const project of projects) if (await downloadProject(project, true)) queued += 1; await refreshSnapshot(); notify(`已将 ${queued} 项加入下载队列${projects.length > queued ? `；另有 ${projects.length - queued} 项未下载，请检查安装包或错误提示` : '。'}`, queued === projects.length ? 'success' : 'warning'); }
     catch (error) { reportError(error); } finally { setPending('batch-download', false); }
   }
-  async function updateProject(id: string, changes: ProjectChanges) { const result = await operate('update_project', { id, changes }, { success: '订阅偏好已保存。' }); if (result && ('channel' in changes || 'preference' in changes || 'assetPattern' in changes)) await checkUpdates([id]); }
+  async function updateProject(id: string, changes: ProjectChanges) { const result = await operate('update_project', { id, changes }, { success: '订阅偏好已保存。' }); if (result && ('channel' in changes || 'preference' in changes || 'assetPattern' in changes || 'managementMode' in changes)) await checkUpdates([id]); }
   async function saveSettings(changes: Partial<Settings>): Promise<boolean> {
     if (preview && snapshot) { snapshot = { ...snapshot, settings: { ...snapshot.settings, ...changes } }; notify('预览设置已更新。', 'neutral'); return true; }
     return await operate('save_settings', { settings: changes }, { success: '设置已保存。' }) !== undefined;
@@ -259,7 +275,7 @@
     if (repository.private) { notify('私有仓库暂不加入更新列表。', 'warning'); return false; }
     if (isSubscribed(repository.fullName, snapshot?.projects ?? [])) { notify('这个仓库已经订阅。', 'neutral'); return true; }
     const input: AddProjectInput = { repository: repository.fullName, channel: 'stable', preference: 'auto' };
-    const project = await operate('add_project', { input }, { key: `github-add:${repository.fullName.toLowerCase()}`, success: '已加入软件库，可前往检查发行版。' });
+    const project = await operate('add_project', { input }, { key: `github-add:${repository.fullName.toLowerCase()}`, success: '已加入资源库，可前往检查发行版。' });
     if (project && snapshot && !snapshot.projects.some((item) => item.id === project.id)) snapshot = { ...snapshot, projects: [...snapshot.projects, project] };
     return project !== undefined;
   }
@@ -275,8 +291,8 @@
     event.preventDefault(); formError = '';
     const repository = parseRepository(addRepository);
     if (!repository) { formError = '请输入“作者/仓库”，或完整的 https://github.com/作者/仓库 地址。'; return; }
-    const input: AddProjectInput = { repository, channel: addChannel, preference: addPreference, ...(addVersion.trim() ? { installedVersion: addVersion.trim() } : {}), ...(addPath.trim() ? { installedPath: addPath.trim() } : {}) };
-    const project = await operate('add_project', { input }, { success: '已加入软件库。' });
+    const input: AddProjectInput = { repository, managementMode: addMode, channel: addChannel, preference: addPreference, ...(addMode === 'software' && addVersion.trim() ? { installedVersion: addVersion.trim() } : {}), ...(addMode === 'software' && addPath.trim() ? { installedPath: addPath.trim() } : {}) };
+    const project = await operate('add_project', { input }, { success: '已加入资源库。' });
     if (project) { modal = null; page = 'library'; query = ''; selectedId = project.id; await checkUpdates([project.id]); }
   }
   async function submitMark(event: SubmitEvent) {
@@ -304,31 +320,52 @@
 </script>
 
 <svelte:window onkeydown={hotkeys} />
-<svelte:head><title>ReleaseHub 追新 · 软件更新工作空间</title><meta name="description" content="集中管理 GitHub 软件更新、Stars 分类、项目备注与首页动态。" /></svelte:head>
+<svelte:head><title>ReleaseHub 追新 · 发行资源工作空间</title><meta name="description" content="集中管理 GitHub 软件更新、Stars 分类、项目备注与首页动态。" /></svelte:head>
 
 {#if !snapshot}
   <div class="startup-titlebar"><TitleBar title="ReleaseHub · 追新" searchable={false} onerror={reportError} /></div>
-  <main class="startup-shell"><div class="startup-brand"><BrandMark size={40} /><strong>ReleaseHub <span>追新</span></strong></div><section class="startup-card" aria-live="polite">{#if loading}<span class="startup-icon"><Icon name="loader" class="spinning" size={30} /></span><h1>正在打开你的工作空间</h1><p>读取软件库与本机设置，请稍候。</p><div class="skeleton-lines"><span></span><span></span><span></span></div>{:else}<span class="startup-icon"><Icon name="disconnected" size={29} /></span><h1>请在桌面程序中继续</h1><p class="startup-error">{startupError || '桌面服务未连接，请重新打开应用。'}</p><button class="button secondary" onclick={() => void initialize()}><Icon name="refresh" size={16} />重新连接桌面服务</button>{#if import.meta.env.DEV && !desktopAvailable()}<div class="preview-gate"><span class="status-badge warning">仅限开发环境</span><h2>只是想看看界面？</h2><p>使用示例软件与账号查看各页面。</p><button class="button primary" onclick={() => void enterPreview()}>进入界面预览<Icon name="arrowRight" size={16} /></button></div>{/if}{/if}</section><p class="startup-footer">来自 GitHub 的变化，在这里从容掌握。</p></main>
+  <main class="startup-shell"><div class="startup-brand"><BrandMark size={40} /><strong>ReleaseHub <span>追新</span></strong></div><section class="startup-card" aria-live="polite">{#if loading}<span class="startup-icon"><Icon name="loader" class="spinning" size={30} /></span><h1>正在打开你的工作空间</h1><p>读取资源库与本机设置，请稍候。</p><div class="skeleton-lines"><span></span><span></span><span></span></div>{:else}<span class="startup-icon"><Icon name="disconnected" size={29} /></span><h1>请在桌面程序中继续</h1><p class="startup-error">{startupError || '桌面服务未连接，请重新打开应用。'}</p><button class="button secondary" onclick={() => void initialize()}><Icon name="refresh" size={16} />重新连接桌面服务</button>{#if import.meta.env.DEV && !desktopAvailable()}<div class="preview-gate"><span class="status-badge warning">仅限开发环境</span><h2>只是想看看界面？</h2><p>使用示例资源与账号查看各页面。</p><button class="button primary" onclick={() => void enterPreview()}>进入界面预览<Icon name="arrowRight" size={16} /></button></div>{/if}{/if}</section><p class="startup-footer">来自 GitHub 的变化，在这里从容掌握。</p></main>
 {:else}
   <div class="app-shell"><Sidebar {page} {snapshot} {preview} {busy} onnavigate={navigate} onadd={showAdd} ondata={() => void operate('open_data_directory', {}, { refresh: false })} onreorder={(navigationOrder: WorkspacePage[]) => saveSettings({ navigationOrder })} />
     <div class="workspace"><TitleBar title={pageLabels[page]} bind:query bind:inputElement={searchInput} {busy} {refreshing} onsearch={() => { if (!['library', 'updates', 'downloads'].includes(page)) page = 'library'; }} onrefresh={() => void refreshView()} onerror={reportError} />
       {#if preview}<div class="preview-banner"><Icon name="monitor" size={15} /><strong>界面预览</strong><span>示例版本、账号与状态</span><button onclick={exitPreview}>退出预览<Icon name="close" size={13} /></button></div>{/if}
       {#if operationError}<div class="operation-error" role="alert"><Icon name="alert" size={17} /><span>{operationError}</span><button class="icon-button" aria-label="收起错误提示" onclick={() => operationError = ''}><Icon name="close" size={16} /></button></div>{/if}
-      <div class="workspace-content" class:with-details={showingDetails}><main class="page-content" id={page !== 'github' ? 'main-content' : undefined} hidden={page === 'github'}>
+      <div class="workspace-content" class:with-details={showingDetails}><main class="page-content" id={!['github', 'library', 'updates', 'downloads'].includes(page) ? 'main-content' : undefined} hidden={['github', 'library', 'updates', 'downloads'].includes(page)}>
         {#if page === 'home'}<Home {snapshot} {busy} {selectedId} onpage={navigate} onselect={chooseProject} onadd={showAdd} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} />
-        {:else if page === 'library' || page === 'updates'}{#key page}<Library projects={snapshot.projects} updatesOnly={page === 'updates'} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} />{/key}
-        {:else if page === 'downloads'}<Downloads downloads={snapshot.downloads} {query} {busy} onretry={(id) => void operate('retry_download', { id }, { success: '已重新加入下载队列。' })} oncancel={(id) => void operate('cancel_download', { id }, { success: '已请求取消下载。' })} oninstall={showInstall} onfolder={(id) => void operate('open_download', { id }, { refresh: false })} onmark={markDownloaded} onproject={openProject} oncopy={(text) => void copy(text)} onversions={showManagedVersions} />
         {:else if page === 'agent'}<Connections settings={snapshot.settings} runtime={snapshot.runtime} {busy} {preview} onsave={(changes) => void saveSettings(changes)} onintegration={getIntegration} oncopy={(text) => void copy(text)} />
         {:else if page === 'settings'}<SettingsPage settings={snapshot.settings} runtime={snapshot.runtime} {busy} {preview} onsave={(changes) => void saveSettings(changes)} onproxy={saveProxy} onproxytest={(proxy, password) => dispatch('test_proxy', { proxy, ...(password === undefined ? {} : { password }) })} onintegration={getIntegration} ongithub={() => navigate('github')} ondata={() => void operate('open_data_directory', {}, { refresh: false })} onexport={() => void exportFile()} onimport={() => void importFile()} ontextimport={() => { importContents = ''; openDialog({ kind: 'import' }); }} oncopyexport={() => void copyExport()} oncopy={(text) => void copy(text)} onopen={(url) => void openUrl(url)} />{/if}
       </main>
-      {#if githubVisited || page === 'github'}<main class="page-content" id={page === 'github' ? 'main-content' : undefined} hidden={page !== 'github'}><Github projects={snapshot.projects} {preview} active={page === 'github'} initialTab={snapshot.settings.startupGithubTab} onadd={addGithubRepository} onopen={(url) => void openUrl(url)} oncopy={(text) => void copy(text)} onnotice={notify} /></main>{/if}
-      {#if showingDetails && selectedProject}<button class="detail-backdrop" aria-label="关闭软件详情" onclick={() => selectedId = null}></button><ProjectDetail project={selectedProject} {busy} onclose={() => selectedId = null} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onupdate={(id, changes) => void updateProject(id, changes)} onmark={showMark} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => openDialog({ kind: 'remove', project })} onopen={(url) => void openUrl(url)} />{/if}</div>
+      {#each ['library', 'updates'] as localPage}
+         {#if visitedLocal.has(localPage as Page) || page === localPage}<main class="page-content" id={page === localPage ? 'main-content' : undefined} hidden={page !== localPage}><Library projects={snapshot.projects} updatesOnly={localPage === 'updates'} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} /></main>{/if}
+       {/each}
+       {#if visitedLocal.has('downloads') || page === 'downloads'}<main class="page-content" id={page === 'downloads' ? 'main-content' : undefined} hidden={page !== 'downloads'}><Downloads downloads={snapshot.downloads} {query} {busy} onretry={(id) => void operate('retry_download', { id }, { success: '已重新加入下载队列。' })} oncancel={(id) => void operate('cancel_download', { id }, { success: '已请求取消下载。' })} oninstall={showInstall} onfolder={(id) => void operate('open_download', { id }, { refresh: false })} onmark={markDownloaded} onproject={openProject} oncopy={(text) => void copy(text)} onversions={showManagedVersions} /></main>{/if}
+       {#if githubVisited || page === 'github'}<main class="page-content" id={page === 'github' ? 'main-content' : undefined} hidden={page !== 'github'}><Github projects={snapshot.projects} {preview} active={page === 'github'} initialTab={snapshot.settings.startupGithubTab} onadd={addGithubRepository} onopen={(url) => void openUrl(url)} oncopy={(text) => void copy(text)} onnotice={notify} /></main>{/if}
+      {#if showingDetails && selectedProject}<button class="detail-backdrop" aria-label="关闭资源详情" onclick={() => selectedId = null}></button><ProjectDetail project={selectedProject} {busy} onclose={() => selectedId = null} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onupdate={(id, changes) => void updateProject(id, changes)} onmark={showMark} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => openDialog({ kind: 'remove', project })} onopen={(url) => void openUrl(url)} />{/if}</div>
     </div>
   </div>
 {/if}
 
 {#if modal?.kind === 'add'}
-  <Modal title="添加软件" description="订阅一个 GitHub 项目，从此不错过作者的发行动态。" onclose={closeDialog}><form class="modal-form" onsubmit={submitAdd}><label for="new-repository">GitHub 项目地址 <span class="required-mark">*</span></label><div class="input-leading"><Icon name="github" size={18} /><input id="new-repository" bind:value={addRepository} data-initial-focus placeholder="作者/仓库，或粘贴 GitHub 项目链接" required maxlength="500" spellcheck="false" /></div>{#if addRepository}<p class={parsedRepository ? 'field-hint success-text' : 'field-hint'}>{parsedRepository ? `将订阅 ${parsedRepository}` : '例如 Lake1059/FFmpegFreeUI；仅支持 GitHub 项目地址'}</p>{/if}<div class="suggestions"><span>快速填入</span>{#each ['Lake1059/FFmpegFreeUI', 'RoutineMiku/apkstart', 'Predidit/Kazumi'] as repository}<button type="button" onclick={() => addRepository = repository}>{repository.split('/')[1]}</button>{/each}</div><div class="form-columns"><label>订阅渠道<select bind:value={addChannel}><option value="stable">正式版 · 推荐</option><option value="preview">包含预览版</option></select></label><label>安装包偏好<select bind:value={addPreference}><option value="auto">自动推荐</option><option value="portable">优先免安装包</option><option value="installer">优先安装程序</option></select></label></div><button type="button" class="text-button advanced-toggle" aria-expanded={addAdvanced} onclick={() => addAdvanced = !addAdvanced}><Icon name="chevronDown" size={15} />{addAdvanced ? '收起本机版本记录' : '已经安装过？记录本机版本（可选）'}</button>{#if addAdvanced}<div class="advanced-fields"><label>已安装版本<input bind:value={addVersion} placeholder="例如 v1.2.3，不确定就留空" maxlength="120" /></label><label>安装位置<div class="input-with-button"><input bind:value={addPath} placeholder="选择已安装软件的文件夹" maxlength="1000" /><button type="button" class="button secondary" disabled={busy} onclick={() => void pickPath('add')}>浏览</button></div></label><p class="field-hint">记录后可对比本机版本与最新发行版。</p></div>{/if}{#if formError}<p class="field-error" role="alert">{formError}</p>{/if}<div class="modal-footer"><span class="field-hint"><Icon name="shield" size={13} />不登录也能订阅公开项目</span><button class="button secondary" type="button" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy || !parsedRepository}><Icon name={busy ? 'loader' : 'plus'} size={16} class={busy ? 'spinning' : ''} />添加并检查</button></div></form></Modal>
+  <Modal title="添加资源" description="订阅 GitHub 项目，管理软件更新或发行附件。" onclose={closeDialog}>
+    <form class="modal-form" onsubmit={submitAdd}>
+      <label for="new-repository">GitHub 项目地址 <span class="required-mark">*</span></label>
+      <div class="input-leading"><Icon name="github" size={18} /><input id="new-repository" bind:value={addRepository} data-initial-focus placeholder="作者/仓库，或粘贴 GitHub 项目链接" required maxlength="500" spellcheck="false" /></div>
+      {#if addRepository}<p class={parsedRepository ? 'field-hint success-text' : 'field-hint'}>{parsedRepository ? `将订阅 ${parsedRepository}` : '例如 Lake1059/FFmpegFreeUI；仅支持 GitHub 项目地址'}</p>{/if}
+      <fieldset class="resource-mode"><legend>怎样管理这个项目？</legend>
+        <label class:chosen={addMode === 'software'}><input type="radio" name="management-mode" bind:group={addMode} value="software" /><span><strong>软件</strong><small>推荐 Windows 安装包，记录本机版本</small></span></label>
+        <label class:chosen={addMode === 'files'}><input type="radio" name="management-mode" bind:group={addMode} value="files" /><span><strong>文件</strong><small>下载文档、模型、模组等发行附件</small></span></label>
+      </fieldset>
+      <div class="form-columns"><label>订阅渠道<select bind:value={addChannel}><option value="stable">正式版 · 推荐</option><option value="preview">包含预览版</option></select></label>
+        {#if addMode === 'software'}<label>安装包偏好<select bind:value={addPreference}><option value="auto">自动推荐</option><option value="portable">优先免安装包</option><option value="installer">优先安装程序</option></select></label>{/if}
+      </div>
+      {#if addMode === 'software'}
+        <button type="button" class="text-button advanced-toggle" aria-expanded={addAdvanced} onclick={() => addAdvanced = !addAdvanced}><Icon name="chevronDown" size={15} />{addAdvanced ? '收起本机版本记录' : '已经安装过？记录本机版本（可选）'}</button>
+        {#if addAdvanced}<div class="advanced-fields"><label>已安装版本<input bind:value={addVersion} placeholder="例如 v1.2.3，不确定就留空" maxlength="120" /></label><label>安装位置<div class="input-with-button"><input bind:value={addPath} placeholder="选择已安装软件的文件夹" maxlength="1000" /><button type="button" class="button secondary" disabled={busy} onclick={() => void pickPath('add')}>浏览</button></div></label><p class="field-hint">记录后可对比本机版本与最新发行版。</p></div>{/if}
+      {:else}<p class="field-hint">从 Releases 中逐个选择附件，单个文件最多 4GB。文件下载后不会自动运行或安装。</p>{/if}
+      {#if formError}<p class="field-error" role="alert">{formError}</p>{/if}
+      <div class="modal-footer"><span class="field-hint"><Icon name="github" size={14} />公开项目无需登录</span><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy || !parsedRepository}><Icon name={busy ? 'loader' : 'plus'} class={busy ? 'spinning' : ''} size={16} />{busy ? '正在添加' : '添加资源'}</button></div>
+    </form>
+  </Modal>
 {:else if modal?.kind === 'install'}
   <Modal title={modal.download.kind === 'portable' ? '确认安装到受管目录' : '确认打开安装程序'} description="核对版本与文件后继续安装。" onclose={closeDialog}><form class="modal-form" onsubmit={submitInstall}><div class="confirm-package"><Icon name="package" size={28} /><div><strong>{modal.download.projectName} <span>{modal.download.tag}</span></strong><p>{modal.download.fileName}</p><small>{formatBytes(modal.download.totalBytes)}</small></div></div><div class="confirmation-details">{#if modal.download.kind === 'portable'}<p>{modal.download.fileName.toLowerCase().endsWith('.exe') ? '将主程序复制到追新管理的应用目录。' : '将压缩包解压到追新管理的独立版本目录。'}</p><p>完成后记为当前版本。各版本与配置分别保存在原目录，可在“管理已准备版本”中切换。</p>{:else}<p>将启动下载的 EXE / MSI 安装程序。请在作者的安装向导中自行决定位置与选项。</p><p>完成安装向导后，在下载页点“已自行安装？”记录版本。</p>{/if}<p class="integrity-disclaimer"><Icon name="shield" size={15} />{modal.download.verified ? '该文件与上游提供的摘要一致。' : '此文件没有可供比对的上游校验结果，请核对项目来源。'}</p></div><label class="confirmation-check"><input type="checkbox" bind:checked={installConfirmed} required />我已核对项目、版本与文件，并同意执行上述操作。</label>{#if formError}<p class="field-error" role="alert">{formError}</p>{/if}<div class="modal-footer"><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>暂不安装</button><button class="button primary" type="submit" disabled={busy || !installConfirmed}><Icon name={busy ? 'loader' : 'install'} class={busy ? 'spinning' : ''} size={16} />{busy ? '正在处理' : modal.download.kind === 'portable' ? '确认安装' : '确认打开安装程序'}</button></div></form></Modal>
 {:else if modal?.kind === 'managed'}
@@ -336,7 +373,7 @@
 {:else if modal?.kind === 'mark'}
   <Modal title="记录已安装版本" description={`填写 ${modal.project.name} 在本机的版本和安装位置。`} onclose={closeDialog}><form class="modal-form" onsubmit={submitMark}><label>实际已安装版本<input bind:value={markVersion} required maxlength="120" placeholder="例如 v1.2.3" data-initial-focus /></label><label>安装位置 <span class="optional">可选</span><div class="input-with-button"><input bind:value={markPath} placeholder="选择软件的安装文件夹" maxlength="1000" /><button type="button" class="button secondary" disabled={busy} onclick={() => void pickPath('mark')}>浏览</button></div></label><label class="confirmation-check"><input type="checkbox" bind:checked={markConfirmed} required />我已确认此版本在本机完成安装。</label>{#if formError}<p class="field-error" role="alert">{formError}</p>{/if}<div class="modal-footer"><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy || !markConfirmed || !markVersion.trim()}>确认记录</button></div></form></Modal>
 {:else if modal?.kind === 'remove'}
-  <Modal title="取消订阅这个软件？" description={modal.project.name} onclose={closeDialog}><div class="modal-form"><p class="confirmation-details">从软件库移除这条订阅，保留已有的下载记录与软件文件。</p>{#if formError}<p class="field-error" role="alert">{formError}</p>{/if}<div class="modal-footer"><button class="button secondary" disabled={busy} onclick={closeDialog}>继续订阅</button><button class="button danger" disabled={busy} onclick={() => { if (modal?.kind === 'remove') void removeProject(modal.project); }}>仅取消订阅</button></div></div></Modal>
+  <Modal title="取消订阅这个资源？" description={modal.project.name} onclose={closeDialog}><div class="modal-form"><p class="confirmation-details">从资源库移除这条订阅，保留已有的下载记录与文件。</p>{#if formError}<p class="field-error" role="alert">{formError}</p>{/if}<div class="modal-footer"><button class="button secondary" disabled={busy} onclick={closeDialog}>继续订阅</button><button class="button danger" disabled={busy} onclick={() => { if (modal?.kind === 'remove') void removeProject(modal.project); }}>仅取消订阅</button></div></div></Modal>
 {:else if modal?.kind === 'import'}
   <Modal title="粘贴订阅清单" description="导入订阅、备注和偏好，跳过重复订阅。" wide onclose={closeDialog}><form class="modal-form" onsubmit={submitImport}><label>订阅清单<textarea bind:value={importContents} rows="10" class="mono" placeholder="在这里粘贴 ReleaseHub 导出的完整 JSON" required maxlength="1000000" spellcheck="false" data-initial-focus></textarea></label><p class="field-hint">支持 ReleaseHub 导出的 JSON 清单，最多 1 MB。</p>{#if formError}<p class="field-error" role="alert">{formError}</p>{/if}<div class="modal-footer"><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy || !importContents.trim()}><Icon name="import" size={16} />导入订阅</button></div></form></Modal>
 {/if}

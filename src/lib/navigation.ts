@@ -2,7 +2,7 @@ import type { GithubTab, WorkspacePage } from './types';
 
 export const workspacePages = [
   { id: 'home', label: '首页', icon: 'home' },
-  { id: 'library', label: '软件库', icon: 'library' },
+  { id: 'library', label: '资源库', icon: 'library' },
   { id: 'updates', label: '可更新', icon: 'updates' },
   { id: 'downloads', label: '下载', icon: 'download' },
   { id: 'github', label: 'GitHub', icon: 'github' },

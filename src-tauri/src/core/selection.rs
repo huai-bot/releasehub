@@ -39,7 +39,13 @@ pub fn classify(asset: &mut ReleaseAsset, preference: &str, pattern: Option<&str
     let exe = name.ends_with(".exe") || name.ends_with(".msi");
     let zip = name.ends_with(".zip");
     asset.kind = if exe { "installer" } else if zip { "portable" } else { "other" }.into();
-    asset.compatible = false; asset.score = 0;
+    asset.compatible = false; asset.installable = false; asset.score = 0;
+    asset.downloadable = asset.size > 0 && asset.size <= super::network::MAX_DOWNLOAD_BYTES
+        && super::network::trusted_download_url(&asset.url).is_ok();
+    if asset.size == 0 || asset.size > super::network::MAX_DOWNLOAD_BYTES {
+        asset.reason = "文件为空或超过4GB下载大小限制".into(); return;
+    }
+    if !asset.downloadable { asset.reason = "下载地址不在可信 GitHub 域名内".into(); return; }
     if !exe && !zip { asset.reason = "不是支持的 Windows 安装器或 ZIP".into(); return; }
     if token(&name, &["arm", "arm64", "aarch64", "armv7", "armv8", "mac", "macos", "osx", "darwin", "linux", "ubuntu", "android", "ios", "i386", "i686", "win32", "32bit"])
         || (token(&name, &["x86"]) && !name.contains("x86_64") && !name.contains("x86-64"))
@@ -50,16 +56,10 @@ pub fn classify(asset: &mut ReleaseAsset, preference: &str, pattern: Option<&str
         || name.contains("-dbg") {
         asset.reason = "调试、源码或校验附属文件".into(); return;
     }
-    if asset.size == 0 || asset.size > super::network::MAX_DOWNLOAD_BYTES {
-        asset.reason = "文件为空或超过下载大小限制".into(); return;
-    }
-    if super::network::trusted_download_url(&asset.url).is_err() {
-        asset.reason = "下载地址不在可信 GitHub 域名内".into(); return;
-    }
     if let Some(p) = pattern {
         if !wildcard(p, &name) { asset.reason = "不符合指定文件名规则".into(); return; }
     }
-    asset.compatible = true;
+    asset.compatible = true; asset.installable = true;
     let windows = token(&name, &["windows", "win", "win64", "win10", "win11"]) || name.contains("windows-") || name.contains("windows_");
     let x64 = token(&name, &["x64", "amd64", "win64", "64bit"]) || name.contains("x86_64") || name.contains("x86-64");
     asset.score = 20 + if windows { 35 } else { 0 } + if x64 { 25 } else { 0 };
@@ -72,6 +72,7 @@ pub fn classify(asset: &mut ReleaseAsset, preference: &str, pattern: Option<&str
 }
 pub fn classify_for_project(asset:&mut ReleaseAsset,preference:&str,pattern:Option<&str>,owner:&str,repo:&str) {
     classify(asset,preference,pattern);
+    if !asset.downloadable {return;}
     let name=asset.name.to_ascii_lowercase();
     if name=="updater.exe" {
         asset.compatible=false;asset.score=0;asset.reason="辅助更新器，不是主程序".into();
@@ -85,9 +86,27 @@ pub fn classify_for_project(asset:&mut ReleaseAsset,preference:&str,pattern:Opti
         if preference=="portable"{asset.score+=100;}else if preference=="installer"{asset.score-=100;}
         asset.reason="官方 Windows x64 单文件便携主程序，不是安装器".into();
     }
-    if name.ends_with(".msix") {
+    if name.ends_with(".msix") && asset.downloadable {
         asset.reason="暂不支持 MSIX 安装，请选择 Windows ZIP 便携包".into();
     }
+    asset.installable=asset.compatible;
+}
+pub fn classify_for_mode(asset:&mut ReleaseAsset,p:&Project) {
+    classify_for_project(asset,&p.preference,p.asset_pattern.as_deref(),&p.owner,&p.repo);
+    if p.management_mode=="files" {
+        asset.installable=false;
+        if asset.downloadable { asset.reason="发行附件，仅下载保存，不安装或解压".into(); }
+    }
+}
+pub fn select_for_project(p:&Project,assets:&[ReleaseAsset],previous:Option<u64>)->Option<u64> {
+    if p.management_mode=="files" {
+        if let Some(id)=previous.filter(|id|assets.iter().any(|a|a.id==*id&&a.downloadable)) {return Some(id);}
+        let pattern=p.asset_pattern.as_deref()?;
+        let mut matches=assets.iter().filter(|a|a.downloadable&&wildcard(pattern,&a.name));
+        let first=matches.next()?;
+        return if matches.next().is_none(){Some(first.id)}else{None};
+    }
+    previous.filter(|id|assets.iter().any(|a|a.id==*id&&a.compatible)).or_else(||choose(assets))
 }
 pub fn choose(assets: &[ReleaseAsset]) -> Option<u64> {
     let mut candidates: Vec<&ReleaseAsset> = assets.iter().filter(|a| a.compatible).collect();
@@ -96,7 +115,23 @@ pub fn choose(assets: &[ReleaseAsset]) -> Option<u64> {
     if first.score < 35 || candidates.get(1).is_some_and(|a| first.score - a.score < 15) { return None; }
     Some(first.id)
 }
+pub fn update_file_status(p:&mut Project,downloads:&[super::models::DownloadRecord],data:&std::path::Path) {
+    if p.management_mode!="files" {p.file_status=None;return;}
+    let completed:Vec<_>=downloads.iter().filter(|d|d.project_id==p.id&&["completed","installed"].contains(&d.status.as_str())).collect();
+    let latest:Vec<_>=completed.iter().copied().filter(|d|p.release.as_ref().is_some_and(|r|r.tag==d.tag&&r.assets.iter().any(|a|a.id==d.asset_id))).collect();
+    p.file_status=Some(if latest.iter().any(|d|super::downloads::local_file_exists(data,d)){"downloaded"}
+        else if !latest.is_empty(){"missing"}
+        else if completed.iter().any(|d|super::downloads::local_file_exists(data,d)){"updateAvailable"}
+        else if !completed.is_empty(){"missing"}
+        else{"notDownloaded"}.into());
+    if p.release.is_some()&&!["checking","error","notChecked"].contains(&p.status.as_str()){update_status(p);}
+}
 pub fn update_status(p: &mut Project) {
+    if p.management_mode=="files" {
+        p.status=if p.release.is_none(){"noRelease"}else if p.file_status.as_deref()==Some("downloaded"){"upToDate"}else{"updateAvailable"}.into();
+        return;
+    }
+    p.file_status=None;
     let Some(release) = &p.release else { p.status = "noRelease".into(); return; };
     p.status = match p.installed_version.as_deref() {
         Some(installed) => match compare_versions(&release.tag, installed) {
@@ -108,6 +143,22 @@ pub fn update_status(p: &mut Project) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn ordinary_assets_are_downloadable_without_software_recommendation() {
+        let mut project=super::super::models::test_project("owner","repo");project.management_mode="files".into();
+        let mut assets=Vec::new();
+        for (id,name) in ["model.safetensors","textures.zip","data-linux-x64.zip","README","app-win-x64.zip"].iter().enumerate() {
+            let mut asset=ReleaseAsset{id:id as u64+1,name:(*name).into(),size:10,url:format!("https://github.com/owner/repo/releases/download/v1/{name}"),
+                content_type:"application/octet-stream".into(),digest:None,kind:String::new(),downloadable:false,installable:false,compatible:false,score:0,reason:String::new()};
+            classify_for_mode(&mut asset,&project);assert!(asset.downloadable,"{name}");assert!(!asset.installable,"{name}");assets.push(asset);
+        }
+        assert_eq!(select_for_project(&project,&assets,None),None);
+        assert_eq!(select_for_project(&project,&assets,Some(1)),Some(1));
+        project.asset_pattern=Some("*.zip".into());assert_eq!(select_for_project(&project,&assets,None),None);
+        project.asset_pattern=Some("*.safetensors".into());assert_eq!(select_for_project(&project,&assets,None),Some(1));
+        let mut asset=assets[0].clone();asset.size=super::super::network::MAX_DOWNLOAD_BYTES+1;
+        classify_for_mode(&mut asset,&project);assert!(!asset.downloadable);assert!(asset.reason.contains("4GB"));
+        asset.size=10;asset.url="https://example.com/file".into();classify_for_mode(&mut asset,&project);assert!(!asset.downloadable);
+    }
     #[test] fn versions_are_numeric() {
         assert_eq!(compare_versions("v1.10.0", "1.9.0"), Some(Ordering::Greater));
         assert_eq!(compare_versions("v2.1", "2.1.0"), Some(Ordering::Equal));
@@ -129,7 +180,7 @@ mod tests {
                 let assets:Vec<_>=names.iter().enumerate().map(|(index,name)| {
                     let mut asset=ReleaseAsset{id:index as u64+1,name:(*name).into(),size:100,
                         url:format!("https://github.com/{owner}/{repo}/releases/download/v1/{name}"),
-                        content_type:"application/octet-stream".into(),digest:None,kind:String::new(),compatible:false,score:0,reason:String::new()};
+                        content_type:"application/octet-stream".into(),digest:None,kind:String::new(),downloadable:false,installable:false,compatible:false,score:0,reason:String::new()};
                     classify_for_project(&mut asset,preference,None,owner,repo);asset
                 }).collect();
                 assert_eq!(choose(&assets),Some(1),"{repo}: {preference}");
@@ -139,7 +190,7 @@ mod tests {
         }
     }
     #[test] fn ambiguity_is_not_auto_selected() {
-        let a = ReleaseAsset { id:1,name:"Kazumi_windows_amd64.zip".into(),size:10,url:"https://github.com/Predidit/Kazumi/releases/download/v1/a.zip".into(),content_type:"".into(),digest:None,kind:"".into(),compatible:false,score:0,reason:"".into() };
+        let a = ReleaseAsset { id:1,name:"Kazumi_windows_amd64.zip".into(),size:10,url:"https://github.com/Predidit/Kazumi/releases/download/v1/a.zip".into(),content_type:"".into(),digest:None,kind:"".into(),downloadable:false,installable:false,compatible:false,score:0,reason:"".into() };
         let mut one=a.clone(); classify(&mut one,"portable",None); assert!(one.compatible);
         let mut two=one.clone(); two.id=2; assert_eq!(choose(&[one,two]),None);
         let mut arm=a; arm.name="Kazumi_windows_arm64.zip".into(); classify(&mut arm,"auto",None); assert!(!arm.compatible);

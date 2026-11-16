@@ -152,11 +152,6 @@ fn bundled_tool(app: &tauri::AppHandle, name: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_absolute() && path.is_file())
 }
 
-fn github_cli(app: &tauri::AppHandle) -> Option<PathBuf> {
-    // Always use the pinned, bundled component, never a different program from PATH.
-    bundled_tool(app, "gh.exe")
-}
-
 fn proxy_password_from_record(record: Option<&str>, settings: &ProxySettings) -> Option<String> {
     let record: Value = serde_json::from_str(record?).ok()?;
     if record["url"].as_str()? != settings.url || record["username"].as_str()? != settings.username { return None; }
@@ -248,6 +243,17 @@ async fn dispatch(window: tauri::WebviewWindow, app: tauri::AppHandle, state: ta
             let command = bundled_tool(&app, "releasehub-mcp.exe")
                 .ok_or("外部 AI 连接组件缺失，请使用完整的新版安装包或便携包。")?;
             mcp::integration_config(&command, &host.data_dir)
+        }
+        "github_cache_stats" => {
+            let api = host.github.handle(&action, payload).await?;
+            let feed = host.feed.cache_stats()?;
+            Ok(json!({"bytes": api["bytes"].as_u64().unwrap_or(0) + feed["bytes"].as_u64().unwrap_or(0),
+                "entries": api["entries"].as_u64().unwrap_or(0) + feed["entries"].as_u64().unwrap_or(0)}))
+        }
+        "github_cache_clear" => {
+            host.github.handle(&action, payload).await?;
+            host.feed.clear_cache()?;
+            Ok(Value::Null)
         }
         action if action.starts_with("github_") => host.github.handle(action, payload).await,
         "reveal_agent_connection" => host.connection().await,
@@ -480,7 +486,7 @@ pub fn run() {
             let proxy_password = load_proxy_password(&secrets, &core.proxy.settings()?)?;
             let proxy_password_configured = proxy_password.is_some();
             core.set_proxy_password(proxy_password)?;
-            let github = GithubService::new(auth_root.clone(), github_cli(app.handle()), core.proxy.clone());
+            let github = GithubService::new(auth_root.clone(), secrets.clone(), core.proxy.clone());
             let feed = GitHubFeedService::new(auth_root, core.proxy.clone());
             app.manage(feed.clone());
             core.set_github_service(github.clone());

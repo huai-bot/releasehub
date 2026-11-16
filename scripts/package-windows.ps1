@@ -40,7 +40,7 @@ Copy-Item -LiteralPath (Join-Path $root 'integrations/releasehub-agent.ps1') -De
 Copy-Item -LiteralPath (Join-Path $root 'docs/AGENT_GUIDE.md') -Destination (Join-Path $integrations 'AGENT_GUIDE.md')
 $tools = Join-Path $portable 'tools'
 New-Item -ItemType Directory -Path $tools | Out-Null
-foreach ($name in @('gh.exe', 'releasehub-mcp.exe', 'LICENSE.github-cli.txt', 'github-cli-version.txt')) {
+foreach ($name in @('releasehub-mcp.exe')) {
     $source = Join-Path $root ('src-tauri/tools/' + $name)
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing prepared public component: $name" }
     Copy-Item -LiteralPath $source -Destination (Join-Path $tools $name)

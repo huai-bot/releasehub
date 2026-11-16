@@ -75,11 +75,15 @@ impl Core {
         }
         match action {
             "get_settings" => output(self.store.settings()?),
-            "snapshot" => Ok(json!({"projects": self.store.projects()?, "downloads": self.store.downloads()?,
-                "buildTasks": self.store.tasks()?, "repositoryNotes": self.store.repository_notes()?, "settings": self.store.settings()?,
-                "runtime": {"appVersion": env!("CARGO_PKG_VERSION"), "dataDir": self.data_dir.to_string_lossy(),
-                    "portable": self.portable, "githubTokenConfigured": self.github.token_configured(),
-                    "agent": {"enabled": false, "address": null, "tokenConfigured": false, "error": null}}})),
+            "snapshot" => {
+                let downloads=self.store.downloads()?;let mut projects=self.store.projects()?;
+                for p in &mut projects { selection::update_file_status(p,&downloads,&self.data_dir); }
+                Ok(json!({"projects": projects, "downloads": downloads,
+                    "buildTasks": self.store.tasks()?, "repositoryNotes": self.store.repository_notes()?, "settings": self.store.settings()?,
+                    "runtime": {"appVersion": env!("CARGO_PKG_VERSION"), "dataDir": self.data_dir.to_string_lossy(),
+                        "portable": self.portable, "githubTokenConfigured": self.github.token_configured(),
+                        "agent": {"enabled": false, "address": null, "tokenConfigured": false, "error": null}}}))
+            },
             "add_project" => {
                 let input: AddProjectInput = decode(payload.get("input").cloned().ok_or("缺少项目信息")?)?;
                 output(self.add_project(input).await?)
@@ -107,6 +111,7 @@ impl Core {
                 let id = text(&payload, "projectId", 128)?; let version = text(&payload, "version", 200)?;
                 let path = optional_text(&payload, "path", 4096)?;
                 let p = self.store.mutate("projects", &id, |p: &mut Project| {
+                    require_software(p)?;
                     p.installed_version = Some(version); p.installed_path = path; p.installed_source = Some("manual".into());
                     selection::update_status(p); Ok(())
                 })?; self.changed(); output(p)
@@ -150,7 +155,7 @@ fn repair_portable_paths(store:&store::Store,data:&std::path::Path)->Result<(),S
         let safe=std::fs::symlink_metadata(&candidate).is_ok_and(|m|m.is_file()&&!m.file_type().is_symlink())
             && std::fs::canonicalize(&candidate).is_ok_and(|p|p.starts_with(data.join("downloads")));
         if safe{d.path=Some(candidate.to_string_lossy().into_owned());}
-        else{d.status="failed".into();d.path=None;d.error=Some("下载文件缺失或路径不安全，请重新下载".into());}
+        else{d.path=None;d.error=Some("下载文件缺失或路径不安全，请重新下载".into());}
         store.put_download(&d)?;
     }
     for mut p in store.projects()? {
@@ -191,7 +196,7 @@ mod tests {
         let time = now();
         DownloadRecord { id: uuid::Uuid::new_v4().to_string(), project_id: project.id.clone(), project_name: project.name.clone(),
             asset_id: 1, file_name: "fixture.zip".into(), tag: "v1.0.0".into(),
-            url: "https://github.com/fixture/project/releases/download/v1.0.0/fixture.zip".into(), kind: "portable".into(),
+            url: "https://github.com/fixture/project/releases/download/v1.0.0/fixture.zip".into(), kind: "portable".into(), installable: true,
             total_bytes: 10, received_bytes: 0, status: "queued".into(), path: None, sha256: None, verified: false,
             error: None, created_at: time.clone(), updated_at: time }
     }

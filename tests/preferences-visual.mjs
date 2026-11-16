@@ -33,6 +33,14 @@ try {
     };
     const nav = async label => page.locator('.sidebar .nav-item').filter({ has: page.locator('span', { hasText: new RegExp(`^${label}$`) }) }).click();
     await check('home-light');
+    await nav('资源库');
+    await check('library-light');
+    await page.getByRole('button', { name: '文件', exact: true }).click();
+    await page.getByRole('button', { name: '查看 文件资料（界面示例） 的版本与说明', exact: true }).click();
+    await check('files-detail-light');
+    await page.getByRole('complementary').getByRole('button', { name: '关闭资源详情', exact: true }).click();
+    await nav('下载');
+    await check('downloads-light');
     await nav('设置');
     await page.getByRole('heading', { name: '启动与导航', exact: true }).waitFor();
     await check('settings-light');
@@ -42,8 +50,14 @@ try {
     await check('proxy-light');
     await page.getByRole('button', { name: '深色 深色板岩', exact: true }).click();
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
-    await page.locator('.page-content').evaluate(element => element.scrollTop = 0);
+    await page.locator('#main-content').evaluate(element => element.scrollTop = 0);
     await check('settings-dark');
+    for (const [label, scheme] of [['青绿', 'teal'], ['柔紫', 'violet'], ['暖琥珀', 'amber']]) {
+      await page.getByRole('button', { name: label, exact: true }).click();
+      await page.waitForFunction(value => document.documentElement.dataset.colorScheme === value, scheme);
+      await check(`settings-${scheme}-dark`);
+    }
+    await page.getByRole('button', { name: '经典蓝', exact: true }).click();
     await nav('AI 连接');
     await page.getByRole('button', { name: '查看配置示例', exact: true }).click();
     await page.locator('#mcp-client-config').waitFor();

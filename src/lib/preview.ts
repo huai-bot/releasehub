@@ -40,22 +40,29 @@ export function createPreviewSnapshot(): Snapshot {
     asset(301, 'Predidit/Kazumi', '2.4.4', 'Kazumi_windows_2.4.4.zip', 42_991_616, true),
     { ...asset(302, 'Predidit/Kazumi', '2.4.4', 'Kazumi_windows_2.4.4.msix', 47_919_923), kind: 'other', compatible: false, reason: 'MSIX 请在原项目阅读安装要求；当前优先选择 ZIP' },
   ], '## 发行记录示例\n\n此为界面预览，已记录版本仅作演示。Windows 包的 x64 架构来自上游构建说明，而不是文件名猜测。\n\n[阅读真实发行说明](https://github.com/Predidit/Kazumi/releases)');
+  // Synthetic attachments under the public project identity; these URLs are not real release files.
+  const documents = release(4, 'huai-bot/releasehub', 'preview-files-v1', [
+    { ...asset(401, 'huai-bot/releasehub', 'preview-files-v1', 'releasehub-guide-example.pdf', 2_400_000), contentType: 'application/pdf', kind: 'other', compatible: false, downloadable: true, installable: false, score: 0, reason: '虚构 PDF 附件，仅用于界面预览' },
+    { ...asset(402, 'huai-bot/releasehub', 'preview-files-v1', 'releasehub-reference-example.zip', 18_600_000), contentType: 'application/zip', kind: 'other', compatible: false, downloadable: true, installable: false, score: 0, reason: '虚构资料压缩包，仅用于界面预览，不是软件安装包' },
+  ], '## 普通文件订阅示例\n\n> 这是虚构的界面示例。PDF、ZIP、版本号和下载状态均用于演示，不代表原项目发布了这些附件，也没有创建真实文件。\n\n- **PDF**：演示说明文档的保存。\n- **ZIP**：演示普通资料压缩包，不是免安装软件。\n- 同一发行版中的附件可以分别下载；文件只保存，不提供安装操作。');
   return {
     projects: [
       { ...project('preview-ff', 'Lake1059', 'FFmpegFreeUI', 'FFmpegFreeUI', '把繁琐的音视频处理，变成直观的操作。', '6.4.0', ff), installedSource: 'managed', installedPath: createPreviewManagedVersions('preview-ff')[0].path },
       project('preview-apk', 'RoutineMiku', 'apkstart', 'ApkStart', '轻巧的 Android 应用包管理工具。', 'v0.3.1', apk),
       project('preview-kazumi', 'Predidit', 'Kazumi', 'Kazumi', '简洁、开放的跨平台番剧客户端。', '2.4.4', kazumi, false),
+      { ...project('preview-files', 'huai-bot', 'releasehub', '文件资料（界面示例）', '虚构的 PDF 与 ZIP 附件，仅演示普通文件订阅；没有实际下载文件。', '', documents, false), managementMode: 'files', fileStatus: 'downloaded', installedVersion: null, installedPath: null, installedSource: null, selectedAssetId: null },
     ],
     downloads: [
       ...createPreviewManagedVersions('preview-ff').map((version) => ({ id: version.downloadId, projectId: 'preview-ff', projectName: 'FFmpegFreeUI', assetId: 100, fileName: ff.assets[0].name, tag: version.version, url: `https://github.com/Lake1059/FFmpegFreeUI/releases/download/${version.version}/${ff.assets[0].name}`, kind: 'portable' as const, totalBytes: ff.assets[0].size, receivedBytes: ff.assets[0].size, status: 'installed' as const, path: null, sha256: null, verified: false, error: null, createdAt: now, updatedAt: now })),
       { id: 'preview-dl1', projectId: 'preview-ff', projectName: 'FFmpegFreeUI', assetId: 101, fileName: ff.assets[0].name, tag: ff.tag, url: ff.assets[0].url, kind: 'portable', totalBytes: ff.assets[0].size, receivedBytes: ff.assets[0].size, status: 'completed', path: null, sha256: null, verified: false, error: null, createdAt: now, updatedAt: now },
       { id: 'preview-dl2', projectId: 'preview-apk', projectName: 'ApkStart', assetId: 201, fileName: apk.assets[0].name, tag: apk.tag, url: apk.assets[0].url, kind: 'portable', totalBytes: apk.assets[0].size, receivedBytes: 75_308_728, status: 'downloading', path: null, sha256: null, verified: false, error: null, createdAt: now, updatedAt: now },
+      ...documents.assets.map((file) => ({ id: `preview-file-${file.id}`, projectId: 'preview-files', projectName: '文件资料（界面示例）', assetId: file.id, fileName: file.name, tag: documents.tag, url: file.url, kind: 'other' as const, installable: false, totalBytes: file.size, receivedBytes: file.size, status: 'completed' as const, path: null, sha256: null, verified: false, error: null, createdAt: now, updatedAt: now })),
     ],
     buildTasks: [
       { id: 'preview-task1', projectId: 'preview-ff', projectName: 'FFmpegFreeUI', repository: 'Lake1059/FFmpegFreeUI', sourceRef: 'main', sourceCommit: null, target: 'windows-x64', instructions: '请在隔离环境编译 Windows x64 版本，并给出可追溯的构建结果。', status: 'queued', agentName: null, progress: null, artifactUrl: null, artifactSha256: null, error: null, createdAt: now, updatedAt: now },
     ],
     repositoryNotes: [],
     settings: { theme: 'system', startupPage: 'home', startupGithubTab: 'explore', navigationOrder: ['home', 'library', 'updates', 'downloads', 'github', 'agent'], proxy: { mode: 'system', url: '', username: '' }, checkIntervalMinutes: 60, notifications: true, autoDownload: false, maxConcurrentDownloads: 2, closeToTray: true, agentEnabled: false, agentPort: 47831 },
-    runtime: { appVersion: '0.3.1', dataDir: '.\\data（界面示例）', portable: true, githubTokenConfigured: false, proxyPasswordConfigured: false, agent: { enabled: false, address: null, tokenConfigured: false, error: null } },
+    runtime: { appVersion: '0.4.0', dataDir: '.\\data（界面示例）', portable: true, githubTokenConfigured: false, proxyPasswordConfigured: false, agent: { enabled: false, address: null, tokenConfigured: false, error: null } },
   };
 }

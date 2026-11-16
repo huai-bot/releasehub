@@ -138,8 +138,9 @@ fn launch_installer(_: &Path)->Result<(),String>{Err("安装器只能在 Windows
 impl Core{
     pub(crate) fn list_managed_versions(&self,project_id:&str)->Result<Vec<ManagedVersion>,String>{
         let project=self.store.project(project_id)?;
+        if project.management_mode=="files" {return Ok(Vec::new());}
         let mut versions=Vec::new();
-        for d in self.store.downloads()?.into_iter().filter(|d|d.project_id==project.id&&d.status=="installed"&&d.kind=="portable"){
+        for d in self.store.downloads()?.into_iter().filter(|d|d.project_id==project.id&&d.installable&&d.status=="installed"&&d.kind=="portable"){
             let Some(path)=managed_version_path(&self.data_dir,&d)? else{continue;};
             let active=project.installed_source.as_deref()==Some("managed")
                 &&project.installed_version.as_deref()==Some(d.tag.as_str())
@@ -151,8 +152,9 @@ impl Core{
     pub(crate) fn activate_managed_version(&self,project_id:&str,download_id:&str)->Result<Project,String>{
         let installing=self.installing.lock().map_err(|_|"安装状态不可用".to_string())?;
         if installing.contains(project_id){return Err("此项目正在安装，请稍后再切换版本".into());}
+        require_software(&self.store.project(project_id)?)?;
         let record=self.store.download(download_id)?;
-        if record.project_id!=project_id||record.status!="installed"||record.kind!="portable"{
+        if record.project_id!=project_id||!record.installable||record.status!="installed"||record.kind!="portable"{
             return Err("只能切换此项目已准备好的受管便携版本".into());
         }
         let path=managed_version_path(&self.data_dir,&record)?.ok_or("受管版本目录已丢失，无法切换")?;
@@ -170,11 +172,14 @@ impl Core{
     pub(crate) async fn install_download(self:&Arc<Self>,id:&str)->Result<Value,String>{
         let record=self.store.download(id)?;
         if !["completed","installed"].contains(&record.status.as_str()){return Err("请先完成下载后再安装".into());}
-        let project=self.store.project(&record.project_id)?;
-        {
+        let project={
             let mut installing=self.installing.lock().map_err(|_|"安装状态不可用".to_string())?;
+            let project=self.store.project(&record.project_id)?;
+            require_software(&project)?;
+            if !record.installable||!self.store.download(id)?.installable{return Err("此附件仅供下载，不能安装".into());}
             if !installing.insert(project.id.clone()){return Err("此项目正在安装，请稍后再试".into());}
-        }
+            project
+        };
         let transitioned=self.store.mutate("downloads",id,|d:&mut DownloadRecord|{
             if !["completed","installed"].contains(&d.status.as_str()){return Err("下载状态已改变，请重试".into());}
             d.status="installing".into();d.error=None;d.updated_at=now();Ok(())
@@ -192,6 +197,8 @@ impl Core{
         self.changed();result
     }
     fn install_blocking(&self,d:&DownloadRecord,p:&Project)->Result<Value,String>{
+        require_software(&self.store.project(&p.id)?)?;
+        if !d.installable||!self.store.download(&d.id)?.installable{return Err("此附件仅供下载，不能安装".into());}
         let source=verify_download(&self.data_dir,d)?;
         if d.kind=="installer"{
             launch_installer(&source)?;
@@ -224,6 +231,7 @@ impl Core{
         if let Err(e)=fs::rename(&stage,&destination){let _=fs::remove_dir_all(&stage);return Err(io_error(e));}
         let path=destination.to_string_lossy().into_owned();
         self.store.mutate("projects",&p.id,|p:&mut Project|{
+            require_software(p)?;
             p.installed_version=Some(d.tag.clone());p.installed_path=Some(path.clone());p.installed_source=Some("managed".into());
             super::selection::update_status(p);Ok(())
         })?;
@@ -241,7 +249,7 @@ mod tests{
         let source=folder.join("FFmpegFreeUI.x64.exe");let bytes=format!("local test data for {tag}; not a program");
         fs::write(&source,bytes.as_bytes()).unwrap();let time=now();
         let download=DownloadRecord{id,project_id:project.id.clone(),project_name:project.name.clone(),asset_id:1,
-            file_name:"FFmpegFreeUI.x64.exe".into(),tag:tag.into(),url:format!("https://github.com/Lake1059/FFmpegFreeUI/releases/download/{tag}/FFmpegFreeUI.x64.exe"),kind:"portable".into(),
+            file_name:"FFmpegFreeUI.x64.exe".into(),tag:tag.into(),url:format!("https://github.com/Lake1059/FFmpegFreeUI/releases/download/{tag}/FFmpegFreeUI.x64.exe"),kind:"portable".into(),installable:true,
             total_bytes:bytes.len()as u64,received_bytes:bytes.len()as u64,status:"completed".into(),path:Some(source.to_string_lossy().into_owned()),
             sha256:Some(format!("{:x}",Sha256::digest(bytes.as_bytes()))),verified:false,error:None,created_at:time.clone(),updated_at:time};
         core.store.put_download(&download).unwrap();let result=core.install_blocking(&download,project).unwrap();
@@ -256,7 +264,7 @@ mod tests{
         project.release=Some(Release{id:2,tag:"v2.0.0".into(),name:"2.0.0".into(),body:String::new(),published_at:now(),
             url:"https://github.com/Lake1059/FFmpegFreeUI/releases/tag/v2.0.0".into(),prerelease:false,
             assets:vec![ReleaseAsset{id:1,name:"FFmpegFreeUI.x64.exe".into(),size:32,url:"https://github.com/Lake1059/FFmpegFreeUI/releases/download/v2.0.0/FFmpegFreeUI.x64.exe".into(),
-                content_type:"application/octet-stream".into(),digest:None,kind:"portable".into(),compatible:true,score:100,reason:String::new()}]});
+                content_type:"application/octet-stream".into(),digest:None,kind:"portable".into(),downloadable:true,installable:true,compatible:true,score:100,reason:String::new()}]});
         core.store.put_project(&project).unwrap();
         let (old,old_path)=prepared_version(&core,&project,"v1.0.0");fs::write(old_path.join("settings.json"),b"old user settings").unwrap();
         let (new,new_path)=prepared_version(&core,&project,"v2.0.0");fs::write(new_path.join("settings.json"),b"new user settings").unwrap();
@@ -348,7 +356,7 @@ mod tests{
         for (index,tag) in ["6.5.0","6.6.0"].iter().enumerate(){
             let id=uuid::Uuid::new_v4().to_string();let folder=downloads::directory(&core.data_dir,&id).unwrap();let file=folder.join("FFmpegFreeUI.x64.exe");fs::write(&file,bytes).unwrap();
             let time=now();let download=DownloadRecord{id,project_id:project.id.clone(),project_name:project.name.clone(),asset_id:index as u64+1,
-                file_name:"FFmpegFreeUI.x64.exe".into(),tag:(*tag).into(),url:format!("https://github.com/Lake1059/FFmpegFreeUI/releases/download/{tag}/FFmpegFreeUI.x64.exe"),kind:"portable".into(),
+                file_name:"FFmpegFreeUI.x64.exe".into(),tag:(*tag).into(),url:format!("https://github.com/Lake1059/FFmpegFreeUI/releases/download/{tag}/FFmpegFreeUI.x64.exe"),kind:"portable".into(),installable:true,
                 total_bytes:bytes.len()as u64,received_bytes:bytes.len()as u64,status:"completed".into(),path:Some(file.to_string_lossy().into_owned()),
                 sha256:Some(format!("{:x}",Sha256::digest(bytes))),verified:false,error:None,created_at:time.clone(),updated_at:time};
             core.store.put_download(&download).unwrap();let result=core.install_blocking(&download,&project).unwrap();assert_eq!(result["installed"],true);
@@ -370,7 +378,7 @@ mod tests{
         let mut writer=zip::ZipWriter::new(fs::File::create(&source).unwrap());
         writer.start_file("ApkStart/readme.txt",zip::write::SimpleFileOptions::default()).unwrap();writer.write_all(b"local test data only").unwrap();writer.finish().unwrap();
         let bytes=fs::read(&source).unwrap();let time=now();let download=DownloadRecord{id,project_id:project.id.clone(),project_name:project.name.clone(),asset_id:1,
-            file_name:"ApkStart-win64-portable.zip".into(),tag:"v0.3.2".into(),url:"https://github.com/RoutineMiku/apkstart/releases/download/v0.3.2/ApkStart-win64-portable.zip".into(),kind:"portable".into(),
+            file_name:"ApkStart-win64-portable.zip".into(),tag:"v0.3.2".into(),url:"https://github.com/RoutineMiku/apkstart/releases/download/v0.3.2/ApkStart-win64-portable.zip".into(),kind:"portable".into(),installable:true,
             total_bytes:bytes.len()as u64,received_bytes:bytes.len()as u64,status:"completed".into(),path:Some(source.to_string_lossy().into_owned()),
             sha256:Some(format!("{:x}",Sha256::digest(&bytes))),verified:false,error:None,created_at:time.clone(),updated_at:time};
         core.store.put_download(&download).unwrap();

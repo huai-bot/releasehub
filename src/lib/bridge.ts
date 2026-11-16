@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isDownloadRecord } from './download-state';
 import type {
   AddProjectInput, AgentConnection, AgentIntegration, BuildTask, CheckResult, DownloadRecord,
-  GithubActivityPage, GithubFeedPage, GithubListRepositoryPage, GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubRepositoryTab, GithubStatus, GithubUserList,
+  GithubCacheEntry, GithubCacheOperation, GithubCacheStats, GithubActivityPage, GithubFeedPage, GithubListRepositoryPage, GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubRepositoryTab, GithubStatus, GithubUserList,
   InstallResult, ManagedVersion, Project, ProjectChanges, ProxySettings, ProxyTestResult, RepositoryNote, Settings, Snapshot,
 } from './types';
 
@@ -45,8 +45,11 @@ export interface Actions {
   test_proxy: { payload: { proxy?: ProxySettings; password?: string }; result: ProxyTestResult };
   get_repository_notes: { payload: Record<string, never>; result: RepositoryNote[] };
   save_repository_note: { payload: { repository: string; name: string; description: string }; result: RepositoryNote | null };
+  github_cache_read: { payload: { operation: GithubCacheOperation; parameters: Record<string, unknown> }; result: GithubCacheEntry | null };
+  github_cache_stats: { payload: Record<string, never>; result: GithubCacheStats };
+  github_cache_clear: { payload: Record<string, never>; result: null };
   github_status: { payload: Record<string, never>; result: GithubStatus };
-  github_login: { payload: { lists?: boolean }; result: GithubStatus };
+  github_login: { payload: { lists?: boolean; privateRepositories?: boolean }; result: GithubStatus };
   github_cancel_login: { payload: Record<string, never>; result: GithubStatus };
   github_logout: { payload: Record<string, never>; result: GithubStatus };
   github_repositories: { payload: { tab: GithubRepositoryTab; query: string; page: number }; result: GithubRepositoryPage };
