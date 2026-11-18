@@ -120,6 +120,8 @@ impl Default for ExternalDownloader {
         request_template: r#"{"downloadSource":{"link":"{url}","downloadPage":"{pageUrl}"},"name":"{fileName}","startDownload":true}"#.into() } }
 }
 pub fn default_color_scheme() -> String { "blue".into() }
+pub fn default_material() -> String { "acrylic".into() }
+pub fn default_blur() -> bool { true }
 pub fn validate_management_mode(mode: &str) -> Result<(), String> {
     if !["software", "files"].contains(&mode) { return Err("管理模式无效".into()); }
     Ok(())
@@ -137,6 +139,10 @@ pub struct Settings {
     pub theme: String, pub check_interval_minutes: u32, pub notifications: bool,
     #[serde(default = "default_color_scheme")]
     pub color_scheme: String,
+    #[serde(default = "default_material")]
+    pub material: String,
+    #[serde(default = "default_blur")]
+    pub blur: bool,
     pub auto_download: bool, pub max_concurrent_downloads: usize, pub close_to_tray: bool,
     #[serde(default = "default_download_connections")]
     pub download_connections: usize,
@@ -156,7 +162,7 @@ pub struct Settings {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Self { theme: "system".into(), color_scheme: default_color_scheme(), check_interval_minutes: 60, notifications: true,
+        Self { theme: "system".into(), color_scheme: default_color_scheme(), material: default_material(), blur: default_blur(), check_interval_minutes: 60, notifications: true,
             auto_download: false, max_concurrent_downloads: 2, close_to_tray: true,
             download_connections: default_download_connections(), use_external_downloader: false, external_downloader: ExternalDownloader::default(),
             agent_enabled: false, agent_port: 47831, startup_page: default_startup_page(),
@@ -168,6 +174,7 @@ impl Settings {
     pub fn validate(&self) -> Result<(), String> {
         if !["system", "light", "dark"].contains(&self.theme.as_str()) { return Err("主题设置无效".into()); }
         if !["blue", "teal", "violet", "amber"].contains(&self.color_scheme.as_str()) { return Err("配色设置无效".into()); }
+        if !["acrylic", "mica"].contains(&self.material.as_str()) { return Err("材质设置无效".into()); }
         if self.check_interval_minutes != 0 && !(5..=10080).contains(&self.check_interval_minutes) { return Err("检查间隔须为0（仅手动检查）或5至10080分钟".into()); }
         if !(1..=4).contains(&self.max_concurrent_downloads) { return Err("同时下载数量须为1至4".into()); }
         if !(1..=8).contains(&self.download_connections) { return Err("单文件连接数须为1至8".into()); }
@@ -281,6 +288,26 @@ mod tests {
             assert_eq!(serde_json::from_value::<DownloadRecord>(old.clone()).unwrap().installable,kind!="other");
             old["installable"]=serde_json::json!(false);
             assert!(!serde_json::from_value::<DownloadRecord>(old).unwrap().installable);
+        }
+    }
+    #[test] fn glass_preferences_default_validate_and_roundtrip() {
+        let defaults=Settings::default();
+        assert_eq!(defaults.material,"acrylic"); assert!(defaults.blur);
+        let mut old=serde_json::to_value(&defaults).unwrap();
+        for field in ["material","blur"] {old.as_object_mut().unwrap().remove(field);}
+        let restored:Settings=serde_json::from_value(old).unwrap();
+        assert_eq!(restored.material,"acrylic"); assert!(restored.blur);
+        for material in ["acrylic","mica"] {
+            for blur in [true,false] {
+                let mut settings=defaults.clone(); settings.material=material.into(); settings.blur=blur;
+                settings.validate().unwrap();
+                let restored:Settings=serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+                assert_eq!(restored.material,material); assert_eq!(restored.blur,blur);
+            }
+        }
+        for material in ["","glass","ACRYLIC"] {
+            let mut settings=defaults.clone(); settings.material=material.into();
+            assert_eq!(settings.validate().unwrap_err(),"材质设置无效");
         }
     }
     #[test] fn manual_checks_and_bounded_intervals_are_valid() {

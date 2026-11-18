@@ -68,7 +68,7 @@ describe('startup and desktop navigation', () => {
     const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
     const nav = (label: string) => [...target.querySelectorAll<HTMLButtonElement>('nav button')].find(item => item.querySelector('span')?.textContent === label)!;
     const active = () => target.querySelector<HTMLElement>('#main-content:not([hidden])')!;
-    expect(active().querySelectorAll('.project-card')).toHaveLength(snapshot.projects.length);
+    expect(active().querySelectorAll('.project-card')).toHaveLength(snapshot.projects.filter(project => project.managementMode !== 'files').length);
     [...active().querySelectorAll<HTMLButtonElement>('[aria-label="资源类型筛选"] button')].find(item => item.textContent === '文件')!.click(); await settle();
     expect(active().querySelectorAll('.project-card')).toHaveLength(1);
     expect(active().querySelector('.project-card')?.getAttribute('aria-label')).toBe('文件资料（界面示例）');
@@ -98,6 +98,48 @@ describe('startup and desktop navigation', () => {
     button('清理页面缓存').click(); await settle();
     expect(mocks.dispatch).toHaveBeenCalledWith('github_cache_clear', {});
     expect(target.textContent).toContain('下载文件和订阅保持不变');
+  });
+
+  it('keeps clicks separate from launching and exposes accessible context actions', async () => {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library';
+    snapshot.projects[0].executablePath = 'D:\\Fixture\\app.exe';
+    mocks.dispatch.mockImplementation(async (action: string) => { if (action === 'snapshot') return snapshot; if (action === 'open_project') return null; throw new Error(`Unexpected action ${action}`); });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    const identity = target.querySelector<HTMLButtonElement>('.card-identity')!;
+    expect(target.querySelector('[aria-label="资源类型筛选"]')?.textContent).not.toContain('全部');
+    expect(target.querySelector('.project-card .status-badge')).toBeNull();
+    identity.click(); await settle(); expect(target.querySelector('.detail-panel')).toBeNull();
+    identity.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('open_project', { projectId: snapshot.projects[0].id });
+    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'open_project')).toHaveLength(1);
+    identity.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })); await settle();
+    expect(target.querySelector('[role="menu"]')).not.toBeNull();
+    expect(document.activeElement?.textContent).toContain('打开软件');
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    expect(document.activeElement?.textContent).toContain('查看详情');
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); await settle();
+    expect(target.querySelector('[role="menu"]')).toBeNull(); expect(document.activeElement).toBe(identity);
+    identity.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 100, clientY: 100 })); await settle();
+    const details = [...target.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(item => item.textContent?.includes('查看详情'))!;
+    details.click(); await settle(); expect(target.querySelector('.detail-panel')).not.toBeNull();
+  });
+
+  it('persists material and blur choices and applies them to the whole app', async () => {
+    let snapshot = createPreviewSnapshot();
+    mocks.dispatch.mockImplementation(async (action: string, payload: { settings?: Partial<Settings> }) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'save_settings') { snapshot = { ...snapshot, settings: { ...snapshot.settings, ...payload.settings } }; return snapshot.settings; }
+      if (action === 'github_cache_stats') return { bytes: 0, entries: 0 };
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    button('设置').click(); await settle();
+    expect(document.documentElement.dataset.material).toBe('acrylic');
+    [...target.querySelectorAll<HTMLButtonElement>('.material-option')].find(item => item.textContent?.includes('云母'))!.click(); await settle();
+    expect(document.documentElement.dataset.material).toBe('mica');
+    button('背景模糊').click(); await settle();
+    expect(document.documentElement.dataset.blur).toBe('false');
+    expect(snapshot.settings.material).toBe('mica'); expect(snapshot.settings.blur).toBe(false);
   });
 
   it('keeps every workspace page once and persists keyboard and drag ordering', async () => {
@@ -144,7 +186,7 @@ describe('startup and desktop navigation', () => {
     const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
     const project = snapshot.projects.find(item => item.release?.assets.some(asset => asset.id === item.selectedAssetId && (asset.downloadable ?? asset.compatible)))!;
     const card = [...target.querySelectorAll<HTMLElement>('.project-card')].find(item => item.textContent?.includes(project.name))!;
-    card.querySelector<HTMLButtonElement>('.card-identity')!.click(); await settle();
+    card.querySelector<HTMLButtonElement>('.card-identity')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await settle();
     button('下载已选文件').click(); await settle();
     expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'send_external_download')).toHaveLength(0);
     button('取消').click(); await settle();

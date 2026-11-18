@@ -3,7 +3,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import InstallConfirmation from '../src/components/InstallConfirmation.svelte';
 import BackupPanel from '../src/components/BackupPanel.svelte';
 import ProjectDetail from '../src/components/ProjectDetail.svelte';
-import ProjectCard from '../src/components/ProjectCard.svelte';
+import Library from '../src/pages/Library.svelte';
 import Downloads from '../src/pages/Downloads.svelte';
 import { createPreviewSnapshot } from '../src/lib/preview';
 import type { BackupRecord, InstallPreview } from '../src/lib/types';
@@ -55,8 +55,8 @@ describe('explicit install confirmation', () => {
 describe('backup actions', () => {
   it('offers backup management on software cards and opens the management tab directly', async () => {
     const project = createPreviewSnapshot().projects[0], open = vi.fn();
-    const card = mount(ProjectCard, { target, props: { project, ontoggle: vi.fn(), onselect: vi.fn(), ondownload: vi.fn(), oncheck: vi.fn(), onBackup: open } });
-    await settle(); button('管理备份').click(); expect(open).toHaveBeenCalledWith(project); await unmount(card);
+    const card = mount(Library, { target, props: { projects: [project], query: '', selectedId: null, busy: false, onadd: vi.fn(), onselect: vi.fn(), ondownload: vi.fn(), oncheck: vi.fn(), onbatchdownload: vi.fn(), onBackup: open } });
+    await settle(); target.querySelector('.card-identity')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); await settle(); button('管理备份').click(); expect(open).toHaveBeenCalledWith(project); await unmount(card);
     mocks.dispatch.mockResolvedValue(backup);
     const app = mount(ProjectDetail, { target, props: { project, busy: false, initialTab: 'manage', onclose: vi.fn(), oncheck: vi.fn(), ondownload: vi.fn(), onupdate: vi.fn(), onmark: vi.fn(), onremove: vi.fn(), onopen: vi.fn(), onversions: vi.fn(), ondiagnostic: vi.fn(), onrun: vi.fn(), onexecutable: vi.fn(), onrestore: vi.fn(), ondeletebackup: vi.fn() } }); cleanup = async () => { await unmount(app); }; await settle();
     expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('管理');

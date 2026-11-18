@@ -55,6 +55,23 @@
 <div class="settings-layout">
   <section class="surface settings-section" aria-labelledby="appearance-title"><div class="settings-heading"><Icon name="sun" size={19} /><div><h2 id="appearance-title">外观</h2><p>窗口与工作空间使用统一主题</p></div></div><div class="theme-options">{#each themes as theme}<button class="theme-option" class:chosen={settings.theme === theme.id} aria-pressed={settings.theme === theme.id} disabled={busy} onclick={() => onsave({ theme: theme.id })}><div class={`theme-preview ${theme.id}`}><span class="preview-sidebar"></span><span class="preview-content"><i></i><i></i><i></i></span>{#if settings.theme === theme.id}<span class="theme-check"><Icon name="check" size={12} /></span>{/if}</div><span><Icon name={theme.icon} size={15} /><strong>{theme.title}</strong></span><small>{theme.description}</small></button>{/each}</div></section>
 
+  <section class="surface settings-section material-section" aria-labelledby="material-title">
+    <div class="settings-heading"><Icon name="monitor" size={19} /><div><h2 id="material-title">玻璃材质</h2><p>让侧栏、工作区和浮层呈现统一的玻璃质感</p></div></div>
+    <div class="material-options" role="group" aria-label="玻璃材质">
+      <button class="material-option" class:chosen={(settings.material ?? 'acrylic') === 'acrylic'} aria-pressed={(settings.material ?? 'acrylic') === 'acrylic'} disabled={busy} onclick={() => onsave({ material: 'acrylic' })}>
+        <span class="material-sample acrylic" aria-hidden="true"><i></i><i></i></span>
+        <span><strong>亚克力</strong><small>通透的磨砂玻璃，背景色彩与层次更鲜明</small></span>
+        {#if (settings.material ?? 'acrylic') === 'acrylic'}<Icon name="check" size={17} />{/if}
+      </button>
+      <button class="material-option" class:chosen={settings.material === 'mica'} aria-pressed={settings.material === 'mica'} disabled={busy} onclick={() => onsave({ material: 'mica' })}>
+        <span class="material-sample mica" aria-hidden="true"><i></i><i></i></span>
+        <span><strong>云母</strong><small>柔和的微透底色，层次更安静，适合长时间阅读</small></span>
+        {#if settings.material === 'mica'}<Icon name="check" size={17} />{/if}
+      </button>
+    </div>
+    <div class="setting-row last"><div><strong>背景模糊</strong><p>柔化玻璃后方的色彩；关闭后使用更实的底色，文字依然清晰。系统要求减少透明效果时会自动停用。</p></div><Toggle checked={settings.blur ?? true} label="背景模糊" disabled={busy} onchange={() => onsave({ blur: !(settings.blur ?? true) })} /></div>
+  </section>
+
   <section class="surface settings-section palette-section" aria-labelledby="palette-title">
     <div class="settings-heading"><Icon name="sun" size={19} /><div><h2 id="palette-title">配色方案</h2><p>搭配任意明暗模式，品牌图标保持经典蓝色</p></div></div>
     <div class="palette-options">{#each palettes as palette}<button class="palette-option" class:chosen={(settings.colorScheme ?? 'blue') === palette.id} aria-pressed={(settings.colorScheme ?? 'blue') === palette.id} disabled={busy} onclick={() => onsave({ colorScheme: palette.id })} style={`--palette-color:${palette.color};--palette-soft:${palette.soft}`}><span class="palette-swatch" aria-hidden="true"><i></i><i></i><i></i></span><strong>{palette.title}</strong>{#if (settings.colorScheme ?? 'blue') === palette.id}<Icon name="check" size={15} />{/if}</button>{/each}</div>

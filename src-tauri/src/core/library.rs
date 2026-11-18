@@ -23,6 +23,10 @@ struct LibrarySettings {
     theme: String, check_interval_minutes: u32, notifications: bool, auto_download: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     color_scheme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    material: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blur: Option<bool>,
     max_concurrent_downloads: usize, close_to_tray: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     download_connections: Option<usize>,
@@ -185,7 +189,7 @@ impl Core {
         let library=Library {version:1,projects:self.store.projects()?.into_iter().map(|p|Subscription{
             repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern,management_mode:p.management_mode}).collect(),
             repository_notes:self.store.repository_notes()?,
-            settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
+            settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),material:Some(s.material),blur:Some(s.blur),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
                 auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray,download_connections:Some(s.download_connections),
                 startup_page:Some(s.startup_page),startup_github_tab:Some(s.startup_github_tab),navigation_order:Some(s.navigation_order)}};
         serde_json::to_string_pretty(&library).map_err(|_|"订阅导出失败".into())
@@ -197,6 +201,8 @@ impl Core {
         let mut settings=self.store.settings()?;
         settings.theme=library.settings.theme;settings.check_interval_minutes=library.settings.check_interval_minutes;
         if let Some(color)=library.settings.color_scheme {settings.color_scheme=color;}
+        if let Some(material)=library.settings.material {settings.material=material;}
+        if let Some(blur)=library.settings.blur {settings.blur=blur;}
         settings.notifications=library.settings.notifications;settings.auto_download=library.settings.auto_download;
         settings.max_concurrent_downloads=library.settings.max_concurrent_downloads;settings.close_to_tray=library.settings.close_to_tray;
         if let Some(connections)=library.settings.download_connections {settings.download_connections=connections;}
@@ -240,6 +246,27 @@ mod tests {
         let legacy=Core::new(dir.path().join("legacy"),true,Arc::new(|_,_|{})).unwrap();legacy.import_library(&old.to_string()).unwrap();
         assert_eq!(legacy.store.projects().unwrap()[0].management_mode,"software");assert_eq!(legacy.store.settings().unwrap().color_scheme,"blue");
         old["settings"]["colorScheme"]=json!("red");assert!(legacy.import_library(&old.to_string()).is_err());
+    }
+    #[test] fn glass_preferences_export_import_and_preserve_legacy_choices() {
+        let dir=tempfile::tempdir().unwrap();
+        let source=Core::new(dir.path().join("source"),true,Arc::new(|_,_|{})).unwrap();
+        let target=Core::new(dir.path().join("target"),true,Arc::new(|_,_|{})).unwrap();
+        let mut settings=source.store.settings().unwrap(); settings.material="mica".into(); settings.blur=false;
+        source.store.save_settings(&settings).unwrap();
+        let export=source.export_library().unwrap();
+        let mut value:Value=serde_json::from_str(&export).unwrap();
+        assert_eq!(value["settings"]["material"],"mica"); assert_eq!(value["settings"]["blur"],false);
+        target.import_library(&export).unwrap();
+        assert_eq!(target.store.settings().unwrap().material,"mica"); assert!(!target.store.settings().unwrap().blur);
+        for key in ["material","blur"] {value["settings"].as_object_mut().unwrap().remove(key);}
+        target.import_library(&value.to_string()).unwrap();
+        assert_eq!(target.store.settings().unwrap().material,"mica"); assert!(!target.store.settings().unwrap().blur);
+        let legacy=Core::new(dir.path().join("legacy"),true,Arc::new(|_,_|{})).unwrap();
+        legacy.import_library(&value.to_string()).unwrap();
+        assert_eq!(legacy.store.settings().unwrap().material,"acrylic"); assert!(legacy.store.settings().unwrap().blur);
+        value["settings"]["material"]=json!("unsupported"); value["settings"]["blur"]=json!(true);
+        assert!(target.import_library(&value.to_string()).is_err());
+        assert_eq!(target.store.settings().unwrap().material,"mica"); assert!(!target.store.settings().unwrap().blur);
     }
     #[test] fn exports_only_subscriptions() {
         let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().into(),true,Arc::new(|_,_|{})).unwrap();

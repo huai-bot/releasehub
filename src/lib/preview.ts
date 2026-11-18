@@ -63,7 +63,7 @@ export function createPreviewSnapshot(): Snapshot {
       { id: 'preview-task1', projectId: 'preview-ff', projectName: 'FFmpegFreeUI', repository: 'Lake1059/FFmpegFreeUI', sourceRef: 'main', sourceCommit: null, target: 'windows-x64', instructions: '请在隔离环境编译 Windows x64 版本，并给出可追溯的构建结果。', status: 'queued', agentName: null, progress: null, artifactUrl: null, artifactSha256: null, error: null, createdAt: now, updatedAt: now },
     ],
     repositoryNotes: [],
-    settings: { theme: 'system', startupPage: 'home', startupGithubTab: 'explore', navigationOrder: ['home', 'library', 'updates', 'downloads', 'github', 'agent'], proxy: { mode: 'system', url: '', username: '' }, checkIntervalMinutes: 60, notifications: true, autoDownload: false, maxConcurrentDownloads: 2, closeToTray: true, agentEnabled: false, agentPort: 47831 },
+    settings: { theme: 'system', colorScheme: 'blue', material: 'acrylic', blur: true, startupPage: 'home', startupGithubTab: 'explore', navigationOrder: ['home', 'library', 'updates', 'downloads', 'github', 'agent'], proxy: { mode: 'system', url: '', username: '' }, checkIntervalMinutes: 60, notifications: true, autoDownload: false, maxConcurrentDownloads: 2, closeToTray: true, agentEnabled: false, agentPort: 47831 },
     runtime: { appVersion: '0.4.0', dataDir: '.\\data（界面示例）', portable: true, githubTokenConfigured: false, proxyPasswordConfigured: false, agent: { enabled: false, address: null, tokenConfigured: false, error: null } },
   };
 }

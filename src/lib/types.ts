@@ -2,6 +2,7 @@ export type Channel = 'stable' | 'preview';
 export type AssetPreference = 'auto' | 'portable' | 'installer';
 export type Theme = 'system' | 'light' | 'dark';
 export type ColorScheme = 'blue' | 'teal' | 'violet' | 'amber';
+export type Material = 'acrylic' | 'mica';
 export type ManagementMode = 'software' | 'files';
 export type FileStatus = 'notDownloaded' | 'downloaded' | 'updateAvailable' | 'missing';
 export type ProjectStatus = 'notChecked' | 'checking' | 'upToDate' | 'updateAvailable' | 'versionUnknown' | 'noRelease' | 'noCompatibleAsset' | 'error';
@@ -137,6 +138,8 @@ export interface ExternalDownloader {
 export interface Settings {
   theme: Theme;
   colorScheme?: ColorScheme;
+  material?: Material;
+  blur?: boolean;
   startupPage: WorkspacePage;
   startupGithubTab: GithubTab;
   navigationOrder: WorkspacePage[];
