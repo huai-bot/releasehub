@@ -25,6 +25,8 @@ struct LibrarySettings {
     color_scheme: Option<String>,
     max_concurrent_downloads: usize, close_to_tray: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    download_connections: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     startup_page: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     startup_github_tab: Option<String>,
@@ -35,7 +37,7 @@ fn empty_project(owner:String,repo:String,channel:String,preference:String) -> P
     let time=now();
     Project { id:uuid::Uuid::new_v4().to_string(), name:repo.clone(),
         url:format!("https://github.com/{owner}/{repo}"),owner,repo,description:String::new(),avatar_url:None,
-        channel,preference,management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,installed_source:None,
+        channel,preference,management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,installed_source:None,executable_path:None,
         release:None,selected_asset_id:None,status:"notChecked".into(),checked_at:None,error:None,
         default_branch:"main".into(),source_head_sha:None,source_ahead:None,created_at:time }
 }
@@ -68,7 +70,7 @@ impl Core {
     }
     pub(crate) fn update_project(&self,id:&str,changes:ProjectChanges)->Result<Project,String> {
         let installing=self.installing.lock().map_err(|_|"安装状态不可用".to_string())?;
-        if changes.management_mode.is_some()&&installing.contains(id){return Err("正在安装，完成后才能切换管理模式".into());}
+        if installing.contains(id)||self.store.journals()?.iter().any(|j|j.backup.project_id==id) {return Err("正在安装或等待恢复，完成后才能修改项目".into());}
         let _queue=self.download_queue.lock().map_err(|_|"下载队列不可用".to_string())?;
         let downloads=self.store.downloads()?;
         let p=self.store.mutate("projects",id,|p:&mut Project| {
@@ -78,10 +80,10 @@ impl Core {
                 p.management_mode=mode;
             }
             if p.management_mode=="files" {
-                if changes.installed_version.as_ref().is_some_and(Option::is_some)||changes.installed_path.as_ref().is_some_and(Option::is_some) {
+                if changes.installed_version.as_ref().is_some_and(Option::is_some)||changes.installed_path.as_ref().is_some_and(Option::is_some)||changes.executable_path.as_ref().is_some_and(Option::is_some) {
                     return Err("文件项目不能填写已安装版本或路径".into());
                 }
-                p.installed_version=None;p.installed_path=None;p.installed_source=None;
+                p.installed_version=None;p.installed_path=None;p.installed_source=None;p.executable_path=None;
             }
             if let Some(c)=changes.channel { p.channel=c; p.release=None;p.selected_asset_id=None; p.status="notChecked".into(); }
             if let Some(v)=changes.preference { p.preference=v; }
@@ -94,7 +96,17 @@ impl Core {
                 p.installed_version=v.map(|s| bounded_text(&s,200,"已安装版本")).transpose()?;
                 p.installed_source=p.installed_version.as_ref().map(|_| "manual".into());
             }
-            if let Some(path)=changes.installed_path { p.installed_path=path.map(|s| bounded_text(&s,4096,"已安装路径")).transpose()?; }
+            if let Some(path)=changes.installed_path {
+                p.installed_path=path.map(|s| bounded_text(&s,4096,"已安装路径")).transpose()?;
+                p.executable_path=None;
+                if p.installed_version.is_some(){p.installed_source=Some("manual".into());}
+            }
+            if let Some(executable)=changes.executable_path {
+                p.executable_path=executable.map(|s|{
+                    let s=bounded_text(&s,4096,"主程序路径")?;
+                    self.validate_executable(p,&s).map(|path|path.to_string_lossy().into_owned())
+                }).transpose()?;
+            }
             if let Some(mut r)=p.release.take() {
                 for a in &mut r.assets { selection::classify_for_mode(a,p); }
                 p.selected_asset_id=if p.management_mode=="files" {selection::select_for_project(p,&r.assets,p.selected_asset_id)}else{selection::choose(&r.assets)};
@@ -174,7 +186,7 @@ impl Core {
             repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern,management_mode:p.management_mode}).collect(),
             repository_notes:self.store.repository_notes()?,
             settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
-                auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray,
+                auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray,download_connections:Some(s.download_connections),
                 startup_page:Some(s.startup_page),startup_github_tab:Some(s.startup_github_tab),navigation_order:Some(s.navigation_order)}};
         serde_json::to_string_pretty(&library).map_err(|_|"订阅导出失败".into())
     }
@@ -187,6 +199,7 @@ impl Core {
         if let Some(color)=library.settings.color_scheme {settings.color_scheme=color;}
         settings.notifications=library.settings.notifications;settings.auto_download=library.settings.auto_download;
         settings.max_concurrent_downloads=library.settings.max_concurrent_downloads;settings.close_to_tray=library.settings.close_to_tray;
+        if let Some(connections)=library.settings.download_connections {settings.download_connections=connections;}
         if let Some(page)=library.settings.startup_page {settings.startup_page=page;}
         if let Some(tab)=library.settings.startup_github_tab {settings.startup_github_tab=tab;}
         if let Some(order)=library.settings.navigation_order {settings.navigation_order=order;}
@@ -247,21 +260,23 @@ mod tests {
         let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().join("source"),true,Arc::new(|_,_|{})).unwrap();
         let note=RepositoryNote { repository:"Owner/Unsubscribed".into(),name:"本地名称".into(),description:"不会发给 GitHub".into(),updated_at:now() };
         core.store.save_repository_note(&note).unwrap();
-        let mut settings=core.store.settings().unwrap(); settings.startup_page="github".into(); settings.startup_github_tab="starred".into(); settings.navigation_order.reverse();
+        let mut settings=core.store.settings().unwrap(); settings.startup_page="github".into(); settings.startup_github_tab="starred".into(); settings.navigation_order.reverse(); settings.download_connections=8; settings.use_external_downloader=true; settings.external_downloader.name="fixture-local-downloader".into();
         settings.proxy=crate::proxy::ProxySettings { mode:"manual".into(),url:"http://127.0.0.1:9".into(),username:"fixture-proxy-user".into() };
         core.store.save_settings(&settings).unwrap(); core.proxy.configure(settings.proxy.clone(),Some("fixture-only-password".into())).unwrap();
         let export=core.export_library().unwrap(); let value:Value=serde_json::from_str(&export).unwrap();
         assert!(value["settings"].get("proxy").is_none()); assert!(!export.contains("fixture-proxy-user")); assert!(!export.contains("fixture-only-password"));
+        assert_eq!(value["settings"]["downloadConnections"],8); assert!(value["settings"].get("externalDownloader").is_none()); assert!(value["settings"].get("useExternalDownloader").is_none()); assert!(!export.contains("fixture-local-downloader"));
         assert_eq!(value["repositoryNotes"][0]["repository"],"owner/unsubscribed");
         let target=Core::new(dir.path().join("target"),true,Arc::new(|_,_|{})).unwrap();
         let mut target_settings=target.store.settings().unwrap(); target_settings.proxy.mode="direct".into(); target.store.save_settings(&target_settings).unwrap();
         let result=target.import_library(&export).unwrap(); assert_eq!(result["imported"],0); assert_eq!(result["notesImported"],1);
         assert_eq!(target.store.settings().unwrap().startup_page,"github"); assert_eq!(target.store.settings().unwrap().startup_github_tab,"starred");
         assert_eq!(target.store.settings().unwrap().navigation_order,settings.navigation_order); assert_eq!(target.store.settings().unwrap().proxy.mode,"direct");
+        assert_eq!(target.store.settings().unwrap().download_connections,8); assert!(!target.store.settings().unwrap().use_external_downloader);
         assert_eq!(target.store.repository_notes().unwrap()[0].name,"本地名称");
         let mut old=value; old.as_object_mut().unwrap().remove("repositoryNotes");
-        for key in ["startupPage","startupGithubTab","navigationOrder"] {old["settings"].as_object_mut().unwrap().remove(key);}
-        target.import_library(&old.to_string()).unwrap(); assert_eq!(target.store.settings().unwrap().startup_page,"github");
+        for key in ["startupPage","startupGithubTab","navigationOrder","downloadConnections"] {old["settings"].as_object_mut().unwrap().remove(key);}
+        target.import_library(&old.to_string()).unwrap(); assert_eq!(target.store.settings().unwrap().startup_page,"github"); assert_eq!(target.store.settings().unwrap().download_connections,8);
         assert_eq!(target.store.repository_notes().unwrap().len(),1);
     }
     #[test] fn imports_keep_newer_notes_and_reject_invalid_notes_before_writing() {

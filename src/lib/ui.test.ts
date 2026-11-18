@@ -216,7 +216,7 @@ describe('software and file resource capabilities', () => {
     expect(getDownloadStatus({ kind: 'installer', installable: false, status: 'installed' }).label).toBe('已下载');
     expect(getDownloadStatus({ kind: 'other', status: 'completed' }).label).toBe('已下载');
     expect(getDownloadStatus({ kind: 'portable', status: 'completed' }).label).toBe('已下载 · 待安装');
-    expect(getDownloadStatus({ kind: 'portable', status: 'installed' }).label).toBe('已准备');
+    expect(getDownloadStatus({ kind: 'portable', status: 'installed' }).label).toBe('已安装');
     expect(getDownloadStatus({ kind: 'other', status: 'failed' }).label).toBe('下载失败');
   });
 });

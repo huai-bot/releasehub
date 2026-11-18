@@ -147,7 +147,9 @@ code, .mono, kbd { font-family: "Cascadia Code", Consolas, "Microsoft YaHei", mo
 .operation-error { display: flex; align-items: center; gap: 9px; padding: 8px 24px; background: var(--danger-bg); color: var(--danger); border-bottom: 1px solid var(--border); font-size: 12px; }
 .operation-error span { flex: 1; overflow-wrap: anywhere; }
 .workspace-content { flex: 1; min-height: 0; display: flex; overflow: hidden; position: relative; }
-.page-content { padding: 26px 28px 30px; flex: 1; min-width: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.page-content { padding: 26px 28px 30px; flex: 1; min-width: 0; overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+.page-content.github-workspace { display: flex; flex-direction: column; overflow: hidden; }
+.page-content.github-workspace[hidden] { display: none; }
 .page-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; padding-bottom: 0; border-bottom: 0; }
 .eyebrow { display: none; }
 .page-heading h1 { font-size: 24px; font-weight: 700; letter-spacing: -.4px; line-height: 1.35; }
@@ -252,7 +254,8 @@ code, .mono, kbd { font-family: "Cascadia Code", Consolas, "Microsoft YaHei", mo
 .empty-state.spacious { padding: 68px 30px; min-height: 300px; }
 .empty-state.compact { padding: 27px 10px; }
 .empty-state.compact p { font-size: 11px; }
-.detail-panel { flex: 0 0 379px; width: 379px; min-width: 0; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border); overflow: hidden; }
+.detail-panel { flex: 0 0 379px; width: 379px; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border); overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+.detail-panel > * { flex-shrink: 0; }
 .detail-topline { padding: 12px 18px 4px 23px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 10px; flex-shrink: 0; }
 .detail-identity { text-align: center; padding: 4px 25px 17px; flex-shrink: 0; }
 .app-avatar.large { width: 53px; height: 53px; margin: 0 auto 10px; font-size: 17px; border-radius: 12px; }
@@ -278,7 +281,7 @@ code, .mono, kbd { font-family: "Cascadia Code", Consolas, "Microsoft YaHei", mo
 .detail-tabs button { color: var(--muted); padding: 11px 0; font-size: 11px; border-bottom: 2px solid transparent; }
 .detail-tabs button.active { color: var(--accent); border-color: var(--accent); font-weight: 600; }
 .detail-tabs button span { font-size: 9px; }
-.detail-content { padding: 16px 23px 20px; overflow-y: auto; flex: 1; min-height: 80px; }
+.detail-content { padding: 16px 23px 20px; flex: 1 0 auto; min-height: 80px; }
 .release-title { display: flex; justify-content: space-between; align-items: center; gap: 7px; margin-bottom: 11px; font-size: 11px; color: var(--subtle); }
 .release-title span { overflow-wrap: anywhere; }
 .release-markdown { color: var(--subtle); font-size: 11.5px; line-height: 1.85; overflow-wrap: anywhere; }
@@ -291,7 +294,7 @@ code, .mono, kbd { font-family: "Cascadia Code", Consolas, "Microsoft YaHei", mo
 .release-markdown ul, .release-markdown ol { padding-left: 20px; margin: 8px 0; }
 .release-markdown li { padding-left: 2px; margin: 5px 0; }
 .release-markdown li::marker { color: var(--accent); }
-.release-markdown blockquote { border-left: 2px solid var(--border-strong); background: var(--surface-soft); padding: 6px 10px; color: var(--muted); margin: 12px 0; border-radius: 0 4px 4px 0; }
+.release-markdown blockquote { border-left: 1px solid var(--border-strong); background: var(--surface-soft); padding: 6px 10px; color: var(--muted); margin: 12px 0; border-radius: 0 4px 4px 0; }
 .release-markdown blockquote p { margin: 3px 0; }
 .release-markdown code { background: var(--surface-soft); padding: 1px 4px; border-radius: 3px; font-size: .92em; }
 .release-markdown pre { max-width: 100%; overflow-x: auto; background: var(--surface-soft); padding: 12px; border: 1px solid var(--border); border-radius: 6px; }

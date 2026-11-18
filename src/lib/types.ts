@@ -48,6 +48,7 @@ export interface Project {
   assetPattern: string | null;
   installedVersion: string | null;
   installedPath: string | null;
+  executablePath?: string | null;
   installedSource: 'manual' | 'managed' | null;
   release: Release | null;
   selectedAssetId: number | null;
@@ -60,7 +61,7 @@ export interface Project {
   createdAt: string;
 }
 
-export type DownloadStatus = 'queued' | 'downloading' | 'completed' | 'failed' | 'cancelled' | 'installing' | 'installed';
+export type DownloadStatus = 'queued' | 'downloading' | 'external' | 'completed' | 'failed' | 'cancelled' | 'installing' | 'installed' | 'deleted';
 export interface DownloadRecord {
   installable?: boolean;
   id: string;
@@ -127,6 +128,12 @@ export interface RepositoryNote {
   updatedAt: string;
 }
 
+export interface ExternalDownloader {
+  name: string;
+  endpoint: string;
+  requestTemplate: string;
+}
+
 export interface Settings {
   theme: Theme;
   colorScheme?: ColorScheme;
@@ -138,6 +145,9 @@ export interface Settings {
   notifications: boolean;
   autoDownload: boolean;
   maxConcurrentDownloads: number;
+  downloadConnections?: number;
+  useExternalDownloader?: boolean;
+  externalDownloader?: ExternalDownloader;
   closeToTray: boolean;
   agentEnabled: boolean;
   agentPort: number;
@@ -182,6 +192,7 @@ export interface ProjectChanges {
   assetPattern?: string | null;
   installedVersion?: string | null;
   installedPath?: string | null;
+  executablePath?: string | null;
   selectedAssetId?: number | null;
 }
 
@@ -190,6 +201,37 @@ export interface InstallResult {
   message: string;
   path: string;
   installed: boolean;
+}
+
+export interface InstallPreview {
+  downloadId: string;
+  projectId: string;
+  targetPath: string;
+  backupPath: string;
+  previousVersion: string | null;
+  nextVersion: string;
+  backupBytes: number;
+  packageBytes: number;
+  availableBytes: number;
+  kind: 'installer' | 'portable';
+  archiveRoots: string[];
+  suggestedRoot: string | null;
+  requiresRootSelection: boolean;
+  legacyManaged: boolean;
+}
+
+export interface BackupRecord {
+  projectId: string;
+  downloadId: string;
+  version: string | null;
+  installedSource: 'manual' | 'managed' | null;
+  targetPath: string;
+  path: string;
+  createdAt: string;
+  bytes: number;
+  kind: 'installer' | 'portable';
+  phase: 'ready' | 'installing' | 'restoring' | 'recoveryRequired';
+  error: string | null;
 }
 
 export interface CheckResult {

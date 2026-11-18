@@ -66,6 +66,9 @@ export class GithubCacheClient {
   private pending = new Map<string, Promise<GithubCacheEntry>>();
   private observers = new Map<string, Set<(entry: GithubCacheEntry) => void>>();
   private operationRevisions = new Map<GithubCacheOperation, number>();
+  private prefetchQueue: Array<() => Promise<void>> = [];
+  private prefetchKeys = new Set<string>();
+  private prefetchActive = 0;
   constructor(private now: () => number = Date.now) {}
 
   setSession(identity: string, revision?: number): boolean {
@@ -73,7 +76,35 @@ export class GithubCacheClient {
     this.identity = identity; this.revision = revision; this.clear(); return true;
   }
 
-  clear(): void { this.generation += 1; this.memory.clear(); this.pending.clear(); this.observers.clear(); }
+  clear(): void { this.generation += 1; this.memory.clear(); this.pending.clear(); this.observers.clear(); this.prefetchQueue = []; this.prefetchKeys.clear(); }
+
+  /** Share one bounded queue across Stars batches, hover and detail preloads. */
+  prefetch<O extends GithubCacheOperation>(operation: O, parameters: Payload<O>, priority = false): void {
+    if (this.isFresh(operation, parameters)) return;
+    const generation = this.generation;
+    const revision = this.operationRevisions.get(operation) ?? 0;
+    const key = `${generation}:${revision}:${githubCacheKey(operation, parameters)}`;
+    if (this.prefetchKeys.has(key)) return;
+    this.prefetchKeys.add(key);
+    const job = async () => {
+      try {
+        if (generation === this.generation && revision === (this.operationRevisions.get(operation) ?? 0)) {
+          await this.load(operation, parameters, { preferFreshCache: true });
+        }
+      } catch { /* Background failures must not replace the view or the user's selection. */ }
+      finally { this.prefetchKeys.delete(key); }
+    };
+    if (priority) this.prefetchQueue.unshift(job); else this.prefetchQueue.push(job);
+    this.drainPrefetch();
+  }
+
+  private drainPrefetch(): void {
+    while (this.prefetchActive < 2 && this.prefetchQueue.length) {
+      const job = this.prefetchQueue.shift()!;
+      this.prefetchActive += 1;
+      void job().finally(() => { this.prefetchActive -= 1; this.drainPrefetch(); });
+    }
+  }
 
   isFresh<O extends GithubCacheOperation>(operation: O, parameters: Payload<O>): boolean {
     const stored = this.memory.get(githubCacheKey(operation, parameters));
@@ -90,7 +121,7 @@ export class GithubCacheClient {
     }
   }
 
-  async load<O extends GithubCacheOperation>(operation: O, parameters: Payload<O>, options: { force?: boolean; onCached?: (entry: Entry<O>) => void } = {}): Promise<Entry<O>> {
+  async load<O extends GithubCacheOperation>(operation: O, parameters: Payload<O>, options: { force?: boolean; preferFreshCache?: boolean; onCached?: (entry: Entry<O>) => void } = {}): Promise<Entry<O>> {
     const key = githubCacheKey(operation, parameters);
     const generation = this.generation;
     const operationRevision = this.operationRevisions.get(operation) ?? 0;
@@ -111,8 +142,13 @@ export class GithubCacheClient {
           try { cached = await readGithubCache(operation, parameters, this.revision); } catch { /* Older hosts and cache I/O failures remain usable. */ }
           if (!current()) throw new GithubCacheSuperseded();
           if (cached) {
-            this.memory.set(key, { entry: cached, verifiedAt: null, ttl: ttlFor(operation, parameters) });
+            const ttl = ttlFor(operation, parameters);
+            const fresh = options.preferFreshCache && cached.fresh && this.now() - cached.updatedAt < ttl;
+            this.memory.set(key, { entry: cached, verifiedAt: fresh ? cached.updatedAt : null, ttl });
             this.observers.get(key)?.forEach((notify) => notify(cached));
+            // Editors and background preloads can trust a validated, current-session disk entry.
+            // Browsing keeps its existing stale-while-revalidate policy.
+            if (fresh) return cached;
           }
         }
         if (!current()) throw new GithubCacheSuperseded();

@@ -67,8 +67,8 @@ describe('single desktop command', () => {
   });
   it('retains the explicit installer confirmation in the host request', async () => {
     mocks.invoke.mockResolvedValue({ installed: false, message: 'installer opened', kind: 'installer', path: 'test.exe' });
-    const result = await dispatch('install_download', { id: 'download-1', confirmed: true });
-    expect(mocks.invoke).toHaveBeenCalledWith('dispatch', { action: 'install_download', payload: { id: 'download-1', confirmed: true } });
+    const result = await dispatch('install_download', { id: 'download-1', confirmed: true, targetPath: 'D:\\Software\\Demo' });
+    expect(mocks.invoke).toHaveBeenCalledWith('dispatch', { action: 'install_download', payload: { id: 'download-1', confirmed: true, targetPath: 'D:\\Software\\Demo' } });
     expect(result.installed).toBe(false);
   });
   it('rejects missing desktop services even in the test development environment', async () => {

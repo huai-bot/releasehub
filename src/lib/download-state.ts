@@ -1,6 +1,6 @@
 import type { DownloadRecord, Snapshot } from './types';
 
-const statuses = ['queued', 'downloading', 'completed', 'failed', 'cancelled', 'installing', 'installed'];
+const statuses = ['queued', 'downloading', 'external', 'completed', 'failed', 'cancelled', 'installing', 'installed', 'deleted'];
 const kinds = ['portable', 'installer', 'other'];
 const textFields = ['id', 'projectId', 'projectName', 'fileName', 'tag', 'url', 'createdAt', 'updatedAt'];
 const optionalTextFields = ['path', 'sha256', 'error'];

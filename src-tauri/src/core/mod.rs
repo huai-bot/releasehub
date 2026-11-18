@@ -3,7 +3,10 @@ mod store;
 mod network;
 mod selection;
 mod downloads;
+mod download_transfer;
+mod external_downloads;
 mod install;
+mod update;
 mod library;
 mod tasks;
 
@@ -26,6 +29,7 @@ pub struct Core {
     pub(crate) download_queue: Mutex<()>,
     pub(crate) installing: Mutex<std::collections::HashSet<String>>,
     pub(crate) checks: tokio::sync::Mutex<()>,
+    pub(crate) external_requests: tokio::sync::Mutex<()>,
     // Keep this last so the database and other fields close before the directory lock is released.
     _data_lock: std::fs::File,
 }
@@ -45,10 +49,10 @@ impl Core {
             std::fs::TryLockError::WouldBlock => "此资料库已被另一个 ReleaseHub 占用，请从右下角托盘打开原窗口；如需重启，请先从托盘退出原程序".to_string(),
             std::fs::TryLockError::Error(_) => "无法锁定资料库，请使用本地可写的资料库文件夹".to_string(),
         })?;
-        for folder in ["downloads", "apps"] {
+        for folder in ["downloads", "apps", "backups"] {
             let path = data_dir.join(folder);
             std::fs::create_dir_all(&path).map_err(|_| "无法创建数据文件夹".to_string())?;
-            if std::fs::symlink_metadata(&path).map_err(|_| "无法读取数据文件夹".to_string())?.file_type().is_symlink()
+            if update::linked(&std::fs::symlink_metadata(&path).map_err(|_| "无法读取数据文件夹".to_string())?)
                 || !std::fs::canonicalize(&path).map_err(|_| "无法读取数据文件夹".to_string())?.starts_with(&data_dir) {
                 return Err("数据文件夹不能链接到外部位置".into());
             }
@@ -56,10 +60,13 @@ impl Core {
         let store = store::Store::new(&data_dir.join("releasehub.sqlite3"))?;
         repair_portable_paths(&store,&data_dir)?;
         let proxy = Arc::new(ProxyState::new(store.settings()?.proxy, None)?);
-        Ok(Arc::new(Self { store, data_dir, portable, events,
+        let core=Arc::new(Self { store, data_dir, portable, events,
             github: network::Github::new(proxy.clone())?, proxy, active_downloads: Mutex::new(HashMap::new()),
             download_queue: Mutex::new(()), installing: Mutex::new(std::collections::HashSet::new()),
-            checks: tokio::sync::Mutex::new(()), _data_lock: data_lock }))
+            checks: tokio::sync::Mutex::new(()), external_requests: tokio::sync::Mutex::new(()), _data_lock: data_lock });
+        core.repair_backup_paths()?;
+        core.recover_installs()?;
+        Ok(core)
     }
     pub fn set_github_token(&self, token: Option<String>) { self.github.set_token(token); }
     pub fn set_proxy_password(&self, password: Option<String>) -> Result<(), String> { self.proxy.set_password(password) }
@@ -93,14 +100,40 @@ impl Core {
                 let changes: ProjectChanges = decode(payload.get("changes").cloned().ok_or("缺少修改内容")?)?;
                 output(self.update_project(&id, changes)?)
             }
-            "remove_project" => { self.store.remove_project(&text(&payload, "id", 128)?)?; self.changed(); Ok(Value::Null) }
+            "remove_project" => {
+                let id=text(&payload,"id",128)?;
+                let installing=self.installing.lock().map_err(|_|"安装状态不可用".to_string())?;
+                if installing.contains(&id)||self.store.journals()?.iter().any(|j|j.backup.project_id==id){return Err("安装或恢复未结束，不能删除项目".into());}
+                if self.store.backup(&id)?.is_some(){return Err("请先明确恢复或删除项目备份，再删除项目".into());}
+                self.store.remove_project(&id)?; self.changed(); Ok(Value::Null)
+            }
             "check_updates" => self.check_updates(&payload).await,
             "download_asset" => output(self.queue_download(&text(&payload, "projectId", 128)?, integer(&payload, "assetId")?)?),
+            "send_external_download" => {
+                if payload["confirmed"].as_bool() != Some(true) { return Err("请先确认向本机下载器发送公开发行链接".into()); }
+                output(self.send_external_download(&text(&payload, "projectId", 128)?, integer(&payload, "assetId")?).await?)
+            },
+            "retry_external_download" => {
+                if payload["confirmed"].as_bool() != Some(true) { return Err("请先确认外部下载器没有重复任务，再重新发送".into()); }
+                output(self.retry_external_download(&text(&payload, "id", 128)?).await?)
+            },
+            "test_external_downloader" => self.test_external_downloader(decode(payload["config"].clone())?).await,
             "retry_download" => output(self.retry_download(&text(&payload, "id", 128)?)?),
             "cancel_download" => { self.cancel_download(&text(&payload, "id", 128)?)?; Ok(Value::Null) }
-            "install_download" => {
-                if payload.get("confirmed").and_then(Value::as_bool) != Some(true) { return Err("请先确认安装此软件".into()); }
-                self.install_download(&text(&payload, "id", 128)?).await
+            "preview_install" => output(self.preview_install(&text(&payload,"id",128)?,optional_text(&payload,"targetPath",4096)?.as_deref())?),
+            "install_download" => self.install_confirmed(decode(payload)?).await,
+            "get_backup" => output(self.get_backup(&text(&payload,"projectId",128)?)?),
+            "restore_backup" => {
+                if payload.get("confirmed").and_then(Value::as_bool)!=Some(true){return Err("请先确认恢复备份：当前软件文件将被备份完整替换".into());}
+                output(self.restore_backup(&text(&payload,"projectId",128)?)?)
+            },
+            "delete_backup" => {
+                if payload.get("confirmed").and_then(Value::as_bool)!=Some(true){return Err("请先确认删除备份，删除后无法恢复".into());}
+                self.delete_backup(&text(&payload,"projectId",128)?)?;Ok(Value::Null)
+            },
+            "delete_download" => {
+                if payload.get("confirmed").and_then(Value::as_bool)!=Some(true){return Err("请先确认删除下载文件；已安装软件和备份不会改动".into());}
+                self.delete_download(&text(&payload,"id",128)?)?;Ok(Value::Null)
             }
             "list_managed_versions" => output(self.list_managed_versions(&text(&payload, "projectId", 128)?)?),
             "activate_managed_version" => {
@@ -110,11 +143,8 @@ impl Core {
             "mark_installed" => {
                 let id = text(&payload, "projectId", 128)?; let version = text(&payload, "version", 200)?;
                 let path = optional_text(&payload, "path", 4096)?;
-                let p = self.store.mutate("projects", &id, |p: &mut Project| {
-                    require_software(p)?;
-                    p.installed_version = Some(version); p.installed_path = path; p.installed_source = Some("manual".into());
-                    selection::update_status(p); Ok(())
-                })?; self.changed(); output(p)
+                let changes=decode(json!({"installedVersion":version,"installedPath":path}))?;
+                output(self.update_project(&id,changes)?)
             }
             "get_repository_notes" => output(self.store.repository_notes()?),
             "save_repository_note" => {

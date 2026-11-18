@@ -34,6 +34,8 @@ const success: ProxyTestResult = { ok: true, mode: 'manual', source: 'manual', t
 
 beforeEach(() => {
   vi.clearAllMocks(); cleanup = undefined;
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
   target = document.createElement('div'); document.body.append(target);
   Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) });
 });
@@ -65,8 +67,11 @@ describe('startup and desktop navigation', () => {
     mocks.dispatch.mockImplementation(async (action: string) => { if (action === 'snapshot') return snapshot; throw new Error(`Unexpected action ${action}`); });
     const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
     const nav = (label: string) => [...target.querySelectorAll<HTMLButtonElement>('nav button')].find(item => item.querySelector('span')?.textContent === label)!;
-    const active = () => target.querySelector<HTMLElement>('#main-content')!;
+    const active = () => target.querySelector<HTMLElement>('#main-content:not([hidden])')!;
+    expect(active().querySelectorAll('.project-card')).toHaveLength(snapshot.projects.length);
     [...active().querySelectorAll<HTMLButtonElement>('[aria-label="资源类型筛选"] button')].find(item => item.textContent === '文件')!.click(); await settle();
+    expect(active().querySelectorAll('.project-card')).toHaveLength(1);
+    expect(active().querySelector('.project-card')?.getAttribute('aria-label')).toBe('文件资料（界面示例）');
     const search = target.querySelector<HTMLInputElement>('.titlebar input')!;
     search.value = 'manual'; search.dispatchEvent(new Event('input', { bubbles: true })); await settle();
     nav('下载').click(); await settle(); nav('资源库').click(); await settle();
@@ -110,6 +115,59 @@ describe('startup and desktop navigation', () => {
     nav('首页').dispatchEvent(new Event('drop', { bubbles: true, cancelable: true })); await settle();
     expect(onreorder).toHaveBeenLastCalledWith(['github', 'home', 'library', 'updates', 'downloads', 'agent']);
     expect(target.querySelector('[aria-live]')?.textContent).toContain('已保存');
+  });
+
+  it('persists per-file connections and saves external downloader configuration', async () => {
+    let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'home';
+    mocks.dispatch.mockImplementation(async (action: string, payload: { settings?: Partial<Settings> }) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'save_settings') { snapshot = { ...snapshot, settings: { ...snapshot.settings, ...payload.settings } }; return snapshot.settings; }
+      if (action === 'test_external_downloader') return { ok: true, message: '端口可连接，接口尚未验证' };
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    button('设置').click(); await settle(); await input('#download-connections', '3');
+    expect(mocks.dispatch).toHaveBeenCalledWith('save_settings', { settings: { downloadConnections: 3 } });
+    await input('#downloader-name', '本机测试下载器'); button('保存下载器配置').click(); await settle();
+    expect(snapshot.settings.externalDownloader?.name).toBe('本机测试下载器');
+    button('测试端口连接').click(); await settle(); expect(mocks.dispatch).toHaveBeenCalledWith('test_external_downloader', { config: snapshot.settings.externalDownloader });
+    button('手动下载默认使用外部下载器').click(); await settle(); expect(snapshot.settings.useExternalDownloader).toBe(true);
+  });
+
+  it('requires confirmation before sending an external download link', async () => {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library'; snapshot.settings.useExternalDownloader = true;
+    mocks.dispatch.mockImplementation(async (action: string) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'send_external_download') return { ...snapshot.downloads[0], status: 'external' };
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    const project = snapshot.projects.find(item => item.release?.assets.some(asset => asset.id === item.selectedAssetId && (asset.downloadable ?? asset.compatible)))!;
+    const card = [...target.querySelectorAll<HTMLElement>('.project-card')].find(item => item.textContent?.includes(project.name))!;
+    card.querySelector<HTMLButtonElement>('.card-identity')!.click(); await settle();
+    button('下载已选文件').click(); await settle();
+    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'send_external_download')).toHaveLength(0);
+    button('取消').click(); await settle();
+    button('下载已选文件').click(); await settle(); button('确认发送链接').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('send_external_download', { projectId: project.id, assetId: project.selectedAssetId, confirmed: true });
+    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'download_asset')).toHaveLength(0);
+  });
+
+  it('offers import and confirmed resend for external tasks without claiming completion', async () => {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'downloads';
+    snapshot.downloads = [{ ...snapshot.downloads[0], status: 'external', path: null, sha256: null, verified: false }];
+    mocks.dispatch.mockImplementation(async (action: string) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'import_external_download') return null;
+      if (action === 'retry_external_download') return snapshot.downloads[0];
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    expect(target.textContent).toContain('已交给外部下载器'); expect(target.querySelector('.download-progress')).toBeNull();
+    button('导入已下载文件').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('import_external_download', { id: snapshot.downloads[0].id, confirmed: true });
+    button('重新发送').click(); await settle(); expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'retry_external_download')).toHaveLength(0);
+    button('确认重新发送').click(); await settle(); expect(mocks.dispatch).toHaveBeenCalledWith('retry_external_download', { id: snapshot.downloads[0].id, confirmed: true });
   });
 
   it('uses native window controls and releases its resize listener', async () => {

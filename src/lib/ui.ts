@@ -17,11 +17,13 @@ export const projectStatus: Record<ProjectStatus, StatusLabel> = {
 export const downloadStatus: Record<DownloadStatus, StatusLabel> = {
   queued: { label: '等待下载', tone: 'neutral' },
   downloading: { label: '正在下载', tone: 'accent' },
+  external: { label: '已交给外部下载器', tone: 'neutral' },
   completed: { label: '已下载 · 待安装', tone: 'success' },
   failed: { label: '下载失败', tone: 'danger' },
   cancelled: { label: '已取消', tone: 'neutral' },
   installing: { label: '处理中', tone: 'accent' },
   installed: { label: '已安装', tone: 'success' },
+  deleted: { label: '安装包已删除', tone: 'neutral' },
 };
 export const fileStatus: Record<FileStatus, StatusLabel> = {
   notDownloaded: { label: '未下载', tone: 'neutral' },
@@ -69,7 +71,7 @@ export function needsProjectAttention(project: Pick<Project, 'managementMode' | 
 
 export function getDownloadStatus(download: Pick<DownloadRecord, 'status' | 'kind' | 'installable'>): StatusLabel {
   if (!canInstallDownload(download) && ['completed', 'installed'].includes(download.status)) return { label: '已下载', tone: 'success' };
-  if (download.status === 'installed' && download.kind === 'portable') return { label: '已准备', tone: 'success' };
+  if (download.status === 'deleted' && !canInstallDownload(download)) return { label: '下载文件已删除', tone: 'neutral' };
   return downloadStatus[download.status];
 }
 
@@ -140,6 +142,34 @@ export function safeGithubUrl(value: string, base?: string): string | null {
 export function readableError(error: unknown): string {
   const message = typeof error === 'string' ? error : error instanceof Error ? error.message : '操作未完成，请稍后重试。';
   return message.replace(/(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+/g, '〔已隐藏的凭据〕').slice(0, 800);
+}
+
+export function isDownloadRunning(download: Pick<DownloadRecord, 'status'>): boolean {
+  return ['queued', 'downloading', 'installing'].includes(download.status);
+}
+
+export function canDeleteDownload(download: Pick<DownloadRecord, 'status' | 'path'>): boolean {
+  return !isDownloadRunning(download) && download.status !== 'deleted' && Boolean(download.path);
+}
+
+export function canRetryDownload(download: Pick<DownloadRecord, 'status'>): boolean {
+  return ['failed', 'cancelled', 'deleted'].includes(download.status);
+}
+
+export function pendingInstallDownloads(downloads: DownloadRecord[], projects?: Project[]): DownloadRecord[] {
+  return downloads.filter((download) => download.status === 'completed' && canInstallDownload(download)
+    && !projects?.some((project) => project.id === download.projectId && (isFilesProject(project) || project.installedVersion === download.tag)));
+}
+
+export function selectedDownloadAsset(project: Project): ReleaseAsset | undefined {
+  return project.release?.assets.find((asset) => asset.id === project.selectedAssetId && canDownloadAsset(asset));
+}
+
+/** Plain-text preview only. Full rich notes remain in the project detail. */
+export function releaseSummary(body: string, limit = 220): string {
+  const text = body.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/<[^>]*>/g, '').replace(/[`#*>_~]/g, '').replace(/\s+/g, ' ').trim();
+  return text.length > limit ? `${text.slice(0, limit).trimEnd()}…` : text;
 }
 
 export function projectInitials(project: Pick<Project, 'name' | 'repo'>): string {

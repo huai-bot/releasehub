@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { dispatch } from '../lib/bridge';
+  import { feedState } from '../lib/feed-state';
   import { GITHUB_DEVICE_URL, appendGithubRepositories, filterGithubPage, findRepositoryNote, isSubscribed, repositoryEditError } from '../lib/github';
   import { GithubCacheClient, GithubCacheSuperseded, githubCacheIdentity } from '../lib/github-cache';
   import type { GithubActivityPage, GithubListRepositoryPage, GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubRepositoryTab, GithubStatus, GithubUserList, Project, RepositoryNote } from '../lib/types';
@@ -12,8 +13,8 @@
   import GithubFeed from '../components/GithubFeed.svelte';
   import type { GithubPreviewScenario } from '../lib/github-preview';
 
-  let { projects, preview, active = true, initialTab = 'explore', onadd, onopen, oncopy, onnotice }: {
-    projects: Project[]; preview: boolean; active?: boolean; initialTab?: Tab;
+  let { projects, preview, active = true, preload = false, initialTab = 'explore', onadd, onopen, oncopy, onnotice }: {
+    projects: Project[]; preview: boolean; active?: boolean; preload?: boolean; initialTab?: Tab;
     onadd: (repository: GithubRepository) => Promise<boolean>;
     onopen: (url: string) => void; oncopy: (text: string) => void; onnotice: (message: string, tone?: Tone) => void;
   } = $props();
@@ -85,12 +86,26 @@
   let catalogRequest = 0;
   let noteRequest = 0;
   let assignmentRequest = 0;
+  let assignmentTouched = false;
   const cache = new GithubCacheClient();
+
+  function prefetchMembership(name: string, priority = false) {
+    if (!preview && !destroyed && connected && !authBusy) cache.prefetch('github_repository_lists', { repository: name }, priority);
+  }
+  function prefetchStars(items: GithubRepository[]) {
+    for (const repository of items) prefetchMembership(repository.fullName);
+  }
+  function prefetchRepository(name: string) {
+    if (preview || destroyed || !connected || authBusy) return;
+    cache.prefetch('github_repository', { repository: name }, true);
+    cache.prefetch('github_lists', {}, true);
+    prefetchMembership(name, true);
+  }
   type ViewState = {
     searchText: string; searchQuery: string; page: number; listFilter: string; starPage: number;
     repositories: GithubRepositoryPage | null; activity: GithubActivityPage | null; stars: GithubListRepositoryPage | null;
     selectedName: string | null; detail: GithubRepositoryDetail | null; checked: Set<string>;
-    contentError: string; detailError: string; updatedAt: number | null; detailUpdatedAt: number | null; scrollTop: number; renderedKey: string;
+    contentError: string; detailError: string; updatedAt: number | null; detailUpdatedAt: number | null; scrollTop: number; detailScrollTop: number; renderedKey: string;
   };
   const views = new Map<string, ViewState>();
   const tabViews = new Map<Tab, string>();
@@ -101,6 +116,13 @@
   let listsUpdatedAt = $state<number | null>(null);
   let feedVisited = $state(untrack(() => initialTab === 'feed'));
   let feedScrollTop = 0;
+  let feedRegion = $state<HTMLDivElement>();
+  let feedConsumer = $state<ReturnType<typeof feedState.acquire>>();
+  let websitePreview = $state<import('../lib/types').GithubFeedPage | null>(null);
+  const website = $derived(preview ? websitePreview : $feedState.page);
+  const websiteError = $derived(preview ? '' : $feedState.transportError || website?.error || '');
+  const accountMismatch = $derived(Boolean(status?.account?.login && website?.account && status.account.login.toLowerCase() !== website.account.toLowerCase()));
+  const sameAccount = $derived(Boolean(status?.account?.login && website?.account && !accountMismatch));
   let renderedKey = $state('');
   let contentAppend = $state(false);
   const connected = $derived(Boolean(status?.connected && status.account));
@@ -112,12 +134,12 @@
   const listsAuthorized = $derived(status?.scopes?.includes('user') ?? false);
 
   function viewKey() { return JSON.stringify([tab, tab === 'explore' ? searchQuery : '', tab === 'starred' ? listFilter : '', tab === 'starred' ? 1 : page]); }
-  function workspace() { return tabRegion?.closest('main'); }
+  function workspace() { return tab === 'feed' ? feedRegion : resultsRegion; }
   function saveView() {
     if (tab === 'feed') { feedScrollTop = workspace()?.scrollTop ?? 0; return; }
     const key = viewKey();
     views.set(key, { searchText, searchQuery, page, listFilter, starPage, repositories, activity, stars, selectedName, detail,
-      checked: new Set(checkedRepositories), contentError, detailError, updatedAt, detailUpdatedAt, scrollTop: workspace()?.scrollTop ?? 0, renderedKey });
+      checked: new Set(checkedRepositories), contentError, detailError, updatedAt, detailUpdatedAt, scrollTop: resultsRegion?.scrollTop ?? 0, detailScrollTop: detailRegion?.scrollTop ?? 0, renderedKey });
     tabViews.set(tab, key);
   }
   function restoreView(key: string, keepContent = false) {
@@ -134,10 +156,10 @@
       checkedRepositories = new Set(); resetDetail();
     } else resetDetail();
     const revision = sessionRevision;
-    void tick().then(() => { if (!destroyed && revision === sessionRevision && viewKey() === key && workspace()) workspace()!.scrollTop = saved?.scrollTop ?? 0; });
+    void tick().then(() => { if (!destroyed && revision === sessionRevision && viewKey() === key) { if (resultsRegion) resultsRegion.scrollTop = saved?.scrollTop ?? 0; if (detailRegion) detailRegion.scrollTop = saved?.detailScrollTop ?? 0; } });
   }
   function captureAnchor() {
-    const main = workspace();
+    const main = resultsRegion;
     if (!main) return null;
     const top = main.getBoundingClientRect().top;
     const row = [...(resultsRegion?.querySelectorAll<HTMLElement>('[data-github-anchor]') ?? [])].find((item) => item.getBoundingClientRect().bottom > top);
@@ -191,6 +213,7 @@
     if (changedAccount) clearAccountContent(previousAccount !== 'anonymous');
     else if (changedRevision) { sessionRevision += 1; listRequest += 1; detailRequest += 1; catalogRequest += 1; assignmentRequest += 1; contentLoading = false; detailLoading = false; }
     if (changedAccount || changedRevision || changedCacheSession) { void loadContent(); if (tab === 'starred') void loadLists(); }
+    void preloadContent();
   }
   async function refreshStatus(showLoading = false) {
     if (destroyed || authBusy) return;
@@ -219,6 +242,9 @@
     }
     try {
       const next = action === 'github_login' ? await dispatch(action, permission === 'lists' ? { lists: true } : permission === 'private' ? { privateRepositories: true } : {}) : await dispatch(action, {});
+      // The shared website state must clear even if this page was left while
+      // the host finished the explicit logout.
+      if (action === 'github_logout') window.dispatchEvent(new Event('releasehub:github-logout'));
       if (!destroyed && request === statusRequest) acceptStatus(next);
     } catch (error) {
       if (!destroyed && request === statusRequest) statusError = readableError(error);
@@ -227,6 +253,7 @@
         authBusy = false; scheduleLoginPoll();
         if (!repositories && !activity && !stars && !contentLoading) void loadContent();
         if (connected && tab === 'starred') void loadLists();
+        void preloadContent();
       }
     }
   }
@@ -258,6 +285,7 @@
       // A restored view already owns its scroll and cursor chain; only new network data should replace it.
       if (cached && current() && !append && hasContent && renderedKey === key) return;
       const nextStars = requestedTab === 'starred' ? { ...(result as GithubListRepositoryPage), items: append ? appendGithubRepositories(previousStars?.items ?? [], (result as GithubListRepositoryPage).items) : (result as GithubListRepositoryPage).items } : null;
+      if (requestedTab === 'starred') prefetchStars((result as GithubListRepositoryPage).items);
       if (!current()) {
         const saved = views.get(key);
         if (saved) views.set(key, { ...saved, ...(requestedTab === 'activity' ? { activity: result as GithubActivityPage } : requestedTab === 'starred' ? { stars: nextStars, starPage: batches } : { repositories: result as GithubRepositoryPage }), updatedAt: time, contentError: '', renderedKey: key });
@@ -317,15 +345,17 @@
     event.preventDefault();
     if (tab !== 'explore') return;
     saveView(); const query = searchText.trim(); searchQuery = query; page = 1;
-    restoreView(viewKey(), Boolean(query)); searchText = query; void loadContent();
+    restoreView(viewKey()); searchText = query; void loadContent();
   }
   function goPage(next: number) { saveView(); page = Math.max(1, next); restoreView(viewKey(), true); void loadContent(); }
   async function selectRepository(name: string, focus = true, force = false) {
     if (pendingRepositories.has(name)) return;
-    if (!force && selectedName === name && detail && cache.isFresh('github_repository', { repository: name })) { if (focus) { await tick(); detailRegion?.focus(); } return; }
+    if (!force && selectedName === name && detail && cache.isFresh('github_repository', { repository: name })) { if (focus) { await tick(); detailRegion?.focus({ preventScroll: true }); } return; }
+    const listAnchor = captureAnchor();
     if (focus) previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    if (selectedName !== name) { detail = null; detailUpdatedAt = null; }
+    if (selectedName !== name) { detail = null; detailUpdatedAt = null; if (detailRegion) detailRegion.scrollTop = 0; }
     selectedName = name; detailError = ''; detailLoading = true;
+    if (!preview && connected && !authBusy) { cache.prefetch('github_lists', {}, true); prefetchMembership(name, true); }
     const request = ++detailRequest;
     const session = sessionRevision;
     const key = viewKey();
@@ -335,14 +365,19 @@
       if (current()) { const anchor = captureAnchor(); detail = result; detailUpdatedAt = time; saveView(); void restoreAnchor(anchor, key); }
       else { const saved = views.get(key); if (saved?.selectedName === name) views.set(key, { ...saved, detail: result, detailUpdatedAt: time, detailError: '' }); }
     };
-    if (focus) { await tick(); if (current()) detailRegion?.focus(); }
+    await restoreAnchor(listAnchor, key);
+    if (focus && current()) detailRegion?.focus({ preventScroll: true });
     try {
       if (preview && import.meta.env.DEV) apply((await import('../lib/github-preview')).createPreviewGithubDetail(name, connected), Date.now());
       else { const entry = await cache.load('github_repository', { repository: name }, { force, onCached: (entry) => apply(entry.data, entry.updatedAt) }); apply(entry.data, entry.updatedAt); }
     } catch (error) { if (current() && !(error instanceof GithubCacheSuperseded)) detailError = readableError(error); }
     finally { if (current()) { detailLoading = false; saveView(); } }
   }
-  async function closeDetail() { resetDetail(); await tick(); if (previousFocus?.isConnected) previousFocus.focus(); }
+  async function closeDetail() {
+    const anchor = captureAnchor(); const key = viewKey();
+    resetDetail(); await restoreAnchor(anchor, key);
+    if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+  }
   function setRepositoryPending(name: string, value: boolean) {
     const next = new Set(pendingRepositories); if (value) next.add(name); else next.delete(name); pendingRepositories = next;
   }
@@ -401,7 +436,7 @@
     } catch (error) { if (!destroyed && session === sessionRevision) editError = readableError(error); }
     finally { if (!destroyed && session === sessionRevision) { editBusy = false; setRepositoryPending(name, false); } }
   }
-  async function loadLists(force = false): Promise<boolean> {
+  async function loadLists(force = false, preferFreshCache = false): Promise<boolean> {
     const request = ++catalogRequest;
     const session = sessionRevision;
     if (!connected || destroyed || authBusy) return false;
@@ -410,15 +445,43 @@
     const apply = (result: GithubUserList[], time: number) => { if (current()) { lists = result; listsUpdatedAt = time; } };
     try {
       if (preview && import.meta.env.DEV) apply((await import('../lib/github-preview')).createPreviewGithubLists(previewScenario), Date.now());
-      else { const entry = await cache.load('github_lists', {}, { force, onCached: (entry) => apply(entry.data, entry.updatedAt) }); apply(entry.data, entry.updatedAt); }
+      else { const entry = await cache.load('github_lists', {}, { force, preferFreshCache, onCached: (entry) => apply(entry.data, entry.updatedAt) }); apply(entry.data, entry.updatedAt); }
       return current();
     } catch (error) { if (current() && !(error instanceof GithubCacheSuperseded)) listsError = readableError(error); }
     finally { if (current()) listsLoading = false; }
     return false;
   }
+  let preloadedSession = -1;
+  async function preloadContent() {
+    if (!preload || preview || destroyed || authBusy || !connected || preloadedSession === sessionRevision) return;
+    const session = sessionRevision;
+    preloadedSession = session;
+    const current = () => !destroyed && session === sessionRevision && connected && !authBusy;
+    const jobs: Array<() => Promise<unknown>> = [
+      () => cache.load('github_repositories', { tab: 'explore', query: 'windows', page: 1 }),
+      () => cache.load('github_repositories', { tab: 'owned', query: '', page: 1 }),
+      () => cache.load('github_activity', { page: 1 }),
+      async () => { const entry = await cache.load('github_list_repositories', { listId: 'all' }, { preferFreshCache: true }); if (current()) prefetchStars(entry.data.items); },
+      () => cache.load('github_list_repositories', { listId: 'unlisted' }),
+    ];
+    // Warm only a small first batch of categories, never scan hundreds of list pages.
+    const catalog = loadLists(false, true);
+    const worker = async () => {
+      while (current() && jobs.length) {
+        const job = jobs.shift()!;
+        try { await job(); } catch { /* A failed background refresh must not replace another view or block startup. */ }
+      }
+    };
+    const initial = Promise.all([worker(), worker()]);
+    if (await catalog && current()) {
+      for (const list of lists.slice(0, 3)) jobs.push(() => cache.load('github_list_repositories', { listId: list.id }, { preferFreshCache: true }));
+    }
+    await initial;
+    await Promise.all([worker(), worker()]);
+  }
   function changeList(id: string) {
     if (id === listFilter) return;
-    saveView(); listFilter = id; restoreView(viewKey(), true); void loadContent();
+    saveView(); listFilter = id; restoreView(viewKey()); void loadContent();
   }
   function editUserList(list?: GithubUserList) {
     if (listBusy) return;
@@ -475,26 +538,44 @@
     const request = ++assignmentRequest;
     const session = sessionRevision;
     assignment = { repositories: [...names], mode, listIds: mode === 'remove' && activeList ? [activeList.id] : [] };
-    assignmentReady = false; assignmentLoading = true; assignmentError = '';
-    await tick(); document.getElementById('github-assignment-title')?.focus();
+    assignmentReady = false; assignmentLoading = true; assignmentError = ''; assignmentTouched = false;
     const current = () => !destroyed && session === sessionRevision && request === assignmentRequest && assignment !== null;
-    try {
-      if (!await loadLists(true)) throw new Error(listsError || '分类列表尚未读到，请重试。');
-      if (!current()) return;
-      if (mode === 'replace') {
-        const result = preview && import.meta.env.DEV
-          ? { listIds: (await import('../lib/github-preview')).createPreviewRepositoryLists(names[0]) }
-          : (await cache.load('github_repository_lists', { repository: names[0] }, { force: true })).data;
-        if (!current() || !assignment) return;
-        if (result.listIds.some((id) => !lists.some((list) => list.id === id))) throw new Error('GitHub 分类刚发生了变化，请重新读取归属。');
-        assignment = { ...assignment, listIds: result.listIds };
+    let catalogRead = false;
+    let membership: string[] | null = mode === 'replace' ? null : [];
+    const applyMembership = () => {
+      if (!current() || !assignment || !catalogRead || membership === null) return;
+      if (membership.some((id) => !lists.some((list) => list.id === id))) {
+        assignmentReady = false; assignmentError = 'GitHub 分类刚发生了变化，请重新读取归属。'; return;
       }
-      if (current()) assignmentReady = true;
-    } catch (error) { if (current()) assignmentError = readableError(error); }
+      // A revalidation may finish after the first user edit; never overwrite those checks.
+      if (mode === 'replace' && !assignmentTouched) assignment = { ...assignment, listIds: [...membership] };
+      assignmentReady = true; assignmentLoading = false;
+    };
+    const applyCatalog = (data: GithubUserList[], time: number) => {
+      if (!current()) return;
+      lists = data; listsUpdatedAt = time; catalogRead = true; applyMembership();
+    };
+    await tick(); document.getElementById('github-assignment-title')?.focus();
+    try {
+      if (preview && import.meta.env.DEV) {
+        const data = await import('../lib/github-preview');
+        membership = mode === 'replace' ? data.createPreviewRepositoryLists(names[0]) : [];
+        applyCatalog(data.createPreviewGithubLists(previewScenario), Date.now());
+      } else {
+        await Promise.all([
+          cache.load('github_lists', {}, { preferFreshCache: true, onCached: (entry) => applyCatalog(entry.data, entry.updatedAt) })
+            .then((entry) => applyCatalog(entry.data, entry.updatedAt)),
+          mode !== 'replace' ? Promise.resolve() : cache.load('github_repository_lists', { repository: names[0] }, {
+            preferFreshCache: true, onCached: (entry) => { membership = entry.data.listIds; applyMembership(); },
+          }).then((entry) => { membership = entry.data.listIds; applyMembership(); }),
+        ]);
+      }
+    } catch (error) { if (current() && !(error instanceof GithubCacheSuperseded)) assignmentError = readableError(error); }
     finally { if (current()) assignmentLoading = false; }
   }
   function toggleAssignmentList(id: string) {
-    if (!assignment) return;
+    if (!assignment || !assignmentReady) return;
+    assignmentTouched = true;
     assignment = { ...assignment, listIds: assignment.listIds.includes(id) ? assignment.listIds.filter((entry) => entry !== id) : [...assignment.listIds, id] };
   }
   function closeAssignment() { if (!assignmentBusy) { assignmentRequest += 1; assignment = null; } }
@@ -512,7 +593,7 @@
       onnotice(result.updated ? `已同步 ${result.updated} 个仓库的分类。` : '所选仓库的分类已经一致。', 'success');
       await loadLists(); if (tab === 'starred') await loadContent();
     } catch (error) {
-      if (!destroyed && session === sessionRevision) { assignmentError = readableError(error); void loadLists(); if (tab === 'starred') void loadContent(); }
+      if (!destroyed && session === sessionRevision) { cache.invalidate(['github_lists', 'github_list_repositories', 'github_repository_lists']); assignmentReady = false; assignmentError = readableError(error); void loadLists(); if (tab === 'starred') void loadContent(); }
     } finally { if (!destroyed && session === sessionRevision) assignmentBusy = false; }
   }
   async function loadNotes() {
@@ -550,18 +631,25 @@
     void refreshStatus(true); void loadContent(); void loadNotes();
   }
   function clearMemoryCache() {
-    cache.clear(); views.clear(); tabViews.clear(); listRequest += 1; detailRequest += 1; catalogRequest += 1;
+    cache.clear(); views.clear(); tabViews.clear(); listRequest += 1; detailRequest += 1; catalogRequest += 1; assignmentRequest += 1;
+    if (assignment) { assignmentReady = false; assignmentLoading = false; assignmentError = '缓存已清除，请重新读取归属。'; }
     contentLoading = false; detailLoading = false; listsLoading = false; updatedAt = null; detailUpdatedAt = null; listsUpdatedAt = null;
     // Settings clears cache, not an in-progress editor or the content currently being read.
+  }
+  $effect(() => { feedConsumer?.setActive(active && !preview); });
+  function focusAccount() {
+    document.querySelector<HTMLElement>('.github-account')?.focus({ preventScroll: true });
   }
   $effect(() => {
     if (active) untrack(scheduleLoginPoll);
     else { stopLoginPoll(); untrack(saveView); }
   });
   onMount(() => {
+    if (!preview) { feedConsumer = feedState.acquire(active); if (preload) void feedState.preload(); }
+    else if (import.meta.env.DEV) void import('../lib/feed/preview').then((module) => { if (!destroyed) websitePreview = module.previewFeed('connected'); });
     window.addEventListener('releasehub:cache-cleared', clearMemoryCache);
     void refreshStatus(true); void loadContent(); void loadNotes();
-    return () => { window.removeEventListener('releasehub:cache-cleared', clearMemoryCache); cache.clear(); destroyed = true; statusRequest += 1; listRequest += 1; detailRequest += 1; catalogRequest += 1; assignmentRequest += 1; noteRequest += 1; sessionRevision += 1; stopLoginPoll(); };
+    return () => { feedConsumer?.release(); window.removeEventListener('releasehub:cache-cleared', clearMemoryCache); cache.clear(); destroyed = true; statusRequest += 1; listRequest += 1; detailRequest += 1; catalogRequest += 1; assignmentRequest += 1; noteRequest += 1; sessionRevision += 1; stopLoginPoll(); };
   });
 </script>
 
@@ -571,30 +659,45 @@
   <div class="github-preview"><span><strong>GitHub 界面示例</strong> · 账号、仓库与数量均为演示，不访问真实账号。</span><label>示例状态<select aria-label="GitHub 示例状态" bind:value={previewScenario} onchange={changePreview}><option value="connected">已连接</option><option value="anonymous">未登录</option><option value="waiting">等待短码授权</option><option value="unavailable">缺少登录组件</option><option value="empty">空列表</option><option value="error">读取失败</option></select></label></div>
 {/if}
 
-<section class="surface github-account" aria-label="GitHub 账号">
+<section class="surface github-account" class:awaiting={waiting} aria-label="GitHub 账号" tabindex="-1">
+  <div class="account-overview">
   <div class="account-line">
     <GithubAvatar url={status?.account?.avatarUrl} name={status?.account?.login ?? 'GitHub'} />
     <div class="account-identity" aria-live="polite">
       {#if statusLoading}<strong>正在读取账号状态…</strong><p>公开仓库仍可搜索和浏览。</p>
       {:else if waiting}<strong>等待你在 GitHub 完成授权</strong><p>短码只用于这次登录；完成后本页会自动更新。</p>
-      {:else if connected && status?.account}<strong>{status.account.name || status.account.login}{#if preview}<span class="status-badge warning">示例账号</span>{/if}</strong><p>@{status.account.login} · {status?.verified === false ? '已恢复本机账号，当前尚未验证' : '已连接 ReleaseHub 独立授权'}</p>
+      {:else if connected && status?.account}<strong>{status.account.name || status.account.login}{#if preview}<span class="status-badge warning">示例账号</span>{/if}</strong><p>@{status.account.login} · {status?.verified === false ? '本机已恢复，待验证' : '独立授权已连接'}</p>
       {:else if status?.available === false}<strong>没有找到 GitHub 登录组件</strong><p>公开仓库仍可查看。请使用已配置 ReleaseHub 独立授权的完整发布包。</p>
       {:else}<strong>连接你的 GitHub 账号</strong><p>公开仓库无需登录；我的仓库、Stars 和关注动态使用这个账号。</p>{/if}
     </div>
     <div class="account-actions"><button class="icon-button" aria-label="刷新 GitHub 账号状态" disabled={authBusy || statusLoading} onclick={() => void refreshStatus(true)}><Icon name="refresh" size={16} /></button>{#if waiting}<button class="button secondary" disabled={authBusy || preview} onclick={() => void accountAction('github_cancel_login')}>{authBusy ? '正在取消' : '取消登录'}</button>{:else if connected}<button class="button secondary" disabled={authBusy || preview} onclick={() => void accountAction('github_logout')}><Icon name="logout" size={15} />仅断开追新</button>{:else}<button class="button primary" disabled={authBusy || statusLoading || status?.available === false || preview} onclick={() => void accountAction('github_login')}><Icon name={authBusy ? 'loader' : 'github'} class={authBusy ? 'spinning' : ''} size={16} />{authBusy ? '正在连接' : '登录 GitHub'}</button>{/if}</div>
   </div>
-  <p class="account-note">ReleaseHub 独立授权，不使用或断开其它工具的 GitHub 账号。基本登录申请读取账号（read:user）、公开仓库读写（public_repo）和保持登录（offline_access）；凭据只保存在本机凭据库，不随便携数据迁移。旧版连接需要重新授权一次。首页动态另用 GitHub 网页登录，不随此授权自动连接。</p>
-  {#if connected && !waiting}<div class="account-permissions"><button class="text-button" disabled={authBusy || preview} onclick={() => void accountAction('github_login')}>{verified ? '重新授权 ReleaseHub' : '重新连接并验证'}</button>{#if privateAuthorized}<span>已授权私有仓库访问</span>{:else}<details><summary>需要查看私有仓库？</summary><p>GitHub 的 repo 权限允许读写公开与私有仓库，范围比“只读”更大。只有你主动点击下面按钮后才会申请；ReleaseHub 不会自动提交代码。</p><button class="button secondary small" disabled={authBusy || preview} onclick={() => void accountAction('github_login', 'private')}>授权私有仓库（repo）</button></details>{/if}</div>{/if}
+  <div class="website-account">
+    <div><strong>官网首页动态{#if accountMismatch}<span class="status-badge warning">账号不同</span>{/if}</strong><p>{#if !website && !websiteError}正在读取官网会话…{:else if website?.account}@{website.account} · {website.cached ? '历史账号，官网会话待验证' : website.connected ? '官网已登录' : '会话待验证'}{:else}官网尚未登录{/if}</p></div>
+    <button class="button secondary small" disabled={preview || Boolean($feedState.pending)} onclick={() => void feedState.action('feed_connect')}><Icon name="github" size={14} />{website?.connected ? '查看官网账号' : '官网登录'}</button>
+    {#if website?.account}<button class="icon-button" aria-label="验证官网会话" disabled={preview || Boolean($feedState.pending) || website?.loading} onclick={() => void feedState.action('feed_refresh')}><Icon name="refresh" size={15} /></button>{/if}
+  </div>
+  </div>
+  {#if websiteError}<p class="field-error website-error" role="alert">官网会话：{websiteError}</p>{/if}
   {#if waiting}<div class="device-login"><div><label for="github-device-code">一次性登录短码</label><div class="code-line"><input id="github-device-code" class="mono" readonly value={status?.login?.userCode ?? '正在获取短码…'} /><button class="button secondary" disabled={!status?.login?.userCode} onclick={() => oncopy(status!.login!.userCode!)}><Icon name="copy" size={15} />复制短码</button></div></div><div><button class="button primary" disabled={!status?.login?.userCode || preview} onclick={() => onopen(GITHUB_DEVICE_URL)}>打开 GitHub 授权页<Icon name="external" size={15} /></button><p>在 github.com/login/device 核对账号，再输入短码。</p></div></div>{/if}
   {#if statusError || status?.error || status?.login?.state === 'error'}<p class="field-error" role="alert">{statusError || status?.error || status?.login?.message || '登录未完成，请重新登录。'}</p>{/if}
+  <details class="account-help"><summary>授权、官网会话与权限说明</summary>
+    {#if accountMismatch}<p class="account-mismatch" role="status">{website?.cached ? '历史官网账号' : '官网账号'} @{website?.account} 与仓库授权 @{status?.account?.login} 不同。动态来自官网，仓库和 Stars 来自授权账号；请在官网窗口核对后刷新。</p>{/if}
+    {#if sameAccount}<p class="account-consistency" role="status">{website?.cached || !website?.connected ? '已保存的账号一致，官网会话仍待验证。' : '仓库授权与官网登录账号一致。'}</p>{/if}
+    <p class="account-note">ReleaseHub 独立授权，不使用或断开其它工具的 GitHub 账号。基本登录申请读取账号（read:user）、公开仓库读写（public_repo）和保持登录（offline_access）；凭据只保存在本机凭据库，不随便携数据迁移。旧版连接需要重新授权一次。首页动态另用 GitHub 网页登录，不随此授权自动连接。</p>
+    <p class="website-note">仓库授权不会生成官网 Cookie。官网只需首次明确登录一次，网页会话持久保存在这台电脑；代理切换不会清除它，后台失效只提示，不弹窗。“仅断开追新”会清除追新的授权、网页登录与动态，不影响外部浏览器。</p>
+    {#if connected && !waiting}<div class="account-permissions"><button class="text-button" disabled={authBusy || preview} onclick={() => void accountAction('github_login')}>{verified ? '重新授权 ReleaseHub' : '重新连接并验证'}</button>{#if privateAuthorized}<span>已授权私有仓库访问</span>{:else}<details><summary>需要查看私有仓库？</summary><p>GitHub 的 repo 权限允许读写公开与私有仓库，范围比“只读”更大。只有你主动点击下面按钮后才会申请；ReleaseHub 不会自动提交代码。</p><button class="button secondary small" disabled={authBusy || preview} onclick={() => void accountAction('github_login', 'private')}>授权私有仓库（repo）</button></details>{/if}</div>{/if}
+  </details>
 </section>
 
 <div class="github-tabs" bind:this={tabRegion} role="tablist" aria-label="GitHub 内容">{#each tabs as item, index}<button id={`github-tab-${item.id}`} role="tab" aria-selected={tab === item.id} aria-controls="github-results" tabindex={tab === item.id ? 0 : -1} class:active={tab === item.id} onclick={() => changeTab(item.id)} onkeydown={(event) => tabKey(event, index)}><Icon name={item.icon} size={16} />{item.label}</button>{/each}</div>
 
 {#if feedVisited}
-  <div id={tab === 'feed' ? 'github-results' : 'github-feed-results'} role="tabpanel" aria-labelledby="github-tab-feed" tabindex="0" hidden={tab !== 'feed'}><GithubFeed {preview} active={active && tab === 'feed'} {onopen} {onadd} {onnotice} /></div>
+  <div class="github-feed-region" bind:this={feedRegion} id={tab === 'feed' ? 'github-results' : 'github-feed-results'} role="tabpanel" aria-labelledby="github-tab-feed" tabindex="0" hidden={tab !== 'feed'}><GithubFeed {preview} active={active && tab === 'feed'} {onopen} {onadd} {onnotice} onLogin={focusAccount} /></div>
 {/if}
 {#if tab !== 'feed'}
+<div class="github-repository-workspace">
+<div class="github-controls">
   {#if tab === 'starred' && connected}
     <section class="lists-toolbar" aria-label="GitHub 分类">
       <div class="lists-topline"><strong><Icon name="folder" size={16} />GitHub 分类</strong><span>{listsLoading ? '正在更新分类…' : `${lists.length} 个分类`}{#if listsUpdatedAt} · 更新于 {cacheTime(listsUpdatedAt)}{/if}</span><button class="text-button" disabled={listsLoading} onclick={() => void loadLists(true)}><Icon name="refresh" size={14} />刷新分类</button><button class="button secondary small" disabled={authBusy || listBusy || preview} onclick={() => editUserList()}><Icon name="plus" size={14} />新建分类</button></div>
@@ -612,6 +715,7 @@
   {#if notesError}<div class="notes-error"><p class="field-error">本地备注读取失败：{notesError}</p><button class="text-button" onclick={() => void loadNotes()}>重试备注</button></div>{/if}
   {#if assignment && tab === 'starred'}<section class="assignment-editor surface" aria-label="整理 GitHub 分类"><form onsubmit={saveAssignment}><div class="assignment-heading"><h2 id="github-assignment-title" tabindex="-1">{assignment.mode === 'replace' ? '设置仓库分类' : assignment.mode === 'add' ? '批量添加到分类' : '批量从分类移出'}</h2><button class="icon-button" type="button" aria-label="关闭分类整理" disabled={assignmentBusy} onclick={closeAssignment}><Icon name="close" size={16} /></button></div><p>{assignment.repositories.length === 1 ? assignment.repositories[0] : `已选择 ${assignment.repositories.length} 个仓库`}</p><p class="field-hint">{assignment.mode === 'replace' ? '勾选这个仓库所属的全部分类，取消所有勾选会将其设为未分类。' : assignment.mode === 'add' ? '添加所选分类，保留每个仓库原有的其它分类。' : '仅移出勾选的分类，其它分类和 Star 保留。'}</p>{#if assignmentLoading}<p role="status">正在读取现有分类归属…</p>{:else}<div class="assignment-options">{#each lists as list (list.id)}<label><input type="checkbox" checked={assignment.listIds.includes(list.id)} disabled={assignmentBusy || !assignmentReady} onchange={() => toggleAssignmentList(list.id)} />{list.name}<span>{list.itemCount}</span></label>{:else}<p>还没有可用分类，请先新建分类。</p>{/each}</div>{/if}{#if assignmentError}<p class="field-error" role="alert">{assignmentError}</p>{/if}{#if !assignmentReady && !assignmentLoading}<button class="text-button" type="button" onclick={() => { if (assignment) void openAssignment(assignment.repositories, assignment.mode); }}>重新读取归属</button>{/if}<div class="inline-actions"><button class="button secondary small" type="button" disabled={assignmentBusy} onclick={closeAssignment}>取消</button><button class="button primary small" type="submit" disabled={preview || assignmentBusy || !assignmentReady || (assignment.mode !== 'replace' && !assignment.listIds.length)}>{assignmentBusy ? '正在同步并回读' : '确认同步分类'}</button></div></form></section>{/if}
 
+</div>
 <div class="github-columns" class:with-detail={selectedName !== null}>
   <div class="surface github-results" bind:this={resultsRegion} class:compact-hidden={selectedName !== null} id="github-results" role="tabpanel" tabindex="0" aria-labelledby={`github-tab-${tab}`} aria-busy={contentLoading}>
     {#if hasContent}<div class="github-cache-status" role="status"><span>{contentLoading ? (showingPrevious ? `正在读取第 ${page} 页，暂时保留上一页内容` : '正在后台更新，当前内容仍可查看') : showingPrevious ? '新页面未读到，仍显示上一页内容' : '已保留当前内容'}{#if updatedAt} · 更新于 {cacheTime(updatedAt)}{/if}</span></div>{/if}
@@ -633,8 +737,8 @@
       {#each filtered as repository (repository.id)}
         {@const note = findRepositoryNote(notes, repository.fullName)}
         <article class="repo-row" data-github-anchor={repository.fullName} class:selected={selectedName === repository.fullName}>
-          <div class="repo-select-line">{#if tab === 'starred'}<input type="checkbox" class="repo-checkbox" aria-label={`选择 ${repository.fullName}`} checked={checkedRepositories.has(repository.fullName)} disabled={assignmentBusy || pendingRepositories.has(repository.fullName)} onchange={() => toggleRepository(repository.fullName)} />{/if}<button class="repo-main" aria-label={`查看 ${repository.fullName} 详情`} aria-pressed={selectedName === repository.fullName} onclick={() => void selectRepository(repository.fullName)}><span class="repo-title"><Icon name={repository.private ? 'private' : 'readme'} size={16} /><strong>{note?.name || repository.fullName}</strong>{#if note?.name}<span class="note-tag">备注</span>{/if}{#if repository.private}<span class="status-badge neutral">私有</span>{/if}{#if repository.archived}<span class="status-badge warning">已归档</span>{/if}</span>{#if note?.name}<span class="original-name">{repository.fullName}</span>{/if}<span class="repo-summary">{note?.description || repository.description || '尚未填写仓库说明'}</span></button></div>
-          <div class="repo-row-bottom"><div class="repo-meta"><span><Icon name="star" size={13} />{repository.stars.toLocaleString()}{#if repository.starred === true}<span class="starred-label">已 Star</span>{/if}</span>{#if repository.language}<span>{repository.language}</span>{/if}<span>更新 {formatDate(repository.updatedAt)}</span></div><div class="github-row-actions"><button class="icon-button" aria-label={`编辑 ${repository.fullName} 本地备注`} disabled={preview} onclick={() => editNote(repository.fullName)}><Icon name="notes" size={15} /></button>{#if tab === 'starred'}<button class="icon-button" aria-label={`设置 ${repository.fullName} 分类`} disabled={preview || assignmentBusy} onclick={() => void openAssignment([repository.fullName], 'replace')}><Icon name="folder" size={15} /></button>{/if}<button class="button secondary small" disabled={preview || repository.private || isSubscribed(repository.fullName, projects) || addingRepositories.has(repository.fullName)} title={repository.private ? '私有仓库暂不加入资源库' : '订阅这个软件的版本更新'} onclick={() => void addRepository(repository)}><Icon name={addingRepositories.has(repository.fullName) ? 'loader' : isSubscribed(repository.fullName, projects) ? 'check' : 'plus'} class={addingRepositories.has(repository.fullName) ? 'spinning' : ''} size={14} />{isSubscribed(repository.fullName, projects) ? '已订阅' : addingRepositories.has(repository.fullName) ? '正在加入' : '加入资源库'}</button></div></div>
+          <div class="repo-select-line">{#if tab === 'starred'}<input type="checkbox" class="repo-checkbox" aria-label={`选择 ${repository.fullName}`} checked={checkedRepositories.has(repository.fullName)} disabled={assignmentBusy || pendingRepositories.has(repository.fullName)} onchange={() => toggleRepository(repository.fullName)} />{/if}<button class="repo-main" aria-label={`查看 ${repository.fullName} 详情`} aria-pressed={selectedName === repository.fullName} onmouseenter={() => prefetchRepository(repository.fullName)} onfocus={() => prefetchRepository(repository.fullName)} onclick={() => void selectRepository(repository.fullName)}><span class="repo-title"><Icon name={repository.private ? 'private' : 'readme'} size={16} /><strong>{note?.name || repository.fullName}</strong>{#if note?.name}<span class="note-tag">备注</span>{/if}{#if repository.private}<span class="status-badge neutral">私有</span>{/if}{#if repository.archived}<span class="status-badge warning">已归档</span>{/if}</span>{#if note?.description}<span class="repo-summary local-note-summary"><span>本地备注</span>{note.description}</span>{/if}{#if note?.name}<span class="original-name">{repository.fullName}</span>{/if}<span class="repo-summary upstream-summary">{note?.description ? '上游说明：' : ''}{repository.description || '尚未填写仓库说明'}</span></button></div>
+          <div class="repo-row-bottom"><div class="repo-meta"><span><Icon name="star" size={13} />{repository.stars.toLocaleString()}{#if repository.starred === true}<span class="starred-label">已 Star</span>{/if}</span>{#if repository.language}<span>{repository.language}</span>{/if}<span>更新 {formatDate(repository.updatedAt)}</span></div><div class="github-row-actions"><button class="icon-button" aria-label={`编辑 ${repository.fullName} 本地备注`} disabled={preview} onclick={() => editNote(repository.fullName)}><Icon name="notes" size={15} /></button>{#if tab === 'starred'}<button class="icon-button" aria-label={`设置 ${repository.fullName} 分类`} disabled={preview || assignmentBusy} onmouseenter={() => prefetchRepository(repository.fullName)} onfocus={() => prefetchRepository(repository.fullName)} onclick={() => void openAssignment([repository.fullName], 'replace')}><Icon name="folder" size={15} /></button>{/if}<button class="button secondary small" disabled={preview || repository.private || isSubscribed(repository.fullName, projects) || addingRepositories.has(repository.fullName)} title={repository.private ? '私有仓库暂不加入资源库' : '订阅这个软件的版本更新'} onclick={() => void addRepository(repository)}><Icon name={addingRepositories.has(repository.fullName) ? 'loader' : isSubscribed(repository.fullName, projects) ? 'check' : 'plus'} class={addingRepositories.has(repository.fullName) ? 'spinning' : ''} size={14} />{isSubscribed(repository.fullName, projects) ? '已订阅' : addingRepositories.has(repository.fullName) ? '正在加入' : '加入资源库'}</button></div></div>
         </article>
       {:else}<div class="empty-state"><Icon name={tab === 'starred' ? 'star' : 'search'} size={27} /><h3>{tab === 'starred' ? searchText.trim() ? '已加载的 Stars 中没有匹配结果' : hasMore ? '这批 Stars 没有符合分类的仓库' : '这个分类还没有仓库' : tab === 'owned' && searchText.trim() ? '本页没有匹配的仓库' : '这一页没有找到仓库'}</h3><p>{tab === 'starred' ? hasMore ? '继续加载下一批，搜索会保留并覆盖更多 Stars。' : '试试其它分类，或调整搜索关键词。' : tab === 'owned' && searchText.trim() ? '可以清空筛选，或继续翻页。' : '换一个关键词，或稍后刷新。'}</p>{#if tab !== 'explore' && searchText.trim()}<button class="button secondary" onclick={() => searchText = ''}>{tab === 'starred' ? '清空 Stars 筛选' : '清空本页筛选'}</button>{/if}</div>{/each}
     {/if}
@@ -642,6 +746,7 @@
     {:else if (tab === 'explore' || connected) && (repositories || activity)}<div class="github-pagination"><span>第 {displayPage} 页{tab === 'owned' ? ' · 筛选当前页' : ''}</span><div><button class="button secondary small" disabled={contentLoading || page <= 1} onclick={() => goPage(page - 1)}>上一页</button><button class="button secondary small" disabled={contentLoading || !hasMore || showingPrevious} onclick={() => goPage(page + 1)}>下一页</button></div></div>{/if}
   </div>
   {#if selectedName}<div class="detail-region" bind:this={detailRegion} tabindex="-1">{#if detail}<div class="github-cache-status" role="status"><span>{detailLoading ? '正在更新详情' : '仓库详情'}{#if detailUpdatedAt} · 更新于 {cacheTime(detailUpdatedAt)}{/if}</span>{#if detailError}<p class="field-error">更新未完成，已保留原详情：{detailError}</p>{/if}</div>{/if}<GithubDetail name={selectedName} {detail} note={findRepositoryNote(notes, selectedName)} loading={detailLoading && !detail} error={detail ? '' : detailError} connected={verified} {preview} pending={pendingRepositories.has(selectedName)} subscribed={isSubscribed(selectedName, projects)} adding={addingRepositories.has(selectedName)} onclose={() => void closeDetail()} onretry={() => { if (selectedName) void selectRepository(selectedName, false, true); }} onstar={(repository) => void setStar(repository)} onedit={editRepository} onnote={editNote} onlists={(repository) => void openAssignment([repository.fullName], 'replace')} onadd={(repository) => void addRepository(repository)} {onopen} /></div>{/if}
+</div>
 </div>
 {/if}
 
@@ -663,19 +768,39 @@
   .github-preview { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; color: var(--warning); background: var(--warning-bg); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 14px; padding: 8px 12px; font-size: 12px; }
   .github-preview label { display: flex; gap: 8px; align-items: center; }
   .github-preview select { padding: 4px 8px; font-size: 12px; }
-  .github-account { padding: 16px 18px; }
-  .account-line { display: flex; align-items: center; gap: 11px; }
-  .account-identity { flex: 1; min-width: 0; }
+  .page-heading { flex: 0 0 auto; margin-bottom: 14px; }
+  .github-preview { flex: 0 0 auto; }
+  .github-account { padding: 10px 14px; flex: 0 1 auto; min-height: 0; max-height: 160px; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
+  .github-account.awaiting { max-height: 190px; }
+  .github-account:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .account-overview { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); gap: 10px 18px; }
+  .website-account { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 9px; border-left: 1px solid var(--border); padding-left: 16px; }
+  .website-account > div { flex: 1; min-width: 120px; }
+  .account-help { margin-top: 6px; font-size: 12px; }
+  .account-help > summary { width: fit-content; cursor: pointer; color: var(--accent); }
+  .account-help > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+  .website-account strong { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 13px; color: var(--heading); }
+  .website-account p, .website-note, .account-consistency { font-size: 12px; color: var(--muted); line-height: 1.7; }
+  .website-note { margin-top: 7px; max-width: 75ch; }
+  .account-mismatch { margin-top: 9px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; line-height: 1.7; background: var(--warning-bg); color: var(--warning); overflow-wrap: anywhere; }
+  .account-consistency { margin-top: 6px; }
+  .website-error { margin-top: 7px; }
+  .github-repository-workspace { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 16px; flex: 1 1 0; min-height: 0; margin-top: 16px; overflow: hidden; }
+  .github-controls { min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; padding-right: 8px; }
+  .github-feed-region { flex: 1; min-height: 0; overflow-y: auto; margin-top: 16px; scrollbar-gutter: stable; overscroll-behavior: contain; }
+  .github-feed-region[hidden] { display: none; }
+  .account-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 9px; }
+  .account-identity { flex: 1; min-width: 140px; }
   .account-identity strong { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--heading); font-size: 13px; overflow-wrap: anywhere; }
   .account-identity p { color: var(--muted); font-size: 13px; margin-top: 2px; }
-  .account-actions { display: flex; gap: 9px; align-items: center; flex-shrink: 0; }
+  .account-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; margin-left: auto; }
   .account-note { color: var(--muted); font-size: 13px; margin-top: 13px; padding-top: 11px; border-top: 1px solid var(--border); line-height: 1.8; }
   .device-login { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px 22px; border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
   .device-login label { display: block; font-size: 12px; color: var(--subtle); margin-bottom: 5px; }
   .code-line { display: flex; gap: 8px; align-items: center; }
   .code-line input { width: 178px; padding: 7px 10px; font-size: 17px; font-weight: 650; letter-spacing: .04em; }
   .device-login p { color: var(--muted); font-size: 12px; margin-top: 6px; }
-  .github-tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 20px; padding: 5px; width: fit-content; max-width: 100%; background: var(--surface-soft); border-radius: 24px; }
+  .github-tabs { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px; padding: 5px; width: fit-content; max-width: 100%; background: var(--surface-soft); border-radius: 24px; }
   .github-tabs button { display: flex; align-items: center; gap: 7px; color: var(--subtle); font-size: 13px; padding: 9px 14px; border-radius: 20px; }
   .github-tabs button:hover { color: var(--accent); background: var(--accent-soft); }
   .github-tabs button.active { color: var(--accent); background: var(--surface); font-weight: 650; }
@@ -685,7 +810,11 @@
   .account-permissions details { flex: 1; min-width: 200px; }
   .account-permissions summary { cursor: pointer; color: var(--accent); width: fit-content; }
   .account-permissions p { max-width: 72ch; margin: 10px 0; line-height: 1.7; }
-  .github-search { margin: 16px 0; }
+  .github-search { margin: 10px 0; }
+  .github-controls .search-line { flex-wrap: wrap; }
+  .github-controls .search-line > .input-leading { width: 100%; flex-basis: 100%; min-width: 0; }
+  .github-controls .search-line > .button { margin-left: auto; }
+  .github-controls .list-options > button { justify-content: space-between; text-align: left; }
   .github-search > label { display: block; font-size: 13px; color: var(--subtle); margin-bottom: 6px; }
   .search-line { display: flex; gap: 9px; }
   .search-line .input-leading { flex: 1; background: var(--surface); }
@@ -694,9 +823,12 @@
   .github-search .field-hint { margin-top: 6px; }
   .activity-note { display: flex; align-items: flex-start; gap: 7px; color: var(--muted); font-size: 13px; padding: 16px 0; }
   .activity-note :global(svg) { margin-top: 3px; }
-  .github-columns { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; align-items: start; }
-  .github-columns.with-detail { grid-template-columns: minmax(310px, .9fr) minmax(380px, 1.1fr); }
-  .github-results, .detail-region { min-width: 0; }
+  .github-columns { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 14px; min-width: 0; min-height: 0; align-items: stretch; }
+  .github-columns.with-detail { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); }
+  .github-results, .detail-region { min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
+  .github-results { border-radius: 8px; }
+  .github-controls::-webkit-scrollbar, .github-results::-webkit-scrollbar, .detail-region::-webkit-scrollbar, .github-feed-region::-webkit-scrollbar, .github-account::-webkit-scrollbar { width: 8px; }
+  .github-controls::-webkit-scrollbar-thumb, .github-results::-webkit-scrollbar-thumb, .detail-region::-webkit-scrollbar-thumb, .github-feed-region::-webkit-scrollbar-thumb, .github-account::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
   .detail-region:focus { outline: none; }
   .detail-region:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 8px; }
   .results-heading { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--surface-soft); }
@@ -707,18 +839,21 @@
   .repo-row.selected { background: var(--accent-soft); }
   .repo-main { display: block; width: 100%; min-width: 0; padding: 0; text-align: left; }
   .repo-title { display: flex; align-items: center; gap: 7px; color: var(--accent); flex-wrap: wrap; }
-  .repo-title strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .repo-title strong { font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
+  .repo-summary.local-note-summary { padding: 7px 9px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 5px; color: var(--heading); }
+  .local-note-summary > span { color: var(--muted); font-size: 11px; margin-right: 8px; }
+  .upstream-summary { color: var(--subtle); }
   .repo-summary { display: block; color: var(--subtle); font-size: 13px; line-height: 1.7; margin-top: 5px; overflow-wrap: anywhere; }
   .repo-row-bottom { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 9px; margin-top: 11px; }
   .repo-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 13px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
   .repo-meta > span { display: inline-flex; gap: 4px; align-items: center; }
   .starred-label { color: var(--accent); margin-left: 3px; }
-  .lists-toolbar { margin-top: 16px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+  .lists-toolbar { padding: 0 0 14px; border-bottom: 1px solid var(--border); }
   .lists-topline, .lists-topline strong { display: flex; align-items: center; gap: 8px; }
   .lists-topline { flex-wrap: wrap; gap: 8px 12px; }
   .lists-topline strong { color: var(--heading); font-size: 12px; }
   .lists-topline > span { margin-right: auto; color: var(--muted); font-size: 12px; }
-  .list-options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .list-options { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
   .list-options button { display: inline-flex; align-items: baseline; gap: 7px; max-width: 100%; padding: 5px 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--subtle); font-size: 12px; overflow-wrap: anywhere; text-align: left; }
   .list-options button:hover { border-color: var(--accent); color: var(--accent); }
   .list-options button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
@@ -730,10 +865,11 @@
   .list-authorization { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--muted); }
   .list-editor { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
   .list-editor h3 { color: var(--heading); font-size: 13px; margin-bottom: 10px; }
-  .list-editor-fields { display: grid; grid-template-columns: minmax(160px, .6fr) minmax(220px, 1fr); gap: 12px; }
+  .list-editor-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .list-editor label { display: block; font-size: 12px; color: var(--subtle); }
   .list-editor input { display: block; margin-top: 5px; width: 100%; font-size: 12px; }
-  .inline-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .inline-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .inline-actions > button { max-width: 100%; white-space: normal; }
   .assignment-editor { padding: 16px; margin: 12px 0 16px; }
   .assignment-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .assignment-heading h2 { color: var(--heading); font-size: 14px; }
@@ -770,6 +906,31 @@
   .activity-row div > span { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
   .github-pagination { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .github-pagination > div { display: flex; gap: 8px; }
-  @media (max-width: 1250px) { .github-columns.with-detail { grid-template-columns: minmax(0, 1fr); } .github-results.compact-hidden { display: none; } }
-  @media (max-width: 1040px) { .account-line { flex-wrap: wrap; } .account-actions { margin-left: 45px; } .github-tabs { gap: 8px 14px; flex-wrap: wrap; } .list-editor-fields { grid-template-columns: minmax(0, 1fr); } .results-heading { flex-wrap: wrap; gap: 8px; } }
+  @media (max-width: 1250px) { .github-repository-workspace { grid-template-columns: 180px minmax(0, 1fr); gap: 12px; } .github-columns.with-detail { grid-template-columns: minmax(0, 1fr); } .github-results.compact-hidden { display: none; } .github-row-actions { gap: 4px; } }
+  @media (max-width: 1040px) { .github-tabs { gap: 4px; } .github-tabs button { padding: 8px 11px; } .list-editor-fields { grid-template-columns: minmax(0, 1fr); } .results-heading { flex-wrap: wrap; gap: 8px; } }
+  @media (max-height: 720px) {
+    .page-heading { margin-bottom: 10px; }
+    .page-heading p { display: none; }
+    .github-preview { margin-bottom: 8px; padding: 5px 10px; }
+    .github-preview > span { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .github-account { padding: 8px 12px; max-height: 118px; }
+    .github-account.awaiting { max-height: 150px; }
+    .account-line { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 4px 8px; }
+    .account-identity { min-width: 0; }
+    .account-identity strong, .account-identity p { font-size: 12px; line-height: 1.4; }
+    .account-actions { grid-column: 1 / -1; justify-self: end; }
+    .account-actions .button { padding: 5px 9px; font-size: 12px; }
+    .website-account { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; }
+    .website-account > div { grid-column: 1 / -1; min-width: 0; }
+    .website-account p { line-height: 1.4; }
+    .website-account > .button { justify-self: end; }
+    .account-help { margin-top: 4px; }
+    .github-search { margin: 8px 0; }
+    .github-search > label { display: none; }
+    .github-search .field-hint { font-size: 12px; }
+    .repo-row { padding: 10px 12px; }
+    .repo-title strong { font-size: 16px; }
+    .github-cache-status { padding: 6px 12px; }
+    .repo-summary.local-note-summary { padding: 6px 8px; }
+  }
 </style>

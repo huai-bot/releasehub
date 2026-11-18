@@ -4,7 +4,7 @@ import { isDownloadRecord } from './download-state';
 import type {
   AddProjectInput, AgentConnection, AgentIntegration, BuildTask, CheckResult, DownloadRecord,
   GithubCacheEntry, GithubCacheOperation, GithubCacheStats, GithubActivityPage, GithubFeedPage, GithubListRepositoryPage, GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubRepositoryTab, GithubStatus, GithubUserList,
-  InstallResult, ManagedVersion, Project, ProjectChanges, ProxySettings, ProxyTestResult, RepositoryNote, Settings, Snapshot,
+  BackupRecord, InstallPreview, InstallResult, ManagedVersion, Project, ProjectChanges, ProxySettings, ProxyTestResult, RepositoryNote, Settings, Snapshot,
 } from './types';
 
 /** Keep every desktop operation behind the one audited host command. */
@@ -15,9 +15,20 @@ export interface Actions {
   remove_project: { payload: { id: string }; result: null };
   check_updates: { payload: { projectIds?: string[]; allowAutoDownload?: boolean }; result: CheckResult };
   download_asset: { payload: { projectId: string; assetId: number }; result: DownloadRecord };
+  send_external_download: { payload: { projectId: string; assetId: number; confirmed: true }; result: DownloadRecord };
+  retry_external_download: { payload: { id: string; confirmed: true }; result: DownloadRecord };
+  import_external_download: { payload: { id: string; confirmed: true }; result: DownloadRecord | null };
+  test_external_downloader: { payload: { config: import('./types').ExternalDownloader }; result: { ok: boolean; message: string } };
   retry_download: { payload: { id: string }; result: DownloadRecord };
   cancel_download: { payload: { id: string }; result: null };
-  install_download: { payload: { id: string; confirmed: true }; result: InstallResult };
+  preview_install: { payload: { id: string; targetPath?: string }; result: InstallPreview };
+  install_download: { payload: { id: string; confirmed: true; targetPath: string; archiveRoot?: string; previousVersion?: string | null }; result: InstallResult };
+  get_backup: { payload: { projectId: string }; result: BackupRecord | null };
+  restore_backup: { payload: { projectId: string; confirmed: true }; result: Project };
+  delete_backup: { payload: { projectId: string; confirmed: true }; result: null };
+  delete_download: { payload: { id: string; confirmed: true }; result: null };
+  pick_project_executable: { payload: { projectId: string }; result: Project | null };
+  open_project: { payload: { projectId: string }; result: null };
   mark_installed: { payload: { projectId: string; version: string; path?: string }; result: Project };
   list_managed_versions: { payload: { projectId: string }; result: ManagedVersion[] };
   activate_managed_version: { payload: { projectId: string; downloadId: string; confirmed: true }; result: Project };

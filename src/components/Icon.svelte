@@ -7,7 +7,7 @@
     Eye, EyeOff, Trash2, ArrowDownToLine, Package, HardDrive, Ban, Clock3,
     SlidersHorizontal, FileText, Code2, ListFilter, Wifi, WifiOff, RotateCcw,
     Star, GitFork, Activity, UserRound, LogOut, BookOpen, Pencil, LockKeyhole,
-    GripVertical, Minus, Square, Copy as RestoreWindow, ArrowUp, ArrowDown,
+    GripVertical, Minus, Square, Copy as RestoreWindow, ArrowUp, ArrowDown, Play,
   } from '@lucide/svelte';
 
   const icons = {
@@ -24,7 +24,7 @@
     retry: RotateCcw, star: Star, fork: GitFork, activity: Activity, user: UserRound,
     logout: LogOut, readme: BookOpen, edit: Pencil, private: LockKeyhole,
     grip: GripVertical, minimize: Minus, maximize: Square, restore: RestoreWindow,
-    arrowUp: ArrowUp, arrowDown: ArrowDown,
+    arrowUp: ArrowUp, arrowDown: ArrowDown, play: Play,
   };
   let { name, size = 18, class: className = '', strokeWidth = 1.8 }: {
     name: keyof typeof icons; size?: number; class?: string; strokeWidth?: number;

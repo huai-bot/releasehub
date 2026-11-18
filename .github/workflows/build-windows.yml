@@ -53,6 +53,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm exec vitest run --config tests/github-lists.config.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec vitest run --config tests/github-feed.config.ts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm exec vitest run --config tests/preferences-ui.config.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm exec vitest run --config src/lib/feed/ui.config.ts

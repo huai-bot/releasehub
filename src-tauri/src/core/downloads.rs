@@ -1,8 +1,6 @@
 use super::{models::*, network, Core};
-use futures_util::StreamExt;
-use sha2::{Digest, Sha256};
-use std::{path::{Path,PathBuf}, sync::{Arc,atomic::{AtomicBool,Ordering}}, time::{Duration,Instant}};
-use tokio::io::AsyncWriteExt;
+use super::download_transfer::{self, TransferOptions};
+use std::{path::{Path,PathBuf}, sync::{Arc,atomic::{AtomicBool,Ordering}}, time::Duration};
 
 pub fn safe_name(value:&str)->String {
     let mut name:String=value.chars().map(|c|if c.is_control()||"/\\:*?\"<>|".contains(c){'_'}else{c}).take(180).collect();
@@ -22,10 +20,10 @@ pub fn directory(data:&Path,id:&str)->Result<PathBuf,String> {
     uuid::Uuid::parse_str(id).map_err(|_|"下载记录编号无效".to_string())?;
     let root=data.join("downloads");
     let resolved=std::fs::canonicalize(&root).map_err(|_|"无法读取下载目录".to_string())?;
-    if !resolved.starts_with(data)||std::fs::symlink_metadata(&root).map_err(|_|"无法读取下载目录".to_string())?.file_type().is_symlink(){return Err("下载目录不能链接到外部位置".into());}
+    if !resolved.starts_with(data)||download_transfer::linked(&std::fs::symlink_metadata(&root).map_err(|_|"无法读取下载目录".to_string())?){return Err("下载目录不能链接到外部位置".into());}
     let folder=root.join(id);
     match std::fs::symlink_metadata(&folder){
-        Ok(meta)=>{if !meta.is_dir()||meta.file_type().is_symlink()||!std::fs::canonicalize(&folder).map_err(|_|"下载目录无效".to_string())?.starts_with(&resolved){return Err("下载记录目录不安全".into());}},
+        Ok(meta)=>{if !meta.is_dir()||download_transfer::linked(&meta)||!std::fs::canonicalize(&folder).map_err(|_|"下载目录无效".to_string())?.starts_with(&resolved){return Err("下载记录目录不安全".into());}},
         Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{std::fs::create_dir(&folder).map_err(|_|"无法创建下载目录".to_string())?;},
         Err(_)=>return Err("无法读取下载目录".into()),
     }
@@ -53,7 +51,7 @@ impl Core {
             if a.size==0||a.size>network::MAX_DOWNLOAD_BYTES{return Err("发行附件大小无效或超过4GB限制".into());}
             let digest=expected_sha(a.digest.as_deref())?;
             if let Some(existing)=self.store.downloads()?.into_iter().find(|d|d.project_id==p.id&&d.asset_id==asset_id&&d.tag==release.tag
-                &&(["queued","downloading","installing"].contains(&d.status.as_str())
+                &&(["queued","downloading","external","installing"].contains(&d.status.as_str())
                     ||(["completed","installed"].contains(&d.status.as_str())&&local_file_exists(&self.data_dir,d)))){return Ok(existing);}
             let time=now();let record=DownloadRecord{id:uuid::Uuid::new_v4().to_string(),project_id:p.id,project_name:p.name,
                 asset_id,file_name:safe_name(&a.name),tag:release.tag.clone(),url:a.url.clone(),kind:a.kind.clone(),
@@ -71,7 +69,7 @@ impl Core {
             let files=self.store.project(&previous.project_id)?.management_mode=="files";
             self.store.mutate("downloads",id,|d:&mut DownloadRecord|{
                 let missing=["completed","installed"].contains(&d.status.as_str())&&!local_file_exists(&self.data_dir,d);
-                if !["failed","cancelled"].contains(&d.status.as_str())&&!missing{return Err("只能重试失败、已取消或文件缺失的下载；已有文件不会覆盖".into());}
+                if !["failed","cancelled","deleted"].contains(&d.status.as_str())&&!missing{return Err("只能重试失败、已取消或文件缺失的下载；已有文件不会覆盖".into());}
                 network::trusted_download_url(&d.url)?;
                 if d.total_bytes==0||d.total_bytes>network::MAX_DOWNLOAD_BYTES{return Err("发行附件大小无效或超过4GB限制".into());}
                 if files {d.installable=false;}
@@ -118,13 +116,9 @@ impl Core {
         let folder=directory(&self.data_dir,id)?;
         if safe_name(&record.file_name)!=record.file_name{return Err("下载文件名无效".into());}
         let partial=folder.join(format!("{}.part",record.file_name));let destination=folder.join(&record.file_name);
-        if destination.exists(){return Err("完整下载文件已存在，请勿覆盖".into());}
-        if let Ok(meta)=std::fs::symlink_metadata(&partial){
-            if !meta.is_file()||meta.file_type().is_symlink(){return Err("临时下载文件不安全".into());}
-            tokio::fs::remove_file(&partial).await.map_err(|_|"无法清理中断的下载".to_string())?;
-        }
+        download_transfer::prepare_paths(&partial,&destination).await?;
         let result=self.stream_download(&mut record,&partial,&destination,&cancel).await;
-        if result.is_err(){let _=tokio::fs::remove_file(&partial).await;}
+        if result.is_err(){if let Err(cleanup)=download_transfer::remove_partial(&partial).await{return Err(format!("{}；{cleanup}",result.err().unwrap()));}}
         result
     }
     async fn stream_download(&self,record:&mut DownloadRecord,partial:&Path,destination:&Path,cancel:&AtomicBool)->Result<(),String>{
@@ -136,41 +130,20 @@ impl Core {
             .redirect(reqwest::redirect::Policy::custom(|attempt|{
                 if attempt.previous().len()>=5||network::trusted_download_url(attempt.url().as_str()).is_err(){attempt.error("不可信下载跳转")}else{attempt.follow()}
             })).build().map_err(|_|"下载服务初始化失败".to_string())?;
-        let response=tokio::select!{
-            response=client.get(url).send()=>response.map_err(|e|network::request_error(&e))?,
-            _=wait_cancel(cancel)=>return Err("下载已取消".into()),
-        };
-        if !response.status().is_success(){return Err(match response.status().as_u16(){404=>"发行附件已删除，请重新检查更新",403|429=>"GitHub 暂时限制下载，请稍后重试",_=>"附件下载失败，请稍后重试"}.into());}
-        network::trusted_download_url(response.url().as_str())?;
-        let expected_size=record.total_bytes;
-        if expected_size==0||expected_size>network::MAX_DOWNLOAD_BYTES{return Err("发行附件大小无效或超过4GB限制".into());}
-        if response.content_length().is_some_and(|n|n!=expected_size||n>network::MAX_DOWNLOAD_BYTES){return Err("下载大小与发行附件记录不符，请重新检查更新".into());}
-        let mut file=tokio::fs::OpenOptions::new().write(true).create_new(true).open(partial).await.map_err(|_|"无法创建下载文件，请检查空间和目录权限".to_string())?;
-        let mut stream=response.bytes_stream();let mut hash=Sha256::new();let mut last=Instant::now();
-        loop{
-            let chunk=tokio::select!{
-                chunk=tokio::time::timeout(Duration::from_secs(60),stream.next())=>chunk.map_err(|_|"下载连接长时间没有响应".to_string())?,
-                _=wait_cancel(cancel)=>return Err("下载已取消".into()),
-            };
-            let Some(chunk)=chunk else{break;};let chunk=chunk.map_err(|e|network::request_error(&e))?;
-            if cancel.load(Ordering::Acquire){return Err("下载已取消".into());}
-            record.received_bytes=record.received_bytes.checked_add(chunk.len()as u64).ok_or("下载大小超限")?;
-            if record.received_bytes>expected_size||record.received_bytes>network::MAX_DOWNLOAD_BYTES{return Err("下载内容超过附件声明大小".into());}
-            file.write_all(&chunk).await.map_err(|_|"下载写入失败，请检查磁盘空间".to_string())?;hash.update(&chunk);
-            if last.elapsed()>=Duration::from_millis(400){
-                record.updated_at=now();let progress=record.received_bytes;
-                let current=self.store.mutate("downloads",&record.id,|d:&mut DownloadRecord|{
-                    if d.status=="cancelled"{return Err("下载已取消".into());}d.received_bytes=progress;d.updated_at=now();Ok(())
-                })?;self.download_event(&current);last=Instant::now();
-            }
-        }
-        if record.received_bytes!=expected_size{return Err("下载不完整，请重试".into());}
-        file.flush().await.map_err(|_|"无法保存下载文件".to_string())?;file.sync_all().await.map_err(|_|"无法保存下载文件".to_string())?;drop(file);
-        let digest=format!("{:x}",hash.finalize());let upstream=self.store.digest(&record.id)?;
-        if upstream.as_ref().is_some_and(|h|h!=&digest){return Err("SHA-256 校验不符，已拒绝此文件".into());}
+        let upstream=self.store.digest(&record.id)?;
+        let connections=self.store.settings()?.download_connections;
+        let outcome=download_transfer::transfer(&client,TransferOptions{
+            url:url.as_str(),expected_size:record.total_bytes,connections,expected_sha256:upstream.as_deref(),
+        },partial,cancel,&|url|network::trusted_download_url(url.as_str()).map(|_|()),&mut |progress|{
+            let current=self.store.mutate("downloads",&record.id,|d:&mut DownloadRecord|{
+                if d.status=="cancelled"{return Err("下载已取消".into());}d.received_bytes=progress;d.updated_at=now();Ok(())
+            })?;self.download_event(&current);Ok(())
+        }).await?;
+        record.received_bytes=outcome.received_bytes;
+        let digest=outcome.sha256;
+        directory(&self.data_dir,&record.id)?;
         if cancel.load(Ordering::Acquire){return Err("下载已取消".into());}
-        // Hard-link publication is atomic and refuses to overwrite an existing completed file on all supported hosts.
-        tokio::fs::hard_link(partial,destination).await.map_err(|_|"无法保存完整文件，目标可能已存在".to_string())?;
+        download_transfer::publish_partial(partial,destination).await?;
         let completed=self.store.mutate("downloads",&record.id,|d:&mut DownloadRecord|{
             if d.status=="cancelled"||cancel.load(Ordering::Acquire){return Err("下载已取消".into());}
             d.status="completed".into();d.received_bytes=record.received_bytes;d.path=Some(destination.to_string_lossy().into_owned());
@@ -179,7 +152,6 @@ impl Core {
         match completed{Ok(d)=>{let _=tokio::fs::remove_file(partial).await;self.download_event(&d);Ok(())},Err(e)=>{let _=tokio::fs::remove_file(destination).await;Err(e)}}
     }
 }
-async fn wait_cancel(cancel:&AtomicBool){loop{if cancel.load(Ordering::Acquire){return;}tokio::time::sleep(Duration::from_millis(100)).await;}}
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -248,6 +220,12 @@ mod tests{
         assert!(core.update_project(&project.id,serde_json::from_value(serde_json::json!({"installedVersion":"v3"})).unwrap()).is_err());
         assert!(core.handle("add_project",serde_json::json!({"input":{"repository":"owner/no-network","channel":"stable","preference":"auto","managementMode":"files","installedVersion":"v1"}})).await.is_err());
         assert_eq!(core.store.downloads().unwrap().len(),2);
+    }
+    #[test]fn external_download_prevents_duplicate_internal_download(){
+        let (_dir,core,project)=paused_queue();let queued=core.queue_download(&project.id,7).unwrap();
+        core.store.mutate("downloads",&queued.id,|d:&mut DownloadRecord|{d.status="external".into();Ok(())}).unwrap();
+        assert_eq!(core.queue_download(&project.id,7).unwrap().id,queued.id);
+        assert_eq!(core.store.downloads().unwrap().len(),1);
     }
     #[test]fn queue_cancel_and_retry_preserve_identity_and_publisher_digest(){
         let (_dir,core,project)=paused_queue();let queued=core.queue_download(&project.id,7).unwrap();

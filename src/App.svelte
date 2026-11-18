@@ -5,9 +5,10 @@
   import BrandMark from './components/BrandMark.svelte';
   import { desktopAvailable, dispatch, watchChanges, type Action, type Actions } from './lib/bridge';
   import { applyDownloadProgress, mergeSnapshotDownloads } from './lib/download-state';
-  import type { AddProjectInput, AgentIntegration, AssetPreference, Channel, DownloadRecord, GithubRepository, ManagedVersion, ManagementMode, Project, ProjectChanges, ProxySettings, Settings, Snapshot, WorkspacePage } from './lib/types';
+  import type { AddProjectInput, AgentIntegration, AssetPreference, BackupRecord, Channel, DownloadRecord, GithubRepository, InstallPreview, ManagedVersion, ManagementMode, Project, ProjectChanges, ProxySettings, Settings, Snapshot, WorkspacePage } from './lib/types';
   import { canActivateManagedVersion, formatBytes, parseRepository, readableError, safeGithubUrl, type Page, type Tone } from './lib/ui';
   import ManagedVersions from './components/ManagedVersions.svelte';
+  import InstallConfirmation from './components/InstallConfirmation.svelte';
   import Icon from './components/Icon.svelte';
   import Sidebar from './components/Sidebar.svelte';
   import Modal from './components/Modal.svelte';
@@ -20,12 +21,14 @@
   import { isSubscribed } from './lib/github';
   import SettingsPage from './pages/Settings.svelte';
 
-  type DialogState = { kind: 'add' } | { kind: 'install'; download: DownloadRecord } | { kind: 'managed'; projectId: string } | { kind: 'mark'; project: Project } | { kind: 'remove'; project: Project } | { kind: 'import' };
+  type DialogState = { kind: 'external'; projects: Project[]; retry?: DownloadRecord } | { kind: 'add' } | { kind: 'install'; download: DownloadRecord } | { kind: 'managed'; projectId: string } | { kind: 'mark'; project: Project } | { kind: 'remove'; project: Project } | { kind: 'import' } | { kind: 'deleteDownload'; download: DownloadRecord } | { kind: 'backup'; operation: 'restore' | 'delete'; backup: BackupRecord };
   interface Toast { id: number; message: string; tone: Tone }
   let snapshot = $state<Snapshot | null>(null);
   let page = $state<Page>('home');
   let query = $state('');
   let selectedId = $state<string | null>(null);
+  let detailRevision = $state(0);
+  let detailTab = $state<'notes' | 'manage'>('notes');
   let preview = $state(false);
   let loading = $state(true);
   let refreshing = $state(false);
@@ -43,7 +46,7 @@
   let systemDark = $state(false);
   let destroyed = false;
   let startupPageApplied = false;
-  let githubVisited = $state(false);
+  let githubVisited = $state(true);
   let visitedLocal = $state(new Set<Page>());
   $effect(() => {
     if (['library', 'updates', 'downloads'].includes(page) && !visitedLocal.has(page)) visitedLocal = new Set([...visitedLocal, page]);
@@ -72,7 +75,6 @@
   let markVersion = $state('');
   let markPath = $state('');
   let markConfirmed = $state(false);
-  let installConfirmed = $state(false);
   let importContents = $state('');
   const parsedRepository = $derived(parseRepository(addRepository));
 
@@ -186,14 +188,15 @@
     const restored = document.querySelector<HTMLElement>('#main-content');
     if (restored && page === next) restored.scrollTop = previous?.scrollTop ?? 0;
   }
-  function chooseProject(project: Project) { selectedId = project.id; }
+  function chooseProject(project: Project) { detailTab = 'notes'; selectedId = project.id; detailRevision += 1; }
+  function showProjectBackup(project: Project) { detailTab = 'manage'; selectedId = project.id; detailRevision += 1; }
   function openProject(id: string) { if (!snapshot?.projects.some((project) => project.id === id)) { notify('这个资源已取消订阅，下载记录仍然保留。', 'warning'); return; } page = 'library'; query = ''; selectedId = id; }
   function openDialog(value: DialogState) { formError = ''; modal = value; }
   function closeDialog() { if (busy) return; modal = null; formError = ''; importContents = ''; managedRequestId += 1; managedVersions = []; managedError = ''; managedLoading = false; }
   function showAdd() { addMode = 'software'; addRepository = ''; addChannel = 'stable'; addPreference = 'auto'; addVersion = ''; addPath = ''; addAdvanced = false; openDialog({ kind: 'add' }); }
   function showMark(project: Project, suggestion?: string) { if (project.managementMode === 'files') return; markVersion = suggestion ?? project.installedVersion ?? ''; markPath = project.installedPath ?? ''; markConfirmed = false; openDialog({ kind: 'mark', project }); }
   function markDownloaded(id: string, version: string) { const project = snapshot?.projects.find((item) => item.id === id); if (project) showMark(project, version); else notify('请先重新订阅这个软件，再记录本机版本。', 'warning'); }
-  function showInstall(download: DownloadRecord) { if (download.installable === false || download.kind === 'other') return; installConfirmed = false; openDialog({ kind: 'install', download }); }
+  function showInstall(download: DownloadRecord) { if (download.installable === false || download.kind === 'other') return; openDialog({ kind: 'install', download }); }
 
   function showManagedVersions(projectId: string) {
     if (busy) return;
@@ -245,16 +248,42 @@
   async function downloadProject(project: Project, quiet = false): Promise<boolean> {
     const asset = project.release?.assets.find((item) => item.id === project.selectedAssetId && (item.downloadable ?? item.compatible));
     if (!asset) { chooseProject(project); if (!quiet) notify('请先在详情的“发行附件”中选择需要下载的文件。', 'warning'); return false; }
+    if (snapshot?.settings.useExternalDownloader) { showExternalDownload([project]); return false; }
     const result = await operate('download_asset', { projectId: project.id, assetId: asset.id }, { refresh: !quiet, key: `download:${project.id}` });
     if (result && !quiet) notify(`${project.name} 已加入下载队列。`);
     return result !== undefined;
   }
   async function batchDownload(projects: Project[]) {
     if (preview) { previewNotice(); return; }
+    if (snapshot?.settings.useExternalDownloader) { showExternalDownload(projects); return; }
     setPending('batch-download', true);
     let queued = 0;
     try { for (const project of projects) if (await downloadProject(project, true)) queued += 1; await refreshSnapshot(); notify(`已将 ${queued} 项加入下载队列${projects.length > queued ? `；另有 ${projects.length - queued} 项未下载，请检查安装包或错误提示` : '。'}`, queued === projects.length ? 'success' : 'warning'); }
     catch (error) { reportError(error); } finally { setPending('batch-download', false); }
+  }
+  function showExternalDownload(projects: Project[], retry?: DownloadRecord) {
+    if (preview) { previewNotice(); return; }
+    openDialog({ kind: 'external', projects, ...(retry ? { retry } : {}) });
+  }
+  async function submitExternalDownload() {
+    if (modal?.kind !== 'external' || busy) return;
+    const request = modal; let sent = 0;
+    if (request.retry) {
+      const result = await operate('retry_external_download', { id: request.retry.id, confirmed: true });
+      if (result) { closeDialog(); notify('下载链接已重新发送，请在外部下载器查看。'); }
+      return;
+    }
+    for (const project of request.projects) {
+      const asset = project.release?.assets.find(item => item.id === project.selectedAssetId && (item.downloadable ?? item.compatible));
+      if (!asset) continue;
+      const result = await operate('send_external_download', { projectId: project.id, assetId: asset.id, confirmed: true });
+      if (result) sent += 1; else return;
+    }
+    closeDialog(); notify(`已处理 ${sent} 项下载链接；请在下载页查看是否已交给外部下载器。`);
+  }
+  async function importExternalDownload(download: DownloadRecord) {
+    const result = await operate('import_external_download', { id: download.id, confirmed: true });
+    if (result) notify('文件已导入并完成校验，可在下载页确认安装。');
   }
   async function updateProject(id: string, changes: ProjectChanges) { const result = await operate('update_project', { id, changes }, { success: '订阅偏好已保存。' }); if (result && ('channel' in changes || 'preference' in changes || 'assetPattern' in changes || 'managementMode' in changes)) await checkUpdates([id]); }
   async function saveSettings(changes: Partial<Settings>): Promise<boolean> {
@@ -300,15 +329,33 @@
     const result = await operate('mark_installed', { projectId: modal.project.id, version: markVersion.trim(), ...(markPath.trim() ? { path: markPath.trim() } : {}) }, { success: '已按你的确认记录本机版本。' });
     if (result) modal = null;
   }
-  async function submitInstall(event: SubmitEvent) {
-    event.preventDefault(); if (modal?.kind !== 'install' || !installConfirmed) return;
-    const download = modal.download;
-    const result = await operate('install_download', { id: download.id, confirmed: true });
-    if (result) {
-      modal = null;
-      notify(result.message || (result.installed ? '已安装到追新管理的目录。' : '已打开安装程序。请在安装完成后手动记录版本。'), result.installed ? 'success' : 'neutral');
-      if (result.kind === 'portable' && result.installed) showManagedVersions(download.projectId);
+  async function submitInstall(plan: InstallPreview, archiveRoot?: string) {
+    if (modal?.kind !== 'install' || plan.downloadId !== modal.download.id) return;
+    const result = await operate('install_download', { id: plan.downloadId, confirmed: true, targetPath: plan.targetPath, previousVersion: plan.previousVersion, ...(archiveRoot ? { archiveRoot } : {}) });
+    if (result) { modal = null; notify(result.message || (result.installed ? '已备份并更新到软件原目录。' : '已创建文件备份并打开官方安装向导，完成后请手动记录版本。'), result.installed ? 'success' : 'neutral'); }
+  }
+  async function runProject(project: Project) {
+    if (project.managementMode === 'files') { showProjectFiles(project); return; }
+    if (preview) { previewNotice(); return; }
+    if (!project.executablePath) {
+      const saved = await operate('pick_project_executable', { projectId: project.id }, { success: '启动程序已保存。点击“打开软件”运行。' });
+      if (saved) chooseProject(saved);
+      return;
     }
+    await operate('open_project', { projectId: project.id }, { refresh: false });
+  }
+  async function chooseExecutable(project: Project) { await operate('pick_project_executable', { projectId: project.id }, { success: '启动程序已保存。' }); }
+  function showProjectFiles(project: Project) { void navigate('downloads').then(() => { query = project.name; }); }
+  async function deleteDownload() {
+    if (modal?.kind !== 'deleteDownload') return;
+    const result = await operate('delete_download', { id: modal.download.id, confirmed: true }, { success: '安装包和这条下载记录已删除，已安装软件与备份保留。' });
+    if (result !== undefined) modal = null;
+  }
+  async function applyBackup() {
+    if (modal?.kind !== 'backup') return;
+    const action = modal.operation === 'restore' ? 'restore_backup' : 'delete_backup';
+    const result = await operate(action, { projectId: modal.backup.projectId, confirmed: true }, { success: action === 'restore_backup' ? '已恢复更新前文件与版本记录。' : '备份已删除，这个回退点已失效。' });
+    if (result !== undefined) { modal = null; detailRevision += 1; }
   }
   async function submitImport(event: SubmitEvent) {
     event.preventDefault(); if (importContents.length > 1_000_000) { formError = '清单过大，请通过“导入订阅”选择文件。'; return; }
@@ -331,16 +378,16 @@
       {#if preview}<div class="preview-banner"><Icon name="monitor" size={15} /><strong>界面预览</strong><span>示例版本、账号与状态</span><button onclick={exitPreview}>退出预览<Icon name="close" size={13} /></button></div>{/if}
       {#if operationError}<div class="operation-error" role="alert"><Icon name="alert" size={17} /><span>{operationError}</span><button class="icon-button" aria-label="收起错误提示" onclick={() => operationError = ''}><Icon name="close" size={16} /></button></div>{/if}
       <div class="workspace-content" class:with-details={showingDetails}><main class="page-content" id={!['github', 'library', 'updates', 'downloads'].includes(page) ? 'main-content' : undefined} hidden={['github', 'library', 'updates', 'downloads'].includes(page)}>
-        {#if page === 'home'}<Home {snapshot} {busy} {selectedId} onpage={navigate} onselect={chooseProject} onadd={showAdd} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} />
+        {#if page === 'home'}<Home {snapshot} {busy} {selectedId} {preview} active={page === 'home'} oninstall={showInstall} onopen={(url) => void openUrl(url)} onGithubAdd={addGithubRepository} onnotice={notify} onGithubLogin={() => void navigate('github')} onpage={navigate} onselect={chooseProject} onadd={showAdd} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} />
         {:else if page === 'agent'}<Connections settings={snapshot.settings} runtime={snapshot.runtime} {busy} {preview} onsave={(changes) => void saveSettings(changes)} onintegration={getIntegration} oncopy={(text) => void copy(text)} />
-        {:else if page === 'settings'}<SettingsPage settings={snapshot.settings} runtime={snapshot.runtime} {busy} {preview} onsave={(changes) => void saveSettings(changes)} onproxy={saveProxy} onproxytest={(proxy, password) => dispatch('test_proxy', { proxy, ...(password === undefined ? {} : { password }) })} onintegration={getIntegration} ongithub={() => navigate('github')} ondata={() => void operate('open_data_directory', {}, { refresh: false })} onexport={() => void exportFile()} onimport={() => void importFile()} ontextimport={() => { importContents = ''; openDialog({ kind: 'import' }); }} oncopyexport={() => void copyExport()} oncopy={(text) => void copy(text)} onopen={(url) => void openUrl(url)} />{/if}
+        {:else if page === 'settings'}<SettingsPage settings={snapshot.settings} runtime={snapshot.runtime} {busy} {preview} onsave={saveSettings} onproxy={saveProxy} onproxytest={(proxy, password) => dispatch('test_proxy', { proxy, ...(password === undefined ? {} : { password }) })} onintegration={getIntegration} ongithub={() => navigate('github')} ondata={() => void operate('open_data_directory', {}, { refresh: false })} onexport={() => void exportFile()} onimport={() => void importFile()} ontextimport={() => { importContents = ''; openDialog({ kind: 'import' }); }} oncopyexport={() => void copyExport()} oncopy={(text) => void copy(text)} onopen={(url) => void openUrl(url)} />{/if}
       </main>
       {#each ['library', 'updates'] as localPage}
-         {#if visitedLocal.has(localPage as Page) || page === localPage}<main class="page-content" id={page === localPage ? 'main-content' : undefined} hidden={page !== localPage}><Library projects={snapshot.projects} updatesOnly={localPage === 'updates'} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} /></main>{/if}
+         {#if visitedLocal.has(localPage as Page) || page === localPage}<main class="page-content" id={page === localPage ? 'main-content' : undefined} hidden={page !== localPage}><Library projects={snapshot.projects} updatesOnly={localPage === 'updates'} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} onOpen={(project) => void runProject(project)} onFiles={showProjectFiles} onBackup={showProjectBackup} /></main>{/if}
        {/each}
-       {#if visitedLocal.has('downloads') || page === 'downloads'}<main class="page-content" id={page === 'downloads' ? 'main-content' : undefined} hidden={page !== 'downloads'}><Downloads downloads={snapshot.downloads} {query} {busy} onretry={(id) => void operate('retry_download', { id }, { success: '已重新加入下载队列。' })} oncancel={(id) => void operate('cancel_download', { id }, { success: '已请求取消下载。' })} oninstall={showInstall} onfolder={(id) => void operate('open_download', { id }, { refresh: false })} onmark={markDownloaded} onproject={openProject} oncopy={(text) => void copy(text)} onversions={showManagedVersions} /></main>{/if}
-       {#if githubVisited || page === 'github'}<main class="page-content" id={page === 'github' ? 'main-content' : undefined} hidden={page !== 'github'}><Github projects={snapshot.projects} {preview} active={page === 'github'} initialTab={snapshot.settings.startupGithubTab} onadd={addGithubRepository} onopen={(url) => void openUrl(url)} oncopy={(text) => void copy(text)} onnotice={notify} /></main>{/if}
-      {#if showingDetails && selectedProject}<button class="detail-backdrop" aria-label="关闭资源详情" onclick={() => selectedId = null}></button><ProjectDetail project={selectedProject} {busy} onclose={() => selectedId = null} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onupdate={(id, changes) => void updateProject(id, changes)} onmark={showMark} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => openDialog({ kind: 'remove', project })} onopen={(url) => void openUrl(url)} />{/if}</div>
+       {#if visitedLocal.has('downloads') || page === 'downloads'}<main class="page-content" id={page === 'downloads' ? 'main-content' : undefined} hidden={page !== 'downloads'}><Downloads downloads={snapshot.downloads} {query} {busy} onexternalretry={(download) => showExternalDownload([], download)} onexternalimport={(download) => void importExternalDownload(download)} onretry={(id) => void operate('retry_download', { id }, { success: '已重新加入下载队列。' })} oncancel={(id) => void operate('cancel_download', { id }, { success: '已请求取消下载。' })} oninstall={showInstall} onDelete={(download) => openDialog({ kind: 'deleteDownload', download })} onfolder={(id) => void operate('open_download', { id }, { refresh: false })} onmark={markDownloaded} onproject={openProject} oncopy={(text) => void copy(text)} onversions={showManagedVersions} /></main>{/if}
+       {#if githubVisited || page === 'github'}<main class="page-content github-workspace" id={page === 'github' ? 'main-content' : undefined} hidden={page !== 'github'}><Github projects={snapshot.projects} {preview} preload active={page === 'github'} initialTab={snapshot.settings.startupGithubTab} onadd={addGithubRepository} onopen={(url) => void openUrl(url)} oncopy={(text) => void copy(text)} onnotice={notify} /></main>{/if}
+      {#if showingDetails && selectedProject}<button class="detail-backdrop" aria-label="关闭资源详情" onclick={() => selectedId = null}></button>{#key `${selectedProject.id}:${detailRevision}`}<ProjectDetail project={selectedProject} initialTab={detailTab} {busy} {preview} onexternal={(project) => showExternalDownload([project])} onrun={(project) => void runProject(project)} onexecutable={(project) => void chooseExecutable(project)} onrestore={(backup) => openDialog({ kind: 'backup', operation: 'restore', backup })} ondeletebackup={(backup) => openDialog({ kind: 'backup', operation: 'delete', backup })} onclose={() => selectedId = null} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onupdate={(id, changes) => void updateProject(id, changes)} onmark={showMark} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => openDialog({ kind: 'remove', project })} onopen={(url) => void openUrl(url)} />{/key}{/if}</div>
     </div>
   </div>
 {/if}
@@ -366,8 +413,14 @@
       <div class="modal-footer"><span class="field-hint"><Icon name="github" size={14} />公开项目无需登录</span><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy || !parsedRepository}><Icon name={busy ? 'loader' : 'plus'} class={busy ? 'spinning' : ''} size={16} />{busy ? '正在添加' : '添加资源'}</button></div>
     </form>
   </Modal>
+{:else if modal?.kind === 'external'}
+  <Modal title={modal.retry ? '重新发送下载链接？' : '交给外部下载器？'} description={snapshot?.settings.externalDownloader?.name ?? 'AB Download Manager'} onclose={closeDialog}><div class="modal-form"><p class="confirmation-details">{modal.retry ? '请先到外部下载器检查原任务，确认没有重复任务后再发送。' : `将 ${modal.projects.length} 项公开发行链接发送到本机下载器。下载完成后，在追新的下载页导入文件并校验；安装仍需另行确认。`}</p><p class="field-hint">{snapshot?.settings.externalDownloader?.endpoint ?? 'http://127.0.0.1:15151/start-headless-download'}</p>{#if formError}<p class="field-error" role="alert">{formError}</p>{/if}<div class="modal-footer"><button class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" disabled={busy} onclick={() => void submitExternalDownload()}>{busy ? '正在发送' : modal.retry ? '确认重新发送' : '确认发送链接'}</button></div></div></Modal>
 {:else if modal?.kind === 'install'}
-  <Modal title={modal.download.kind === 'portable' ? '确认安装到受管目录' : '确认打开安装程序'} description="核对版本与文件后继续安装。" onclose={closeDialog}><form class="modal-form" onsubmit={submitInstall}><div class="confirm-package"><Icon name="package" size={28} /><div><strong>{modal.download.projectName} <span>{modal.download.tag}</span></strong><p>{modal.download.fileName}</p><small>{formatBytes(modal.download.totalBytes)}</small></div></div><div class="confirmation-details">{#if modal.download.kind === 'portable'}<p>{modal.download.fileName.toLowerCase().endsWith('.exe') ? '将主程序复制到追新管理的应用目录。' : '将压缩包解压到追新管理的独立版本目录。'}</p><p>完成后记为当前版本。各版本与配置分别保存在原目录，可在“管理已准备版本”中切换。</p>{:else}<p>将启动下载的 EXE / MSI 安装程序。请在作者的安装向导中自行决定位置与选项。</p><p>完成安装向导后，在下载页点“已自行安装？”记录版本。</p>{/if}<p class="integrity-disclaimer"><Icon name="shield" size={15} />{modal.download.verified ? '该文件与上游提供的摘要一致。' : '此文件没有可供比对的上游校验结果，请核对项目来源。'}</p></div><label class="confirmation-check"><input type="checkbox" bind:checked={installConfirmed} required />我已核对项目、版本与文件，并同意执行上述操作。</label>{#if formError}<p class="field-error" role="alert">{formError}</p>{/if}<div class="modal-footer"><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>暂不安装</button><button class="button primary" type="submit" disabled={busy || !installConfirmed}><Icon name={busy ? 'loader' : 'install'} class={busy ? 'spinning' : ''} size={16} />{busy ? '正在处理' : modal.download.kind === 'portable' ? '确认安装' : '确认打开安装程序'}</button></div></form></Modal>
+  <InstallConfirmation download={modal.download} {preview} {busy} onclose={closeDialog} onconfirm={submitInstall} />
+{:else if modal?.kind === 'deleteDownload'}
+  <Modal title="删除这个已下载安装包？" description={modal.download.fileName} onclose={closeDialog}><div class="modal-form"><p class="confirmation-details">删除这条下载记录及其受管文件，预计释放 {formatBytes(modal.download.totalBytes)}。已安装软件和最近一次备份保留，需要时可从资源库重新下载。</p><div class="modal-footer"><button class="button secondary" disabled={busy} onclick={closeDialog}>保留安装包</button><button class="button danger" disabled={busy} onclick={() => void deleteDownload()}>确认删除安装包</button></div></div></Modal>
+{:else if modal?.kind === 'backup'}
+  <Modal title={modal.operation === 'restore' ? '恢复更新前的文件状态？' : '删除最近一次备份？'} description={modal.backup.version ?? '更新前文件备份'} onclose={closeDialog}><div class="modal-form"><p class="confirmation-details">{modal.operation === 'restore' ? '恢复会移除更新后新增的文件，覆盖现有配置，并同步更新前版本记录。请先关闭这个软件；此后的配置改动也会被撤回。' : '仅删除这份备份，不删除当前软件或安装包。删除后这个回退点失效，操作无法撤回。'}</p><p class="field-hint">{modal.backup.targetPath}</p>{#if modal.backup.kind === 'installer'}<p class="warning-text">此操作只处理文件，不能完整回退 EXE / MSI 修改的注册表、服务等。</p>{/if}<div class="modal-footer"><button class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class={modal.operation === 'delete' ? 'button danger' : 'button primary'} disabled={busy} onclick={() => void applyBackup()}>{modal.operation === 'restore' ? '确认恢复文件' : '确认删除备份'}</button></div></div></Modal>
 {:else if modal?.kind === 'managed'}
   {#key modal.projectId}<ManagedVersions project={managedProject} versions={managedVersions} loading={managedLoading} error={managedError} actionError={formError} {busy} {preview} onclose={closeDialog} onrefresh={() => void loadManagedVersions()} onopen={(id) => void openManagedVersion(id)} onactivate={activateManagedVersion} />{/key}
 {:else if modal?.kind === 'mark'}

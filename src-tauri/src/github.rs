@@ -33,6 +33,7 @@ struct Backend {
     oauth: Arc<OAuth>, cache: GithubCache, requests: Arc<Semaphore>, verify_at: AtomicU64,
     flights: StdMutex<BTreeMap<String, Weak<Flight>>>,
     etags: StdMutex<BTreeMap<String, (String, ApiResponse)>>,
+    list_snapshot: ListSnapshotCache,
 }
 #[derive(Default)]
 struct Session { login: Option<LoginView>, generation: u64 }
@@ -262,7 +263,7 @@ impl GithubService {
         }
         Arc::new(Self {
             backend: Arc::new(Backend { cache, auth_root, proxy, configuration_error, oauth,
-                requests, verify_at: AtomicU64::new(0), flights: StdMutex::new(BTreeMap::new()), etags: StdMutex::new(BTreeMap::new()) }),
+                requests, verify_at: AtomicU64::new(0), flights: StdMutex::new(BTreeMap::new()), etags: StdMutex::new(BTreeMap::new()), list_snapshot: ListSnapshotCache::default() }),
             session: Arc::new(StdMutex::new(Session::default())), operation: Mutex::new(()),
             login_task: StdMutex::new(None), shutting_down: AtomicBool::new(false),
         })
@@ -687,11 +688,13 @@ impl Backend {
                 Some(string_array(payload, "repositories", 100)?)),
             _ => (&["github_lists", "github_list_repositories", "github_repository_lists"], None),
         };
+        self.list_snapshot.invalidate();
         let result = self.cache.invalidate(&namespace, operations, names.as_deref());
         self.etags.lock().unwrap_or_else(|e| e.into_inner()).clear();
         result
     }
     fn clear_cache(&self) -> Result<(), String> {
+        self.list_snapshot.invalidate();
         let result = self.cache.clear();
         self.etags.lock().unwrap_or_else(|e| e.into_inner()).clear();
         result
@@ -922,11 +925,72 @@ struct ListMemberships {
     starred: BTreeSet<String>,
 }
 
+const LIST_SNAPSHOT_TTL: Duration = Duration::from_secs(60);
+struct ListSnapshot { catalog: Vec<Value>, memberships: ListMemberships }
+struct ListSnapshotEntry { key: String, updated_at: Instant, data: Arc<ListSnapshot> }
+#[derive(Default)]
+struct ListSnapshotCache {
+    generation: AtomicU64,
+    value: StdMutex<Option<ListSnapshotEntry>>,
+    loading: Mutex<()>,
+}
+impl ListSnapshotCache {
+    fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        *self.value.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+    fn fresh(&self, key: &str, now: Instant) -> Option<Arc<ListSnapshot>> {
+        self.value.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+            .filter(|entry| entry.key == key && now.saturating_duration_since(entry.updated_at) < LIST_SNAPSHOT_TTL)
+            .map(|entry| entry.data.clone())
+    }
+    async fn load<F, Fut>(&self, key: String, fetch: F) -> Result<Arc<ListSnapshot>, String>
+    where F: FnOnce() -> Fut, Fut: std::future::Future<Output = Result<ListSnapshot, String>> {
+        let generation = self.generation.load(Ordering::SeqCst);
+        if let Some(data) = self.fresh(&key, Instant::now()) { return Ok(data); }
+        // All repository keys share one cold complete scan, not one flight per repository.
+        let _loading = self.loading.lock().await;
+        if generation != self.generation.load(Ordering::SeqCst) { return Err(ACCOUNT_CHANGED.into()); }
+        if let Some(data) = self.fresh(&key, Instant::now()) { return Ok(data); }
+        let data = Arc::new(fetch().await?);
+        let mut value = self.value.lock().unwrap_or_else(|e| e.into_inner());
+        if generation != self.generation.load(Ordering::SeqCst) { return Err(ACCOUNT_CHANGED.into()); }
+        *value = Some(ListSnapshotEntry { key, updated_at: Instant::now(), data: data.clone() });
+        Ok(data)
+    }
+}
+
+impl Backend {
+    async fn shared_list_snapshot(&self, account: &Account) -> Result<Arc<ListSnapshot>, String> {
+        let session = self.oauth.snapshot();
+        let epoch = self.cache.epoch();
+        check_request_revision(session.revision)?;
+        if session.account.as_ref().map(|value| value.id) != Some(account.id) { return Err(ACCOUNT_CHANGED.into()); }
+        let key = format!("{}:{}:{}", cache_namespace(&session), session.revision, epoch);
+        let data = self.list_snapshot.load(key, || async {
+            let catalog = self.list_catalog(&account.login).await?;
+            let memberships = self.list_memberships(&account.login, &catalog).await?;
+            if self.oauth.snapshot().revision != session.revision || self.cache.epoch() != epoch { return Err(ACCOUNT_CHANGED.into()); }
+            Ok(ListSnapshot { catalog, memberships })
+        }).await?;
+        if self.oauth.snapshot().revision != session.revision || self.cache.epoch() != epoch { return Err(ACCOUNT_CHANGED.into()); }
+        Ok(data)
+    }
+}
+
 impl GithubService {
     async fn lists(&self, payload: &Value) -> Result<Value, String> {
         fields(payload, &[])?;
         let account = self.authenticated_account().await?;
-        Ok(json!(self.backend.list_catalog(&account.login).await?))
+        // Explicit catalog refresh must remain live; normal UI reads use the frontend cache.
+        // Do not start a full membership scan merely to display or refresh category names.
+        let catalog = self.backend.list_catalog(&account.login).await?;
+        let session = self.backend.oauth.snapshot();
+        let key = format!("{}:{}:{}", cache_namespace(&session), session.revision, self.backend.cache.epoch());
+        if self.backend.list_snapshot.fresh(&key, Instant::now()).is_some_and(|snapshot| snapshot.catalog != catalog) {
+            self.backend.list_snapshot.invalidate();
+        }
+        Ok(json!(catalog))
     }
 
     async fn save_list(&self, payload: &Value) -> Result<Value, String> {
@@ -980,10 +1044,8 @@ impl GithubService {
         let account = self.authenticated_account().await?;
         let unlisted = requested == "unlisted";
         let all = requested == "all" || unlisted;
-        let memberships = if unlisted {
-            let lists = self.backend.list_catalog(&account.login).await?;
-            Some(self.backend.list_memberships(&account.login, &lists).await?)
-        } else { None };
+        let snapshot = if unlisted { Some(self.backend.shared_list_snapshot(&account).await?) } else { None };
+        let memberships = snapshot.as_ref().map(|snapshot| &snapshot.memberships);
         let data = if all {
             self.backend.graphql(ListOperation::Stars, json!({ "after": cursor }), false).await?
         } else {
@@ -1011,9 +1073,8 @@ impl GithubService {
         fields(payload, &["repository"])?;
         let repository = RepositoryName::parse(string_field(payload, "repository")?)?;
         let account = self.authenticated_account().await?;
-        let lists = self.backend.list_catalog(&account.login).await?;
-        let memberships = self.backend.list_memberships(&account.login, &lists).await?;
-        let ids = memberships.by_repository.get(&repository.full_name().to_ascii_lowercase()).cloned().unwrap_or_default();
+        let snapshot = self.backend.shared_list_snapshot(&account).await?;
+        let ids = snapshot.memberships.by_repository.get(&repository.full_name().to_ascii_lowercase()).cloned().unwrap_or_default();
         Ok(json!({ "listIds": ids }))
     }
 
@@ -2124,6 +2185,68 @@ mod tests {
         service.backend.oauth.clear().unwrap();
         drop(completed);
         assert_eq!(read.await.unwrap_err(), ACCOUNT_CHANGED);
+    }
+
+    fn snapshot_fixture() -> ListSnapshot {
+        ListSnapshot { catalog: vec![json!({"id":"one"}), json!({"id":"two"})], memberships: ListMemberships {
+            by_repository: BTreeMap::from([("fixture/repo".into(), BTreeSet::from(["one".into(), "two".into()]))]),
+            starred: BTreeSet::from(["fixture/repo".into()]),
+        } }
+    }
+
+    #[tokio::test]
+    async fn list_snapshot_coalesces_repositories_and_keeps_complete_membership() {
+        let cache = ListSnapshotCache::default();
+        let scans = AtomicU64::new(0);
+        let (release, wait) = oneshot::channel::<()>();
+        let first = cache.load("account:7:1".into(), || async {
+            scans.fetch_add(1, Ordering::SeqCst); let _ = wait.await; Ok(snapshot_fixture())
+        });
+        let second = cache.load("account:7:1".into(), || async {
+            scans.fetch_add(1, Ordering::SeqCst); Ok(snapshot_fixture())
+        });
+        tokio::pin!(first); tokio::pin!(second);
+        std::future::poll_fn(|cx| {
+            use std::future::Future;
+            assert!(first.as_mut().poll(cx).is_pending()); assert!(second.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        }).await;
+        release.send(()).unwrap();
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap(); let second = second.unwrap();
+        assert_eq!(scans.load(Ordering::SeqCst), 1); assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(second.memberships.by_repository["fixture/repo"].len(), 2);
+        assert!(cache.fresh("account:8:1", Instant::now()).is_none());
+        assert!(cache.fresh("other-account:7:1", Instant::now()).is_none());
+        assert!(cache.fresh("account:7:1", Instant::now() + LIST_SNAPSHOT_TTL).is_none());
+    }
+
+    #[tokio::test]
+    async fn list_snapshot_failure_and_invalidation_never_publish() {
+        let cache = ListSnapshotCache::default();
+        assert!(cache.load("account:7:1".into(), || async { Err("incomplete".into()) }).await.is_err());
+        assert!(cache.fresh("account:7:1", Instant::now()).is_none());
+        let result = cache.load("account:7:1".into(), || async { cache.invalidate(); Ok(snapshot_fixture()) }).await;
+        assert_eq!(result.err().unwrap(), ACCOUNT_CHANGED);
+        assert!(cache.fresh("account:7:1", Instant::now()).is_none());
+        cache.load("account:7:2".into(), || async { Ok(snapshot_fixture()) }).await.unwrap();
+        cache.invalidate(); assert!(cache.fresh("account:7:2", Instant::now()).is_none());
+    }
+
+    #[tokio::test]
+    async fn list_snapshot_clears_on_mutations_and_explicit_cache_clear() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = GithubService::new(temp.path().join("account"), test_secrets(temp.path()), test_proxy());
+        for (action, args) in [("github_set_star", json!({"repository":"fixture/repo"})),
+            ("github_save_list", json!({})), ("github_delete_list", json!({})),
+            ("github_assign_lists", json!({"repositories":["fixture/repo"]}))] {
+            service.backend.list_snapshot.load("fixture".into(), || async { Ok(snapshot_fixture()) }).await.unwrap();
+            service.backend.invalidate_mutation(action, &args).unwrap();
+            assert!(service.backend.list_snapshot.fresh("fixture", Instant::now()).is_none());
+        }
+        service.backend.list_snapshot.load("fixture".into(), || async { Ok(snapshot_fixture()) }).await.unwrap();
+        service.backend.clear_cache().unwrap();
+        assert!(service.backend.list_snapshot.fresh("fixture", Instant::now()).is_none());
     }
 
     #[tokio::test]

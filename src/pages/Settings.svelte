@@ -9,9 +9,10 @@
   import Toggle from '../components/Toggle.svelte';
   import AiConnection from '../components/AiConnection.svelte';
   import ProxySettings from '../components/ProxySettings.svelte';
+  import ExternalDownloadSettings from '../components/ExternalDownloadSettings.svelte';
   let { settings, runtime, busy, preview, onsave, onproxy, onproxytest, onintegration, ongithub, ondata, onexport, onimport, ontextimport, oncopyexport, oncopy, onopen }: {
     settings: Settings; runtime: RuntimeInfo; busy: boolean; preview: boolean;
-    onsave: (changes: Partial<Settings>) => void; onintegration: () => Promise<AgentIntegration | null>;
+    onsave: (changes: Partial<Settings>) => Promise<boolean>; onintegration: () => Promise<AgentIntegration | null>;
     onproxy: (proxy: ProxyConfig, password?: string) => Promise<boolean>; onproxytest: (proxy: ProxyConfig, password?: string) => Promise<ProxyTestResult>;
     ongithub: () => void; ondata: () => void; onexport: () => void; onimport: () => void; ontextimport: () => void;
     oncopyexport: () => void; oncopy: (text: string) => void; onopen: (url: string) => void;
@@ -72,8 +73,11 @@
     <div class="setting-row"><div><strong>桌面通知</strong><p>发现新发行版时提醒我</p></div><Toggle checked={settings.notifications} label="桌面通知" disabled={busy} onchange={() => onsave({ notifications: !settings.notifications })} /></div>
     <div class="setting-row"><div><strong>自动下载选定文件</strong><p>发现更新后下载匹配的文件，有多个选择时等待手动选择</p></div><Toggle checked={settings.autoDownload} label="自动下载选定文件" disabled={busy} onchange={() => onsave({ autoDownload: !settings.autoDownload })} /></div>
     <div class="setting-row"><div><label for="download-limit">同时下载数量</label><p>限制并行任务，给其他工作留些带宽</p></div><select id="download-limit" value={settings.maxConcurrentDownloads} disabled={busy} onchange={(event) => onsave({ maxConcurrentDownloads: Number(event.currentTarget.value) })}>{#each [1, 2, 3, 4] as count}<option value={count}>{count} 个任务</option>{/each}</select></div>
+    <div class="setting-row"><div><label for="download-connections">单文件连接数</label><p>大文件分段下载；不支持分段时自动使用单连接</p></div><select id="download-connections" value={settings.downloadConnections ?? 4} disabled={busy} onchange={(event) => onsave({ downloadConnections: Number(event.currentTarget.value) })}>{#each [1, 2, 3, 4, 5, 6, 7, 8] as count}<option value={count}>{count === 1 ? '1 个连接 · 单连接' : `${count} 个连接${count === 4 ? ' · 推荐' : ''}`}</option>{/each}</select></div>
     <div class="setting-row last"><div><strong>关闭窗口时收进托盘</strong><p>在后台继续留意更新，可从托盘退出</p></div><Toggle checked={settings.closeToTray} label="关闭窗口时收进托盘" disabled={busy} onchange={() => onsave({ closeToTray: !settings.closeToTray })} /></div>
   </section>
+
+  <ExternalDownloadSettings {settings} {busy} {preview} {onsave} />
 
   <section class="surface settings-section" aria-labelledby="cache-title">
     <div class="settings-heading"><Icon name="drive" size={19} /><div><h2 id="cache-title">页面缓存</h2><p>先显示已保存的内容，再在后台检查新变化</p></div></div>

@@ -76,7 +76,7 @@ pub struct FeedReceivePayload {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ProfileRecord { id: Uuid, proxy_fingerprint: String }
+struct ProfileRecord { id: Uuid, #[serde(default)] proxy_fingerprint: String }
 
 /// One bounded, machine-local snapshot. No tokens, cookies, raw HTML or account
 /// authority are serialized. The profile UUID and account bind its ownership.
@@ -118,8 +118,8 @@ impl GitHubFeedService {
         let service = Arc::new(Self { machine_local_root, proxy, state: Mutex::new(FeedState::default()), operation: AsyncMutex::new(()) });
         // Disk-only restore: rendering saved cards never launches a WebView or
         // treats remembered account metadata as a verified website session.
-        if let (Ok(root), Ok(settings), Ok(mut state)) = (service.profile_root(), service.proxy.settings(), service.state.lock()) {
-            if let Some(record) = read_profile(&root).filter(|record| record.proxy_fingerprint == proxy_fingerprint(&settings)) {
+        if let (Ok(root), Ok(mut state)) = (service.profile_root(), service.state.lock()) {
+            if let Some(record) = read_profile(&root) {
                 if let Some(cache) = read_feed_cache(&root, &record) {
                     state.page.cached = true;
                     state.page.account = Some(cache.account);
@@ -178,7 +178,7 @@ impl GitHubFeedService {
     /// proxy is a startup setting; merely changing the HTTP client is not enough.
     pub async fn restart_for_proxy_change(&self, app: &AppHandle) -> Result<(), String> {
         let _operation = self.operation.lock().await;
-        self.reset_session(Some("代理已更新。重新连接网页后会使用新代理。".into()))?;
+        self.invalidate_network(Some("代理已更新，网页登录仍保存在本机。刷新动态后使用新代理验证。".into()))?;
         if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
             window.destroy().map_err(|_| "请关闭 GitHub 网页窗口，再重新连接以应用代理。")?;
         }
@@ -198,6 +198,14 @@ impl GitHubFeedService {
     fn begin(&self, append: bool, clear: bool) -> Result<String, String> {
         let mut state = self.state.lock().map_err(|_| "动态状态暂时不可用。")?;
         Ok(begin_request(&mut state, append, clear))
+    }
+
+    /// Restart transport authority, not account storage. The same machine-local
+    /// WebView2 directory keeps cookies across proxy changes and cache clears.
+    fn invalidate_network(&self, error: Option<String>) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|_| "动态状态暂时不可用。")?;
+        invalidate_network_state(&mut state, error);
+        Ok(())
     }
 
     fn reset_session(&self, error: Option<String>) -> Result<(), String> {
@@ -222,13 +230,14 @@ impl GitHubFeedService {
         let current = self.state.lock().map_err(|_| "动态状态暂时不可用。")?.proxy_fingerprint.clone();
         let stale_window = app.get_webview_window(WINDOW_LABEL).is_some() && self.state.lock().map_err(|_| "动态状态暂时不可用。")?.window_token.is_none();
         if stale_window || current.as_deref().is_some_and(|old| old != fingerprint) {
-            self.reset_session(None)?;
+            self.invalidate_network(None)?;
             if let Some(window) = app.get_webview_window(WINDOW_LABEL) { window.destroy().map_err(|_| "无法重启 GitHub 网页窗口。")?; }
         }
         if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
             self.begin(false, false)?;
             if visible {
                 // A deliberate reopen stays visible for account changes/site inspection.
+                // Only a deliberate connect may present a login window.
                 self.state.lock().map_err(|_| "动态状态暂时不可用。")?.hide_when_ready = false;
                 window.show().map_err(|_| "无法显示 GitHub 网页窗口。")?;
                 window.set_focus().map_err(|_| "无法激活 GitHub 网页窗口。")?;
@@ -376,7 +385,9 @@ impl GitHubFeedService {
 
     fn profile(&self, fingerprint: &str) -> Result<PathBuf, String> {
         let root = self.profile_root()?;
-        let record = read_profile(&root).filter(|record| record.proxy_fingerprint == fingerprint);
+        // The fingerprint describes transport only, never cookie identity.
+        // Accept older records unchanged so existing website logins migrate.
+        let record = read_profile(&root);
         let record = match record { Some(record) => record, None => self.rotate_profile(fingerprint)? };
         let path = root.join(format!("profile-{}", record.id));
         if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) { return Err("网页登录目录不能是链接。".into()); }
@@ -420,9 +431,11 @@ impl GitHubFeedService {
                 clear_account(&mut state, None);
                 let cleanup_error = self.profile_root().and_then(|root| clear_feed_cache(&root)).err();
                 state.page.loading = false; state.started = None;
-                state.page.error = cleanup_error.or_else(|| payload.error.map(|error| plain_text(&error, 400)));
-                // An expired session needs the real page, not an invisible login wait.
-                drop(state); let _ = window.show(); return Ok(());
+                state.page.error = cleanup_error.or_else(|| payload.error.map(|error| plain_text(&error, 400)))
+                    .or_else(|| Some("官网会话尚未登录或已过期，请在账号面板点“官网登录”继续。".into()));
+                // A background refresh never opens or focuses an expired login.
+                // feed_connect already presents the official page explicitly.
+                return Ok(());
             }
             "ready" if verified_report && is_feed_url(&reported_url) => {
                 let items: Vec<_> = payload.items.into_iter().filter_map(sanitize_item).collect();
@@ -455,6 +468,18 @@ impl GitHubFeedService {
 #[tauri::command]
 pub async fn feed_receive(window: WebviewWindow, service: State<'_, Arc<GitHubFeedService>>, payload: FeedReceivePayload) -> Result<(), String> {
     service.receive(&window, payload)
+}
+
+fn invalidate_network_state(state: &mut FeedState, error: Option<String>) {
+    state.page.session_revision += 1;
+    state.page.request_id = Uuid::new_v4().to_string();
+    state.page.connected = false;
+    state.page.cached = state.page.account.is_some() && state.page.last_updated.is_some();
+    state.page.loading = false;
+    state.page.error = error;
+    state.window_token = None; state.proxy_fingerprint = None;
+    state.document_id = None; state.sequence = 0; state.started = None;
+    state.append = false; state.hide_when_ready = false;
 }
 
 fn begin_request(state: &mut FeedState, append: bool, clear: bool) -> String {
@@ -671,6 +696,26 @@ mod tests {
         assert_eq!(service.snapshot().unwrap()["items"].as_array().unwrap().len(), 1);
         service.rotate_profile("new-proxy").unwrap(); assert!(!root.join(CACHE_FILE).exists());
         assert_eq!(service.snapshot().unwrap()["items"].as_array().unwrap().len(), 0);
+    }
+    #[test]
+    fn proxy_transport_change_preserves_cookie_profile_and_restored_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = GitHubFeedService::new(temp.path().to_path_buf(), Arc::new(ProxyState::new(ProxySettings::default(), None).unwrap()));
+        let original = service.profile("proxy-a").unwrap();
+        fs::write(original.join("cookie-fixture"), b"non-secret fixture").unwrap();
+        let root = service.profile_root().unwrap(); write_feed_cache(&root, &cache_page()).unwrap();
+        assert_eq!(service.profile("proxy-b").unwrap(), original);
+        assert!(original.join("cookie-fixture").exists()); assert!(root.join(CACHE_FILE).exists());
+        service.state.lock().unwrap().page = cache_page(); service.state.lock().unwrap().window_token = Some("retired-window".into());
+        let request = service.snapshot().unwrap()["requestId"].clone(); service.invalidate_network(None).unwrap();
+        let snapshot = service.snapshot().unwrap(); assert_eq!(snapshot["cached"], true); assert_eq!(snapshot["connected"], false);
+        assert_eq!(snapshot["account"], "saved-user"); assert_eq!(snapshot["items"].as_array().unwrap().len(), 1);
+        assert_ne!(snapshot["requestId"], request); assert!(service.script("retired-window").is_none());
+        // A legacy fingerprint mismatch must not suppress restoration on launch.
+        let restored = GitHubFeedService::new(temp.path().to_path_buf(), Arc::new(ProxyState::new(ProxySettings::default(), None).unwrap()));
+        assert_eq!(restored.snapshot().unwrap()["account"], "saved-user");
+        service.reset_session(None).unwrap(); service.rotate_profile("").unwrap();
+        assert_ne!(service.profile("proxy-b").unwrap(), original); assert!(!root.join(CACHE_FILE).exists());
     }
     #[tokio::test]
     async fn cleanup_only_removes_retired_uuid_profiles() {

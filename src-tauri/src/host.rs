@@ -255,6 +255,12 @@ async fn dispatch(window: tauri::WebviewWindow, app: tauri::AppHandle, state: ta
             host.feed.clear_cache()?;
             Ok(Value::Null)
         }
+        "github_logout" => {
+            let value = host.github.handle("github_logout", payload).await?;
+            host.feed.handle(&app, "feed_disconnect", json!({})).await?;
+            let _ = app.emit("releasehub:changed", json!({}));
+            Ok(value)
+        }
         action if action.starts_with("github_") => host.github.handle(action, payload).await,
         "reveal_agent_connection" => host.connection().await,
         "rotate_agent_token" => {
@@ -265,6 +271,35 @@ async fn dispatch(window: tauri::WebviewWindow, app: tauri::AppHandle, state: ta
             host.secrets.set("agent", Some(&token))?;
             agent.rotate_token(token.clone())?;
             Ok(json!({"address": agent.address, "token": token}))
+        }
+        "pick_project_executable" => {
+            let project_id = object_string(&payload, "projectId")?.to_owned();
+            let dialog_app = app.clone();
+            let chosen = tauri::async_runtime::spawn_blocking(move || dialog_app.dialog().file()
+                .add_filter("软件启动程序", &["exe"]).blocking_pick_file())
+                .await.map_err(|_| "无法打开程序选择窗口。")?;
+            let Some(chosen) = chosen else { return Ok(Value::Null); };
+            let path = chosen.into_path().map_err(|_| "请选择本机 EXE 文件。")?;
+            let value = host.core.save_project_executable(&project_id, &path.to_string_lossy())?;
+            let _ = app.emit("releasehub:changed", json!({}));
+            Ok(value)
+        }
+        "open_project" => {
+            let project_id = object_string(&payload, "projectId")?;
+            let path = host.core.project_executable(project_id)?;
+            // Execute only the saved, revalidated local EXE, with no shell, script or arguments.
+            std::process::Command::new(&path).current_dir(path.parent().ok_or("启动程序目录无效。")?)
+                .spawn().map_err(|_| "无法启动软件。请确认文件存在且未被拦截，或重新选择启动程序。")?;
+            Ok(Value::Null)
+        }
+        "import_external_download" => {
+            if payload["confirmed"].as_bool() != Some(true) { return Err("请先确认选择外部下载完成的发行附件。".into()); }
+            let id = object_string(&payload, "id")?.to_owned();
+            let chosen = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_file())
+                .await.map_err(|_| "无法打开文件选择窗口。")?;
+            let Some(chosen) = chosen else { return Ok(Value::Null); };
+            let path = chosen.into_path().map_err(|_| "请选择本机下载文件。")?;
+            crate::core::output(host.core.import_external_file(&id, &path).await?)
         }
         "pick_directory" => {
             let chosen = tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())

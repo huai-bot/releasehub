@@ -18,7 +18,13 @@ Settings add `startupPage` (one of the six workspace pages), `startupGithubTab` 
 
 `RepositoryNote` stores `{ repository, name, description, updatedAt }` in a separate SQLite table. Repository keys are lowercase `owner/repo`; local names and descriptions are single-line, limited to 80 and 240 characters. Empty name plus description removes the note. A note does not require a subscription and never changes the upstream repository.
 
-Projects add `managementMode: software|files` (old records default software), and `fileStatus: notDownloaded|downloaded|updateAvailable|missing`. Assets expose separate `downloadable` and `installable` booleans; legacy `compatible` retains the software recommendation meaning. Download records persist `installable` so a ZIP saved in file mode never gains installation actions. Add/update/import/export preserve mode. File status is derived from matching completed download records and actual paths, not installedVersion; multiple files from one release are supported. The SQLite v2→v3 migration is transactional and refuses unknown future schema versions.
+Projects add `managementMode: software|files` (old records default software), and `fileStatus: notDownloaded|downloaded|updateAvailable|missing`. Assets expose separate `downloadable` and `installable` booleans; legacy `compatible` retains the software recommendation meaning. Download records persist `installable` so a ZIP saved in file mode never gains installation actions. Add/update/import/export preserve mode. File status is derived from matching completed download records and actual paths, not installedVersion; multiple files from one release are supported. SQLite migrations are transactional and refuse unknown future schema versions. Schema 4 adds executablePath, backups and install_journals. Download status `deleted` keeps history after managed package deletion; it does not erase installedVersion or backups. External original software directories are not portable data.
+
+## Download connections and external handoff
+
+Settings add `downloadConnections` (1..8, default 4), `useExternalDownloader` (default false), and `externalDownloader: { name, endpoint, requestTemplate }`. Older settings receive defaults. Subscription export carries connection count but excludes the machine-local external interface configuration. Internal downloads of at least 4 MiB probe a byte range and use validated segments only with stable identity, exact range/length and trusted URLs; unsupported servers fall back to one stream. Publication never overwrites an existing file and validates the merged SHA-256.
+
+Manual external handoff requires confirmation and sends public release metadata via a loopback HTTP JSON POST, without credentials or proxy settings. The AB preset uses port 15151 and `/start-headless-download`. Templates support `{url}`, `{pageUrl}`, `{fileName}`, `{projectName}` and `{tag}`. The record stays `external`, with no invented progress or completion. Ambiguous receipt failures require checking the downloader before confirmed retry. `import_external_download` uses a native picker, verifies exact size and any publisher digest, and copies into the owned download directory before enabling installation. The source remains intact. Automatic download continues to use the internal downloader.
 
 ## Core facade (backend owner's public Rust interface)
 
@@ -38,6 +44,10 @@ impl Core {
 
 `Core` must be Send + Sync. SQLite operations must not hold a lock across a network await. Downloads run in background with bounded concurrency. Core emits `releasehub:changed` after metadata changes and throttled `releasehub:download` progress (no secret fields). Download failures/cancellation remain visible and recoverable. Persist running downloads as interrupted on restart, rather than claiming completion.
 
+Downloads use `downloadConnections` (1..8, default 4) independently of concurrent task count. Files >=4MiB probe a byte range and stable strong ETag/Last-Modified; exact 206 headers, identity encoding and trusted final URLs are required. Unsupported ranges fall back to one stream. Segments drain on failure/cancellation before cleanup and are merged with SHA-256 before no-overwrite publication.
+
+External downloader settings are `useExternalDownloader` (default false) and `externalDownloader: { name, endpoint, requestTemplate }`. Only loopback HTTP JSON POST is allowed, with no proxy, redirects, cookies or OAuth headers. The AB preset uses `127.0.0.1:15151/start-headless-download`; tokens are substituted as JSON string data without recursive expansion. `external` records do not imply completion: explicit file import validates exact size, known upstream digest, owned destination and no symlink/reparse ancestors before atomically publishing. Automatic downloads stay internal. The external configuration is excluded from portable JSON library export.
+
 The host provides periodic update scheduling and native notifications based on settings. The core handles checks and optional automatic download of confidently selected compatible assets. `check_updates` itself must not run an installer.
 
 ## Actions implemented by core
@@ -51,9 +61,18 @@ The host provides periodic update scheduling and native notifications based on s
 | remove_project | { id } | null (remove tracking, never installed/downloaded files) |
 | check_updates | { projectIds?: string[], allowAutoDownload?: boolean } | CheckResult; omitted IDs means all; UI default true, Agent HTTP must force false |
 | download_asset | { projectId, assetId } | DownloadRecord (queued) |
+| send_external_download | { projectId, assetId, confirmed: true } | DownloadRecord; reserved external state, deduplicated, public metadata only |
+| retry_external_download | { id, confirmed: true } | DownloadRecord; explicit resend after receipt check |
+| import_external_download | { id, confirmed: true } | DownloadRecord|null; host file picker, exact size/digest copy into owned download directory |
+| test_external_downloader | { config: ExternalDownloader } | { ok, message }; TCP reachability only, not API acceptance |
 | retry_download | { id } | DownloadRecord |
 | cancel_download | { id } | null |
-| install_download | { id, confirmed: true } | InstallResult |
+| preview_install | { id, targetPath?: string } | InstallPreview; read-only target/package/space/root checks |
+| install_download | { id, confirmed: true, targetPath, archiveRoot?: string, previousVersion?: string|null } | InstallResult; target must match validation; ZIP root explicitly selected |
+| get_backup | { projectId } | BackupRecord|null; latest backup or interrupted recovery |
+| restore_backup | { projectId, confirmed: true } | Project; restore complete file state and recorded version/path |
+| delete_backup | { projectId, confirmed: true } | null; only idle completed backups |
+| delete_download | { id, confirmed: true } | null; delete managed package, retain history/software/backup |
 | mark_installed | { projectId, version, path?: string } | Project (manual confirmation, not a fake detector) |
 | list_managed_versions | { projectId } | ManagedVersion[]: downloadId, version, path, active; only recorded, existing, isolated managed installs |
 | activate_managed_version | { projectId, downloadId, confirmed: true } | Project; switch the tracked active managed directory/version, never launch, overwrite, or remove a program |
@@ -76,13 +95,17 @@ Files mode never chooses all attachments automatically and never installs, extra
 
 Downloads: single-file maximum 4 GiB. HTTPS GitHub release domains only; reject userinfo/nonstandard ports/untrusted redirects. Never send GitHub API authorization headers to artifact hosts. Stream to a .part file, enforce finite sizes, compute SHA-256, compare an upstream sha256 digest if supplied, and only then rename as completed. A computed hash without an upstream digest is not publisher verification. Sanitize names and do not overwrite an existing completed asset.
 
-Install: EXE/MSI opens the official installer only with confirmed=true; do not mark installed until verified or the user records it. ZIP extraction checks enclosed paths, links, file count and expanded size. Install only in managed `data/apps/<project-id>/...`, never arbitrary existing installPath. Keep rollback/recovery local to the managed application and preserve known configuration safely. If preservation cannot be established, do not silently replace an existing install: require a user-readable safe fallback. Do not execute anything when creating an Agent task.
+Install: explicit confirmation is required after a read-only preview of the dedicated original software directory, complete backup size, disk space and archive roots. ZIP extraction checks enclosed paths, links/reparse points, file count and expanded size; never guess a wrapper directory. Overlay the explicitly selected package root onto the original directory: replace same-name files (including configuration), retain files absent from the package. A durable install journal and full pre-update file snapshot in `data/backups/<project-id>/<run-id>` precede writes; interrupted/failed operations restore the snapshot or remain visibly recovery-required. Preserve the prior completed backup until the new transaction succeeds, then retain only the latest per project. Restore/deletion require separate confirmation. Old managed installs can migrate only to an explicitly chosen external empty dedicated directory; retain the old location and commit the new tracked path only on success. Existing managed-version path switching remains compatibility-only.
+
+EXE/MSI opens the author's official wizard only after a file backup; the user must select the same directory and record the completed version. File restore cannot undo registry, services or all installer changes. Download completion or opening a wizard is never proof of installation. Development fixtures never update real installed user software. Agent tasks cannot invoke this write/launch flow.
 
 ## Host-only actions (lead implements)
 
 | action | payload | result |
 | --- | --- | --- |
 | pick_directory | {} | string or null (native chooser) |
+| pick_project_executable | { projectId } | Project|null; native EXE picker, validate inside recorded install directory without links/reparse points |
+| open_project | { projectId } | null; revalidate saved executable, spawn directly with its directory, no shell or arguments |
 | export_library_file | {} | { path: string } or null (native save dialog) |
 | import_library_file | {} | { imported, skipped, notesImported } or null (native open dialog) |
 | open_url | { url } | null (validate HTTPS GitHub URLs, then system browser) |
@@ -135,7 +158,9 @@ The main window disables native decorations and uses the shared Slate/Cobalt the
 
 ## GitHub Lists and homepage feed
 
-The GitHub workspace mounts lazily on its first visit and remains mounted but hidden when another workspace page is selected. Its dedicated scroll container retains the current tab, category, loaded cursor pages, filter, detail and scroll position without refetching on navigation. Each GitHub tab has independent query, pagination, filter, selection and scroll state. `github_cache_read` returns account/scope/parameter-bound projections from machine-local disk before any network wait. Current-session fresh entries skip refetch; disk-restored entries are shown while background validation runs once. TTLs: search 10min, owned/Stars/Lists 5min, detail/README 60min, activity 2min. Failures preserve visible data and timestamp. Disk API cache is 98 MiB / 30 days plus a separate 2 MiB feed budget; corrupt/expired entries are misses. Clear invalidates in-flight persistence. Explicit refresh retains old content until a result arrives; account changes and logout clear account-scoped state and invalidate in-flight results. Login and feed status polling pause while the workspace is hidden and resume without clearing displayed content.
+The GitHub workspace mounts hidden after startup and preloads connected-account views with bounded concurrency; it remains mounted but hidden when another workspace page is selected. Its dedicated scroll container retains the current tab, category, loaded cursor pages, filter, detail and scroll position without refetching on navigation. Each GitHub tab has independent query, pagination, filter, selection and scroll state. `github_cache_read` returns account/scope/parameter-bound projections from machine-local disk before any network wait. Current-session fresh entries skip refetch; disk-restored entries are shown while background validation runs once. TTLs: search 10min, owned/Stars/Lists 5min, detail/README 60min, activity 2min. Failures preserve visible data and timestamp. Disk API cache is 98 MiB / 30 days plus a separate 2 MiB feed budget; corrupt/expired entries are misses. Clear invalidates in-flight persistence. Explicit refresh retains old content until a result arrives; account changes and logout clear account-scoped state and invalidate in-flight results. Login and feed status polling pause while the workspace is hidden and resume without clearing displayed content.
+
+Stars results, hover/focus and detail views preload category membership through one two-worker frontend queue. Opening the assignment editor accepts fresh account-bound cache entries, coalesces pending reads, and preserves user checkbox edits during revalidation. Backend membership and unlisted views share a complete catalog/membership snapshot for 60 seconds, keyed by account, session revision and cache epoch. Mutation and cache clearing invalidate it; explicit category refresh reads the live catalog and invalidates a changed snapshot. Mutation before/after verification remains live.
 
 Stars classification uses fixed official GraphQL queries for `User.lists`, `UserList.items`, `createUserList`, `updateUserList`, `deleteUserList`, and `updateUserListsForItem`. The last mutation replaces all membership: add/remove first read every list and membership cursor, merge the requested change, then verify the result. All/unlisted Stars use cursor pagination. List URLs are constructed from the authenticated login and list slug. Names/descriptions shown as local notes remain local.
 

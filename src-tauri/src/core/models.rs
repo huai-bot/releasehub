@@ -31,6 +31,8 @@ pub struct Project {
     #[serde(default)]
     pub file_status: Option<String>,
     pub installed_version: Option<String>, pub installed_path: Option<String>,
+    #[serde(default)]
+    pub executable_path: Option<String>,
     pub installed_source: Option<String>, pub release: Option<Release>,
     pub selected_asset_id: Option<u64>, pub status: String,
     pub checked_at: Option<String>, pub error: Option<String>, pub default_branch: String,
@@ -107,6 +109,16 @@ fn note_text(value: &str, max: usize, label: &str) -> Result<String, String> {
 }
 pub const NAVIGATION_PAGES: [&str; 6] = ["home", "library", "updates", "downloads", "github", "agent"];
 pub fn default_management_mode() -> String { "software".into() }
+pub fn default_download_connections() -> usize { 4 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExternalDownloader {
+    pub name: String, pub endpoint: String, pub request_template: String,
+}
+impl Default for ExternalDownloader {
+    fn default() -> Self { Self { name: "AB Download Manager".into(), endpoint: "http://127.0.0.1:15151/start-headless-download".into(),
+        request_template: r#"{"downloadSource":{"link":"{url}","downloadPage":"{pageUrl}"},"name":"{fileName}","startDownload":true}"#.into() } }
+}
 pub fn default_color_scheme() -> String { "blue".into() }
 pub fn validate_management_mode(mode: &str) -> Result<(), String> {
     if !["software", "files"].contains(&mode) { return Err("管理模式无效".into()); }
@@ -126,6 +138,12 @@ pub struct Settings {
     #[serde(default = "default_color_scheme")]
     pub color_scheme: String,
     pub auto_download: bool, pub max_concurrent_downloads: usize, pub close_to_tray: bool,
+    #[serde(default = "default_download_connections")]
+    pub download_connections: usize,
+    #[serde(default)]
+    pub use_external_downloader: bool,
+    #[serde(default)]
+    pub external_downloader: ExternalDownloader,
     pub agent_enabled: bool, pub agent_port: u16,
     #[serde(default = "default_startup_page")]
     pub startup_page: String,
@@ -140,6 +158,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self { theme: "system".into(), color_scheme: default_color_scheme(), check_interval_minutes: 60, notifications: true,
             auto_download: false, max_concurrent_downloads: 2, close_to_tray: true,
+            download_connections: default_download_connections(), use_external_downloader: false, external_downloader: ExternalDownloader::default(),
             agent_enabled: false, agent_port: 47831, startup_page: default_startup_page(),
             startup_github_tab: default_startup_github_tab(), navigation_order: default_navigation_order(),
             proxy: crate::proxy::ProxySettings::default() }
@@ -151,6 +170,8 @@ impl Settings {
         if !["blue", "teal", "violet", "amber"].contains(&self.color_scheme.as_str()) { return Err("配色设置无效".into()); }
         if self.check_interval_minutes != 0 && !(5..=10080).contains(&self.check_interval_minutes) { return Err("检查间隔须为0（仅手动检查）或5至10080分钟".into()); }
         if !(1..=4).contains(&self.max_concurrent_downloads) { return Err("同时下载数量须为1至4".into()); }
+        if !(1..=8).contains(&self.download_connections) { return Err("单文件连接数须为1至8".into()); }
+        super::external_downloads::validate_config(&self.external_downloader)?;
         if self.agent_port < 1024 { return Err("Agent端口须为1024至65535".into()); }
         if !NAVIGATION_PAGES.contains(&self.startup_page.as_str()) { return Err("启动页面无效".into()); }
         if !["explore", "owned", "starred", "activity", "feed"].contains(&self.startup_github_tab.as_str()) { return Err("GitHub 启动页面无效".into()); }
@@ -183,6 +204,46 @@ pub struct ProjectChanges {
     pub installed_path: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     pub selected_asset_id: Option<Option<u64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub executable_path: Option<Option<String>>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallPreview {
+    pub download_id: String, pub project_id: String, pub target_path: String, pub backup_path: String,
+    pub previous_version: Option<String>, pub next_version: String, pub backup_bytes: u64,
+    pub package_bytes: u64, pub available_bytes: u64, pub kind: String, pub archive_roots: Vec<String>,
+    pub suggested_root: Option<String>, pub requires_root_selection: bool, pub legacy_managed: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRecord {
+    pub project_id: String, pub download_id: String, pub version: Option<String>,
+    pub installed_source: Option<String>, pub target_path: String, pub path: String,
+    pub created_at: String, pub bytes: u64, pub kind: String, pub phase: String, pub error: Option<String>,
+}
+/// Durable recovery state; private fields never form part of the shared bridge contract.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallJournal {
+    pub backup: BackupRecord, pub original_project: Project, pub previous_download: DownloadRecord,
+    pub target_empty: bool, pub stage_path: String,
+    #[serde(default)]
+    pub snapshot_files: Vec<SnapshotEntry>,
+    #[serde(default)]
+    pub original_files: Vec<SnapshotEntry>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotEntry {
+    pub path: String, pub directory: bool, pub bytes: u64, pub sha256: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallInput {
+    pub id: String, pub confirmed: bool, pub target_path: String, pub archive_root: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub previous_version: Option<Option<String>>,
 }
 fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
 where D: serde::Deserializer<'de>, T: Deserialize<'de> { Option::<T>::deserialize(d).map(Some) }
@@ -197,7 +258,7 @@ pub fn validate_choices(channel: &str, preference: &str) -> Result<(), String> {
 pub fn test_project(owner:&str,repo:&str)->Project {
     Project{id:uuid::Uuid::new_v4().to_string(),owner:owner.into(),repo:repo.into(),name:repo.into(),description:String::new(),
         url:format!("https://github.com/{owner}/{repo}"),avatar_url:None,channel:"stable".into(),preference:"auto".into(),
-        management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,installed_source:None,release:None,
+        management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,executable_path:None,installed_source:None,release:None,
         selected_asset_id:None,status:"notChecked".into(),checked_at:None,error:None,default_branch:"main".into(),
         source_head_sha:None,source_ahead:None,created_at:now()}
 }
@@ -229,9 +290,11 @@ mod tests {
     }
     #[test] fn old_settings_gain_startup_navigation_and_proxy_defaults() {
         let mut value = serde_json::to_value(Settings::default()).unwrap();
-        for key in ["startupPage", "startupGithubTab", "navigationOrder", "proxy"] { value.as_object_mut().unwrap().remove(key); }
+        for key in ["startupPage", "startupGithubTab", "navigationOrder", "proxy", "downloadConnections", "useExternalDownloader", "externalDownloader"] { value.as_object_mut().unwrap().remove(key); }
         let settings: Settings = serde_json::from_value(value).unwrap();
         assert_eq!(settings.startup_page, "home"); assert_eq!(settings.startup_github_tab, "explore");
+        assert_eq!(settings.download_connections, 4); assert!(!settings.use_external_downloader); assert_eq!(settings.external_downloader.endpoint, "http://127.0.0.1:15151/start-headless-download");
+        for connections in [0,9,usize::MAX] { let mut invalid=settings.clone(); invalid.download_connections=connections; assert!(invalid.validate().is_err()); }
         assert_eq!(settings.navigation_order, default_navigation_order()); assert_eq!(settings.proxy.mode, "system");
         settings.validate().unwrap();
     }

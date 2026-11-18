@@ -6,6 +6,7 @@ use std::{fs,io::{Read,Write},path::{Component,Path,PathBuf},sync::Arc};
 const MAX_ENTRIES:usize=10000;
 const MAX_EXPANDED:u64=8*1024*1024*1024;
 fn io_error(_:impl std::fmt::Display)->String{"安装文件读写失败，请检查权限和磁盘空间".into()}
+#[cfg(test)]
 fn child_directory(root:&Path,name:&str)->Result<PathBuf,String>{
     let child=root.join(name);
     if !child.exists(){fs::create_dir(&child).map_err(io_error)?;}
@@ -60,7 +61,7 @@ pub fn zip_path(name:&str)->Result<PathBuf,String>{
     if path.as_os_str().is_empty(){return Err("ZIP 路径为空".into());}
     Ok(path.to_owned())
 }
-fn verify_download(data:&Path,d:&DownloadRecord)->Result<PathBuf,String>{
+pub(super) fn verify_download(data:&Path,d:&DownloadRecord)->Result<PathBuf,String>{
     if downloads::safe_name(&d.file_name)!=d.file_name{return Err("下载记录文件名无效".into());}
     let folder=downloads::directory(data,&d.id)?;
     let expected=folder.join(&d.file_name);
@@ -78,7 +79,7 @@ fn verify_download(data:&Path,d:&DownloadRecord)->Result<PathBuf,String>{
     if d.sha256.as_deref()!=Some(digest.as_str()){return Err("下载文件内容已改变，请重新下载".into());}
     Ok(expected)
 }
-fn extract_zip(source:&Path,stage:&Path)->Result<(),String>{
+pub(super) fn extract_zip(source:&Path,stage:&Path)->Result<(),String>{
     let file=fs::File::open(source).map_err(io_error)?;
     let mut zip=zip::ZipArchive::new(file).map_err(|_|"ZIP 文件损坏或格式不支持".to_string())?;
     if zip.is_empty()||zip.len()>MAX_ENTRIES{return Err("ZIP 文件为空或条目超过10000个限制".into());}
@@ -117,7 +118,7 @@ fn extract_zip(source:&Path,stage:&Path)->Result<(),String>{
     Ok(())
 }
 #[cfg(windows)]
-fn launch_installer(path:&Path)->Result<(),String>{
+pub(super) fn launch_installer(path:&Path)->Result<(),String>{
     use std::os::windows::ffi::OsStrExt;
     #[link(name="shell32")]
     extern "system" {
@@ -134,7 +135,7 @@ fn launch_installer(path:&Path)->Result<(),String>{
     if result<=32{return Err("安装器未启动或用户取消了权限确认，请手动打开下载文件".into());}Ok(())
 }
 #[cfg(not(windows))]
-fn launch_installer(_: &Path)->Result<(),String>{Err("安装器只能在 Windows 上启动".into())}
+pub(super) fn launch_installer(_: &Path)->Result<(),String>{Err("安装器只能在 Windows 上启动".into())}
 impl Core{
     pub(crate) fn list_managed_versions(&self,project_id:&str)->Result<Vec<ManagedVersion>,String>{
         let project=self.store.project(project_id)?;
@@ -163,12 +164,14 @@ impl Core{
                 ||p.installed_path.as_deref().and_then(|s|Path::new(s).parent())!=path.parent(){
                 return Err("只能切换当前受管项目，手动记录的外部安装不会修改".into());
             }
+            p.executable_path=p.executable_path.as_deref().and_then(|exe|Path::new(exe).strip_prefix(Path::new(p.installed_path.as_deref()?)).ok()).map(|relative|path.join(relative).to_string_lossy().into_owned());
             p.installed_version=Some(record.tag.clone());p.installed_path=Some(path.to_string_lossy().into_owned());
             p.error=None;super::selection::update_status(p);Ok(())
         })?;
         drop(installing);
         self.changed();Ok(project)
     }
+    #[cfg(test)]
     pub(crate) async fn install_download(self:&Arc<Self>,id:&str)->Result<Value,String>{
         let record=self.store.download(id)?;
         if !["completed","installed"].contains(&record.status.as_str()){return Err("请先完成下载后再安装".into());}
@@ -196,6 +199,7 @@ impl Core{
         }
         self.changed();result
     }
+    #[cfg(test)]
     fn install_blocking(&self,d:&DownloadRecord,p:&Project)->Result<Value,String>{
         require_software(&self.store.project(&p.id)?)?;
         if !d.installable||!self.store.download(&d.id)?.installable{return Err("此附件仅供下载，不能安装".into());}
@@ -369,7 +373,7 @@ mod tests{
         let project=restored.store.project(&project_id).unwrap();assert!(Path::new(project.installed_path.as_ref().unwrap()).starts_with(fs::canonicalize(&moved).unwrap()));
         for download in restored.store.downloads().unwrap(){assert!(Path::new(download.path.as_ref().unwrap()).exists());}
     }
-    #[tokio::test]async fn zip_install_requires_confirmation_and_leaves_manual_software_untouched(){
+    #[tokio::test]async fn zip_install_requires_explicit_confirmation_and_preserves_manual_configuration(){
         let dir=tempfile::tempdir().unwrap();let core=Core::new(dir.path().join("data"),true,Arc::new(|_,_|{})).unwrap();
         let manual=dir.path().join("existing-app");fs::create_dir(&manual).unwrap();fs::write(manual.join("settings.json"),b"keep-manual-settings").unwrap();
         let mut project=test_project("RoutineMiku","apkstart");project.installed_version=Some("v0.3.1".into());
@@ -384,9 +388,10 @@ mod tests{
         core.store.put_download(&download).unwrap();
         assert!(core.handle("install_download",json!({"id":download.id})).await.is_err());
         assert_eq!(fs::read_dir(core.data_dir.join("apps")).unwrap().count(),0);
-        let result=core.handle("install_download",json!({"id":download.id,"confirmed":true})).await.unwrap();
+        assert!(core.handle("install_download",json!({"id":download.id,"confirmed":true})).await.is_err());
+        let result=core.handle("install_download",json!({"id":download.id,"confirmed":true,"targetPath":manual,"archiveRoot":".","previousVersion":"v0.3.1"})).await.unwrap();
         assert_eq!(result["installed"],true);let installed=PathBuf::from(result["path"].as_str().unwrap());
-        assert!(installed.starts_with(core.data_dir.join("apps").join(&project.id)));
+        assert_eq!(installed,fs::canonicalize(&manual).unwrap());assert_eq!(fs::read_dir(core.data_dir.join("apps")).unwrap().count(),0);
         assert_eq!(fs::read(installed.join("ApkStart/readme.txt")).unwrap(),b"local test data only");
         assert_eq!(fs::read(manual.join("settings.json")).unwrap(),b"keep-manual-settings");
         assert_eq!(core.store.download(&download.id).unwrap().status,"installed");

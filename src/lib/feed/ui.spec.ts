@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
 import { createClassComponent } from 'svelte/legacy';
 import GithubFeed from '../../components/GithubFeed.svelte';
+import { feedState } from '../feed-state';
 import { previewFeed } from './preview';
 import { createPreviewGithubDetail } from '../github-preview';
 import type { GithubFeedPage } from '../types';
@@ -21,7 +22,7 @@ async function click(label: string) { button(label).click(); await settle(); }
 function show(preview = false) { const instance = mount(GithubFeed, { target, props: { preview, onopen, onadd, onnotice } }); cleanup = async () => { await unmount(instance); }; flushSync(); }
 
 beforeEach(() => {
-  vi.useFakeTimers(); vi.clearAllMocks(); cleanup = null;
+  vi.useFakeTimers(); vi.clearAllMocks(); cleanup = null; feedState.clear();
   target = document.createElement('div'); document.body.append(target);
   dispatchMock.mockImplementation(async (action: string) => { if (action === 'feed_status') return live(); if (action === 'github_repository') return createPreviewGithubDetail('tauri-apps/tauri', true); throw new Error(`Unexpected action: ${action}`); });
 });
@@ -31,7 +32,7 @@ describe('homepage feed UI (synthetic fixtures only)', () => {
   it('connects the independent website session without requiring gh login', async () => {
     dispatchMock.mockImplementation(async (action: string) => action === 'feed_connect' ? { ...previewFeed('login'), loading: true } : previewFeed('login'));
     show(); await settle(); expect(target.textContent).toContain('首次使用需要再登录一次');
-    await click('连接官网'); expect(dispatchMock).toHaveBeenCalledWith('feed_connect', {});
+    await click('官网登录'); expect(dispatchMock).toHaveBeenCalledWith('feed_connect', {});
     expect(target.textContent).toContain('在官网窗口完成登录');
     expect(dispatchMock.mock.calls.some(([action]) => action === 'github_login')).toBe(false);
   });
@@ -145,6 +146,17 @@ describe('homepage feed UI (synthetic fixtures only)', () => {
     instance.$set({ active: true }); await settle(); await vi.advanceTimersByTimeAsync(5000); await settle();
     expect(target.querySelectorAll('.feed-row')).toHaveLength(0);
     expect(dispatchMock.mock.calls.filter(([action]) => action !== 'feed_status')).toHaveLength(0);
+  });
+  it('renders compact Home summary with the shared state and routes login to the unified account entry', async () => {
+    const onLogin = vi.fn();
+    const instance = createClassComponent({ component: GithubFeed, target, props: { preview: false, compact: true, active: true, onLogin, onopen, onadd, onnotice } });
+    cleanup = async () => { instance.$destroy(); }; await settle();
+    expect(target.querySelectorAll('.feed-row')).toHaveLength(3); expect(target.textContent).toContain('主页摘要');
+    expect([...target.querySelectorAll('button')].some((node) => node.textContent?.trim() === '退出网页')).toBe(false);
+    feedState.clear(); dispatchMock.mockResolvedValue(previewFeed('login')); await feedState.refreshStatus(); await settle();
+    // Cache clear starts status immediately; explicitly publish an anonymous action fixture.
+    await feedState.action('feed_refresh'); await settle(); await click('连接 GitHub');
+    expect(onLogin).toHaveBeenCalledTimes(1); expect(dispatchMock.mock.calls.some(([action]) => action === 'feed_connect')).toBe(false);
   });
   it('labels preview fixtures explicitly and never uses native commands in preview', async () => {
     show(true); await settle(); expect(target.textContent).toContain('以下内容为演示，不是真实账号动态');

@@ -1,9 +1,9 @@
-use super::models::{now, BuildTask, DownloadRecord, Project, RepositoryNote, Settings};
+use super::models::{now, BackupRecord, InstallJournal, BuildTask, DownloadRecord, Project, RepositoryNote, Settings};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{path::Path, sync::Mutex};
 
-const SCHEMA_VERSION:i64=3;
+const SCHEMA_VERSION:i64=4;
 fn migrate(db:&mut Connection)->Result<(),String> {
     let version:i64=db.pragma_query_value(None,"user_version",|r|r.get(0)).map_err(storage_error)?;
     if version>SCHEMA_VERSION {return Err("资料库由更新版本创建，请升级 ReleaseHub 后打开".into());}
@@ -51,6 +51,12 @@ fn migrate(db:&mut Connection)->Result<(),String> {
         }
         tx.pragma_update(None,"user_version",3).map_err(storage_error)?;
     }
+    if version<4 {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS backups (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS install_journals (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+            UPDATE projects SET json=json_set(json,'$.executablePath',NULL) WHERE json_type(json,'$.executablePath') IS NULL;
+            PRAGMA user_version=4;").map_err(storage_error)?;
+    }
     tx.commit().map_err(storage_error)
 }
 pub struct Store { db: Mutex<Connection> }
@@ -62,6 +68,7 @@ impl Store {
         migrate(&mut db)?;
         let store = Self { db: Mutex::new(db) };
         for mut d in store.downloads()? {
+            if d.status == "deleted" { store.remove_download(&d.id)?; continue; }
             if ["queued", "downloading"].contains(&d.status.as_str()) {
                 d.status = "failed".into(); d.error = Some("上次下载被中断，请重试".into());
                 d.updated_at = now(); store.put_download(&d)?;
@@ -119,8 +126,50 @@ impl Store {
         self.db.lock().map_err(storage_error)?.execute("DELETE FROM projects WHERE id=?1", [id]).map_err(storage_error)?;
         Ok(())
     }
+    pub fn backup(&self, id: &str) -> Result<Option<BackupRecord>, String> {
+        let db=self.db.lock().map_err(storage_error)?;
+        let json:Option<String>=db.query_row("SELECT json FROM backups WHERE id=?1",[id],|r|r.get(0)).optional().map_err(storage_error)?;
+        json.map(|j|serde_json::from_str(&j).map_err(storage_error)).transpose()
+    }
+    pub fn put_backup(&self,b:&BackupRecord)->Result<(),String>{self.put("backups",&b.project_id,b)}
+    pub fn journals(&self) -> Result<Vec<InstallJournal>, String> { self.list("install_journals") }
+    pub fn put_journal(&self, journal:&InstallJournal) -> Result<(), String> { self.put("install_journals", &journal.backup.project_id, journal) }
+    pub fn remove_backup(&self,id:&str)->Result<(),String>{
+        self.db.lock().map_err(storage_error)?.execute("DELETE FROM backups WHERE id=?1",[id]).map_err(storage_error)?;Ok(())
+    }
+    pub fn remove_journal(&self,id:&str)->Result<(),String>{
+        self.db.lock().map_err(storage_error)?.execute("DELETE FROM install_journals WHERE id=?1",[id]).map_err(storage_error)?;Ok(())
+    }
+    /// Publish installed metadata, download state, latest backup, and journal removal atomically.
+    pub fn finish_install(&self,p:&Project,d:&DownloadRecord,j:&InstallJournal)->Result<(),String>{
+        let mut db=self.db.lock().map_err(storage_error)?;let tx=db.transaction().map_err(storage_error)?;
+        for (table,id,json) in [("projects",p.id.as_str(),serde_json::to_string(p)),("downloads",d.id.as_str(),serde_json::to_string(d)),
+            ("backups",p.id.as_str(),serde_json::to_string(&j.backup))] {
+            tx.execute(&format!("INSERT INTO {table}(id,json) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET json=excluded.json"),params![id,json.map_err(storage_error)?]).map_err(storage_error)?;
+        }
+        tx.execute("DELETE FROM install_journals WHERE id=?1",[&p.id]).map_err(storage_error)?;
+        tx.commit().map_err(storage_error)
+    }
+    pub fn finish_restore(&self,p:&Project,d:Option<&DownloadRecord>,id:&str)->Result<(),String>{
+        let mut db=self.db.lock().map_err(storage_error)?;let tx=db.transaction().map_err(storage_error)?;
+        tx.execute("UPDATE projects SET json=?1 WHERE id=?2",params![serde_json::to_string(p).map_err(storage_error)?,p.id]).map_err(storage_error)?;
+        if let Some(d)=d { tx.execute("UPDATE downloads SET json=?1 WHERE id=?2",params![serde_json::to_string(d).map_err(storage_error)?,d.id]).map_err(storage_error)?; }
+        tx.execute("DELETE FROM install_journals WHERE id=?1",[id]).map_err(storage_error)?;
+        tx.commit().map_err(storage_error)
+    }
     pub fn downloads(&self) -> Result<Vec<DownloadRecord>, String> { self.list("downloads") }
     pub fn download(&self, id: &str) -> Result<DownloadRecord, String> { self.get("downloads", id) }
+    pub fn optional_download(&self,id:&str)->Result<Option<DownloadRecord>,String>{
+        let db=self.db.lock().map_err(storage_error)?;
+        let json:Option<String>=db.query_row("SELECT json FROM downloads WHERE id=?1",[id],|r|r.get(0)).optional().map_err(storage_error)?;
+        json.map(|value|serde_json::from_str(&value).map_err(storage_error)).transpose()
+    }
+    pub fn remove_download(&self,id:&str)->Result<(),String>{
+        let mut db=self.db.lock().map_err(storage_error)?;let tx=db.transaction().map_err(storage_error)?;
+        tx.execute("DELETE FROM download_digests WHERE id=?1",[id]).map_err(storage_error)?;
+        tx.execute("DELETE FROM downloads WHERE id=?1",[id]).map_err(storage_error)?;
+        tx.commit().map_err(storage_error)
+    }
     pub fn put_download(&self, d: &DownloadRecord) -> Result<(), String> { self.put("downloads", &d.id, d) }
     pub fn digest(&self, id: &str) -> Result<Option<String>, String> {
         self.db.lock().map_err(storage_error)?.query_row("SELECT digest FROM download_digests WHERE id=?1", [id], |r| r.get(0)).optional().map_err(storage_error).map(Option::flatten)
@@ -197,6 +246,16 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn version_three_migrates_backup_schema_and_executable_without_losing_metadata() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();
+        let p=super::super::models::test_project("fixture","schema");let mut value=serde_json::to_value(&p).unwrap();value.as_object_mut().unwrap().remove("executablePath");
+        store.put("projects",&p.id,&value).unwrap();let mut settings=Settings::default();settings.color_scheme="teal".into();store.save_settings(&settings).unwrap();
+        store.db.lock().unwrap().execute_batch("DROP TABLE backups;DROP TABLE install_journals;PRAGMA user_version=3;").unwrap();drop(store);
+        let migrated=Store::new(&path).unwrap();assert_eq!(migrated.settings().unwrap().color_scheme,"teal");assert!(migrated.project(&p.id).unwrap().executable_path.is_none());
+        assert!(migrated.backup(&p.id).unwrap().is_none());assert!(migrated.journals().unwrap().is_empty());
+        assert_eq!(migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),4);
+        drop(migrated);assert_eq!(Store::new(&path).unwrap().project(&p.id).unwrap().repo,"schema");
+    }
     #[test] fn version_two_migrates_old_records_once_without_losing_preferences() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");
         let store=Store::new(&path).unwrap();
@@ -221,12 +280,12 @@ mod tests {
         let migrated_project=migrated.project(&id).unwrap();assert_eq!(migrated_project.management_mode,"software");
         let asset=&migrated_project.release.as_ref().unwrap().assets[0];assert!(asset.downloadable);assert!(!asset.installable);
         for kind in ["portable","installer","other"] {assert_eq!(migrated.download(kind).unwrap().installable,kind!="other");}
-        let version:i64=migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();assert_eq!(version,3);
+        let version:i64=migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();assert_eq!(version,4);
         let mut settings=migrated.settings().unwrap();settings.color_scheme="amber".into();migrated.save_settings(&settings).unwrap();drop(migrated);
         let reopened=Store::new(&path).unwrap();assert_eq!(reopened.settings().unwrap().color_scheme,"amber");
-        reopened.db.lock().unwrap().pragma_update(None,"user_version",4).unwrap();drop(reopened);
+        reopened.db.lock().unwrap().pragma_update(None,"user_version",5).unwrap();drop(reopened);
         assert!(Store::new(&path).err().unwrap().contains("更新版本"));
-        let db=Connection::open(path).unwrap();assert_eq!(db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),4);
+        let db=Connection::open(path).unwrap();assert_eq!(db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),5);
     }
     #[test] fn migration_failure_rolls_back_data_and_version() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();
@@ -261,7 +320,7 @@ mod tests {
     }
     #[test]fn restart_keeps_interrupted_work_recoverable(){
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();
-        for status in ["queued","downloading","installing","completed"]{
+        for status in ["queued","downloading","installing","completed","deleted"]{
             let time=now();store.put_download(&DownloadRecord{id:status.into(),project_id:"project".into(),project_name:"app".into(),asset_id:1,
                 file_name:"app.zip".into(),tag:"v1".into(),url:"https://github.com/owner/app/releases/download/v1/app.zip".into(),kind:"portable".into(),installable:true,
                 total_bytes:10,received_bytes:4,status:status.into(),path:None,sha256:None,verified:false,error:None,created_at:time.clone(),updated_at:time}).unwrap();
@@ -270,5 +329,6 @@ mod tests {
         for id in ["queued","downloading"]{let record=reopened.download(id).unwrap();assert_eq!(record.status,"failed");assert!(record.error.unwrap().contains("中断"));}
         let interrupted=reopened.download("installing").unwrap();assert_eq!(interrupted.status,"completed");assert!(interrupted.error.unwrap().contains("重新确认安装"));
         assert_eq!(reopened.download("completed").unwrap().status,"completed");
+        assert!(reopened.optional_download("deleted").unwrap().is_none());
     }
 }

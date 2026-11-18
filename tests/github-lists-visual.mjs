@@ -15,6 +15,7 @@ export const desktopAvailable = () => false;
 export const watchChanges = async () => () => {};
 let notes = createPreviewRepositoryNotes();
 export async function dispatch(action, payload = {}) {
+  if (action === 'feed_status') return { connected: false, loading: false, sessionRevision: 0, account: null, items: [], error: null };
   if (action === 'github_status') return createPreviewGithubStatus('connected');
   if (action === 'github_lists') return createPreviewGithubLists('connected');
   if (action === 'github_list_repositories') return createPreviewGithubListRepositories(payload.listId, payload.cursor, 'connected');
@@ -29,13 +30,13 @@ export async function dispatch(action, payload = {}) {
   throw new Error('Visual fixture does not implement ' + action);
 }
 `;
-const html = `<!doctype html><html lang="zh-CN" data-theme="light"><head><meta charset="utf-8"><title>GitHub Lists synthetic visual check</title><link rel="stylesheet" href="/src/app.css"></head><body><div style="display:flex;min-height:100vh"><aside class="sidebar" aria-hidden="true" style="min-height:100vh">ReleaseHub · 追新</aside><main id="fixture" class="page-content" style="min-width:0"></main></div><script type="module">
+const html = `<!doctype html><html lang="zh-CN" data-theme="light"><head><meta charset="utf-8"><title>GitHub Lists synthetic visual check</title><link rel="stylesheet" href="/src/app.css"></head><body><div style="display:flex;height:100vh;overflow:hidden"><aside class="sidebar" aria-hidden="true" style="min-height:100vh">ReleaseHub · 追新</aside><main id="fixture" class="page-content github-workspace" style="min-width:0"></main></div><script type="module">
 import { mount } from '/node_modules/.vite/deps/svelte.js';
 import Github from '/src/pages/Github.svelte';
 mount(Github, { target: document.getElementById('fixture'), props: { projects: [], preview: false, initialTab: 'starred', onadd: async () => true, onopen: () => {}, oncopy: () => {}, onnotice: () => {} } });
 </script></body></html>`;
 try {
-  for (const viewport of [{ width: 1280, height: 840 }, { width: 960, height: 640 }]) {
+  for (const viewport of [{ width: 1280, height: 840 }, { width: 960, height: 640 }, { width: 1920, height: 1260 }]) {
     const page = await browser.newPage({ viewport, colorScheme: 'light', reducedMotion: 'reduce' });
     page.on('pageerror', error => failures.push(error.message));
     await page.route('**/*', async route => {
@@ -68,6 +69,7 @@ try {
     await check('assignment-light');
     await page.getByRole('button', { name: '关闭分类整理', exact: true }).click();
     await page.getByRole('button', { name: '新建分类', exact: true }).click();
+    await page.locator('.list-editor input').first().scrollIntoViewIfNeeded();
     await check('new-list-light');
     await page.locator('.list-editor').getByRole('button', { name: '取消', exact: true }).click();
     await page.getByRole('button', { name: '查看 Lake1059/FFmpegFreeUI 详情', exact: true }).click();
@@ -84,4 +86,4 @@ try {
   }
 } finally { await browser.close(); }
 if (failures.length) throw new Error(failures.join('\n'));
-console.log(`GitHub Lists visual checks passed at 1280×840 and 960×640; screenshots: ${output}`);
+console.log(`GitHub Lists visual checks passed at 960×640, 1280×840 and 1920×1260; screenshots: ${output}`);

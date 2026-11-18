@@ -1,18 +1,23 @@
 <script lang="ts">
-  import type { AssetPreference, Channel, ManagementMode, Project, ProjectChanges } from '../lib/types';
+  import type { AssetPreference, BackupRecord, Channel, ManagementMode, Project, ProjectChanges } from '../lib/types';
   import { assetKindLabel, canDownloadAsset, canInstallAsset, formatBytes, formatDate, getProjectStatus, isFilesProject, projectInitials } from '../lib/ui';
   import Icon from './Icon.svelte';
   import ReleaseNotes from './ReleaseNotes.svelte';
-  let { project, busy, onclose, oncheck, ondownload, onupdate, onmark, onremove, onopen, onversions, ondiagnostic }: {
+  import BackupPanel from './BackupPanel.svelte';
+  let { project, busy, onclose, oncheck, ondownload, onupdate, onmark, onremove, onopen, onversions, ondiagnostic, preview = false, onrun, onexecutable, onrestore, ondeletebackup, onexternal, initialTab = 'notes' }: {
     project: Project; busy: boolean; onclose: () => void; oncheck: (ids: string[]) => void;
-    ondownload: (project: Project) => void; onupdate: (id: string, changes: ProjectChanges) => void;
+    ondownload: (project: Project) => void; onexternal?: (project: Project) => void; onupdate: (id: string, changes: ProjectChanges) => void;
     onmark: (project: Project) => void;
     onremove: (project: Project) => void; onopen: (url: string) => void; onversions: (projectId: string) => void;
-    ondiagnostic: (projectId: string) => void;
+    ondiagnostic: (projectId: string) => void; preview?: boolean; initialTab?: 'notes' | 'manage';
+    onrun: (project: Project) => void; onexecutable: (project: Project) => void;
+    onrestore: (backup: BackupRecord) => void; ondeletebackup: (backup: BackupRecord) => void;
   } = $props();
   let tab = $state<'notes' | 'assets' | 'manage'>('notes');
   let previousId = $state<string | null>(null);
-  $effect(() => { if (previousId !== project.id) { previousId = project.id; tab = 'notes'; } });
+  $effect(() => { if (previousId !== project.id) { previousId = project.id; tab = initialTab; } });
+  let panel = $state<HTMLElement>();
+  $effect(() => { project.id; if (panel) panel.scrollTop = 0; });
   const files = $derived(isFilesProject(project));
   const status = $derived(getProjectStatus(project));
   const chosenAsset = $derived(project.release?.assets.find((asset) => asset.id === project.selectedAssetId));
@@ -20,14 +25,16 @@
   const canManageSoftware = $derived(!files && (!chosenAsset || canInstallAsset(chosenAsset, project)));
 </script>
 
-<aside class="detail-panel" aria-label={`${project.name} 详情`}>
+<aside bind:this={panel} class="detail-panel" aria-label={`${project.name} 详情`}>
   <div class="detail-topline"><span>{files ? '文件订阅详情' : '软件详情'}</span><button class="icon-button" aria-label="关闭资源详情" onclick={onclose}><Icon name="close" size={18} /></button></div>
   <div class="detail-identity"><span class="app-avatar large" class:avatar-purple={project.repo.toLowerCase() === 'kazumi'} class:avatar-blue={project.repo.toLowerCase() === 'apkstart'}>{projectInitials(project)}</span><h2>{project.name}</h2><button class="text-button muted" onclick={() => onopen(project.url)}>{project.owner}/{project.repo}<Icon name="external" size={13} /></button>{#if project.description}<p>{project.description}</p>{/if}<span class={`status-badge ${status.tone}`}><span class="tiny-dot"></span>{status.label}</span></div>
   <div class="version-summary"><div><span>{files ? '管理方式' : '已记录版本'}</span><strong>{files ? '只保存文件' : project.installedVersion ?? '尚未记录'}</strong><small>{files ? '下载后查看位置与校验结果' : project.installedSource === 'managed' ? '由追新管理' : project.installedSource === 'manual' ? '手动确认' : '可手动记录或交给 AI 识别'}</small></div><Icon name="arrowRight" size={18} /><div><span>最新发行 <em class:preview-label={project.release?.prerelease}>{project.release?.prerelease ? '预览' : '正式'}</em></span><strong class="accent-text">{project.release?.tag ?? '暂无信息'}</strong><small>{formatDate(project.release?.publishedAt ?? null)}</small></div></div>
   <div class="detail-primary-actions"><button class="button primary" disabled={busy || !selectedAsset} onclick={() => ondownload(project)}><Icon name="download" size={16} />下载已选文件</button><button class="button secondary" disabled={busy} aria-label={`检查 ${project.name} 更新`} onclick={() => oncheck([project.id])}><Icon name="refresh" size={16} /></button></div>
+  {#if !files}<div class="managed-entry"><button class="button secondary small" disabled={busy} onclick={() => onrun(project)}><Icon name="play" size={15} />{project.executablePath ? '打开软件' : '选择启动程序'}</button><span>{project.executablePath ?? '仅运行你确认并保存的 EXE，不自动猜测入口'}</span></div>{/if}
   {#if canManageSoftware && project.installedSource === 'managed'}<div class="managed-entry"><button class="button secondary small" disabled={busy} onclick={() => onversions(project.id)}><Icon name="drive" size={15} />管理已准备版本</button><span>打开程序目录，或确认切换当前记录</span></div>{/if}
   {#if project.error}<div class="detail-error"><Icon name="alert" size={16} /><span>{project.error}</span></div>{/if}
   {#if project.release && !selectedAsset}<button class="asset-needed" onclick={() => tab = 'assets'}><Icon name="info" size={16} /><span>先查看发行文件，选择要保存的附件。</span><Icon name="chevronRight" size={14} /></button>{/if}
+  {#if onexternal}<div class="managed-entry"><button class="button secondary small" disabled={busy || !selectedAsset} onclick={() => onexternal?.(project)}><Icon name="external" size={14} />交给外部下载器</button></div>{/if}
   <div class="detail-tabs" role="tablist" aria-label="详情内容"><button role="tab" aria-selected={tab === 'notes'} class:active={tab === 'notes'} onclick={() => tab = 'notes'}>更新说明</button><button role="tab" aria-selected={tab === 'assets'} class:active={tab === 'assets'} onclick={() => tab = 'assets'}>发行文件 <span>{project.release?.assets.length ?? 0}</span></button><button role="tab" aria-selected={tab === 'manage'} class:active={tab === 'manage'} onclick={() => tab = 'manage'}>管理</button></div>
   <div class="detail-content">
     {#if tab === 'notes'}
@@ -56,6 +63,7 @@
         <p class="field-hint">更改管理方式、渠道或偏好后，会重新检查已发布的版本。</p>
         <form onsubmit={(event) => { event.preventDefault(); const value = String(new FormData(event.currentTarget).get('pattern') ?? '').trim(); onupdate(project.id, { assetPattern: value || null }); }}><label>文件名筛选 <span class="optional">可选</span><input name="pattern" value={project.assetPattern ?? ''} placeholder={files ? '例如 .pdf 或资料名称' : '例如 win-x64'} maxlength="200" disabled={busy} /></label><div class="form-inline-end"><button class="button secondary small" disabled={busy} type="submit">保存筛选</button></div></form>
         {#if canManageSoftware}<div class="detail-divider"></div><div class="setting-mini"><strong>本机版本记录</strong><p>{project.installedPath ?? '没有记录安装位置'}</p><button class="button secondary small" disabled={busy} onclick={() => onmark(project)}><Icon name="check" size={14} />手动记录已安装版本</button></div>{/if}
+        {#if !files}<div class="setting-mini"><strong>启动程序</strong><p>{project.executablePath ?? '尚未选择'}</p><button class="button secondary small" disabled={busy} onclick={() => onexecutable(project)}>选择或更换 EXE</button></div><BackupPanel {preview} projectId={project.id} {busy} {onrestore} ondelete={ondeletebackup} />{/if}
         <div class="detail-divider"></div><button class="text-button danger-text" disabled={busy} onclick={() => onremove(project)}><Icon name="trash" size={15} />取消订阅此资源</button><p class="field-hint">移除订阅，保留下载记录与已保存的文件。</p>
       </div>
     {/if}

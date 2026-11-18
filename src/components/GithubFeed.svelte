@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount } from 'svelte';
+  import { feedState, type FeedAction } from '../lib/feed-state';
   import { dispatch } from '../lib/bridge';
   import type { GithubFeedPage, GithubRepository } from '../lib/types';
   import { formatDate, readableError, safeGithubUrl, type Tone } from '../lib/ui';
@@ -7,85 +8,43 @@
   import Icon from './Icon.svelte';
   import GithubAvatar from './GithubAvatar.svelte';
 
-  let { preview, active = true, onopen, onadd, onnotice }: {
-    preview: boolean; active?: boolean;
+  let { preview, active = true, compact = false, onLogin, onopen, onadd, onnotice }: {
+    preview: boolean; active?: boolean; compact?: boolean; onLogin?: () => void;
     onopen: (url: string) => void;
     onadd: (repository: GithubRepository) => Promise<boolean>;
     onnotice: (message: string, tone?: Tone) => void;
   } = $props();
-  type FeedAction = 'feed_connect' | 'feed_refresh' | 'feed_more' | 'feed_disconnect';
-  let page = $state<GithubFeedPage | null>(null);
-  let pending = $state<FeedAction | null>(null);
-  let initialLoading = $state(true);
-  let transportError = $state('');
+  let previewPage = $state<GithubFeedPage | null>(null);
+  const page = $derived(preview ? previewPage : $feedState.page);
+  const pending = $derived(preview ? null : $feedState.pending);
+  const initialLoading = $derived(preview ? previewPage === null : $feedState.initialLoading);
+  const transportError = $derived(preview ? '' : $feedState.transportError);
   let previewState = $state<FeedPreviewState>('connected');
   let disconnectArmed = $state(false);
   let adding = $state(new Set<string>());
   let added = $state(new Set<string>());
   let expanded = $state(new Set<string>());
   let destroyed = false;
-  let request = 0;
-  let backgroundAttempted = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let previewRequest = 0;
+  let consumer = $state<ReturnType<typeof feedState.acquire>>();
   const connected = $derived(Boolean(page?.connected && page.account && !page.cached));
   const saved = $derived(Boolean(page?.cached));
   const error = $derived(transportError || page?.error || '');
   const busy = $derived(Boolean(pending) || Boolean(page?.loading));
   const sourceLabel = $derived(page?.sourceUrl && safeGithubUrl(page.sourceUrl) && new URL(page.sourceUrl).pathname === '/' ? 'GitHub 官网首页' : '官网 Dashboard feed');
-
-  function stopPoll() { if (timer !== undefined) clearTimeout(timer); timer = undefined; }
-  function schedulePoll() {
-    stopPoll();
-    if (destroyed || !active || preview) return;
-    timer = setTimeout(() => { timer = undefined; void refreshStatus(); }, page?.loading || pending === 'feed_connect' ? 1200 : 5000);
-  }
-  function accept(next: GithubFeedPage) {
-    if (page && next.sessionRevision < page.sessionRevision) return;
-    if (page?.account !== next.account || page?.sessionRevision !== next.sessionRevision) {
-      adding = new Set(); added = new Set(); expanded = new Set(); disconnectArmed = false;
-    }
-    page = next;
-  }
-  async function refreshStatus() {
-    if (destroyed || !active || pending) { schedulePoll(); return; }
-    const current = ++request;
-    let updateSaved = false;
-    try {
-      const next = preview && import.meta.env.DEV
-        ? (await import('../lib/feed/preview')).previewFeed(previewState)
-        : await dispatch('feed_status', {});
-      if (!destroyed && current === request) {
-        accept(next); transportError = '';
-        if (!preview && !backgroundAttempted) {
-          backgroundAttempted = true;
-          // Only restored history needs first-entry validation. An already fresh
-          // service snapshot stays local when this page is revisited.
-          updateSaved = Boolean(next.cached && !next.loading);
-        }
-      }
-    } catch (failure) { if (!destroyed && current === request) transportError = readableError(failure); }
-    finally { if (!destroyed && current === request) { initialLoading = false; schedulePoll(); } }
-    if (updateSaved && !destroyed && active && current === request) void action('feed_refresh');
-  }
+  const visibleItems = $derived(compact ? page?.items.slice(0, 3) ?? [] : page?.items ?? []);
+  const accountIdentity = $derived(`${page?.account ?? ''}:${page?.sessionRevision ?? 0}`);
+  $effect(() => {
+    accountIdentity;
+    adding = new Set(); added = new Set(); expanded = new Set(); disconnectArmed = false;
+  });
   async function action(name: FeedAction) {
-    if (preview || destroyed || pending || (page?.loading && name === 'feed_more')) return;
-    stopPoll();
-    const current = ++request;
-    pending = name; transportError = ''; disconnectArmed = false;
-    if (name === 'feed_disconnect') {
-      // Hide old account data before the round-trip, including an in-flight add.
-      adding = new Set(); added = new Set(); expanded = new Set();
-      if (page) page = { ...page, account: null, connected: false, cached: false, loading: false, items: [], hasMore: false, lastUpdated: null };
-    }
-    try {
-      const next = await dispatch(name, {});
-      if (!destroyed && current === request) {
-        accept(next);
-        if (name === 'feed_disconnect' && !next.error) onnotice('已退出本机 GitHub 网页会话。', 'success');
-      }
-    } catch (failure) { if (!destroyed && current === request) transportError = readableError(failure); }
-    finally { if (!destroyed && current === request) { pending = null; initialLoading = false; schedulePoll(); } }
+    if (preview || destroyed) return;
+    disconnectArmed = false;
+    const next = await feedState.action(name);
+    if (!destroyed && name === 'feed_disconnect' && next && !next.error) onnotice('已退出本机 GitHub 网页会话。', 'success');
   }
+  function connect() { if (onLogin) onLogin(); else void action('feed_connect'); }
   function openLink(value: string) {
     const safe = safeGithubUrl(value);
     if (safe) onopen(safe);
@@ -106,25 +65,22 @@
     finally { if (current()) { const next = new Set(adding); next.delete(repository); adding = next; } }
   }
   function toggleBody(id: string) { const next = new Set(expanded); if (next.has(id)) next.delete(id); else next.add(id); expanded = next; }
-  function changePreview() { ++request; void refreshStatus(); }
-  $effect(() => {
-    if (active) untrack(schedulePoll);
-    else stopPoll();
-  });
+  async function changePreview() {
+    const request = ++previewRequest;
+    if (preview && import.meta.env.DEV) {
+      const next = (await import('../lib/feed/preview')).previewFeed(previewState);
+      if (!destroyed && request === previewRequest) previewPage = next;
+    }
+  }
+  $effect(() => { consumer?.setActive(active && !preview); });
   onMount(() => {
-    const cacheCleared = () => {
-      ++request; stopPoll(); pending = null; transportError = '';
-      adding = new Set(); added = new Set(); expanded = new Set(); disconnectArmed = false;
-      page = null; initialLoading = true; backgroundAttempted = true;
-      void refreshStatus();
-    };
-    window.addEventListener('releasehub:cache-cleared', cacheCleared);
-    void refreshStatus();
-    return () => { destroyed = true; ++request; stopPoll(); window.removeEventListener('releasehub:cache-cleared', cacheCleared); };
+    if (preview) void changePreview();
+    else consumer = feedState.acquire(active);
+    return () => { destroyed = true; ++previewRequest; consumer?.release(); };
   });
 </script>
 
-<section class="feed" aria-label="GitHub 官网首页动态">
+<section class="feed" class:compact aria-label="GitHub 官网首页动态">
   <header class="feed-toolbar">
     <div class="feed-title">
       <h2>首页动态</h2>
@@ -134,9 +90,9 @@
       {#if connected || saved}
         <button class="button secondary small" disabled={preview || Boolean(pending)} onclick={() => void action('feed_connect')}><Icon name="eye" size={14} />官网窗口</button>
         <button class="button secondary small" disabled={preview || busy} onclick={() => void action('feed_refresh')}><Icon name="refresh" size={14} />刷新</button>
-        <button class="text-button feed-disconnect" disabled={preview || Boolean(pending)} onclick={() => disconnectArmed = !disconnectArmed}>退出网页</button>
+        {#if !compact}<button class="text-button feed-disconnect" disabled={preview || Boolean(pending)} onclick={() => disconnectArmed = !disconnectArmed}>退出网页</button>{/if}
       {:else}
-        <button class="button primary" disabled={preview || Boolean(pending) || initialLoading} onclick={() => void action('feed_connect')}><Icon name={pending === 'feed_connect' ? 'loader' : 'github'} class={pending === 'feed_connect' ? 'spinning' : ''} size={16} />{pending === 'feed_connect' ? '正在打开' : page?.loading ? '继续网页登录' : '连接官网'}</button>
+        <button class="button primary" disabled={preview || Boolean(pending) || initialLoading} onclick={connect}><Icon name={pending === 'feed_connect' ? 'loader' : 'github'} class={pending === 'feed_connect' ? 'spinning' : ''} size={16} />{pending === 'feed_connect' ? '正在打开' : page?.loading ? '继续网页登录' : onLogin ? '连接 GitHub' : '官网登录'}</button>
       {/if}
     </div>
   </header>
@@ -148,7 +104,7 @@
     <div class="feed-confirm" role="group" aria-label="确认退出网页登录"><p>清除追新保存的网页登录和动态缓存。浏览器和 GitHub 授权连接不受影响。</p><div><button class="button secondary small" onclick={() => disconnectArmed = false}>取消</button><button class="button secondary small" onclick={() => void action('feed_disconnect')}>确认退出</button></div></div>
   {/if}
   {#if error}
-    <div class="feed-error" role="alert"><Icon name="alert" size={17} /><p>{error}</p><button class="button secondary small" disabled={preview || Boolean(pending)} onclick={() => void action(connected || saved ? 'feed_refresh' : 'feed_connect')}>重试</button></div>
+    <div class="feed-error" role="alert"><Icon name="alert" size={17} /><p>{error}</p><button class="button secondary small" disabled={preview || Boolean(pending)} onclick={() => connected || saved ? void action('feed_refresh') : connect()}>重试</button></div>
   {/if}
 
   {#if saved}
@@ -166,7 +122,7 @@
       <div class="feed-loading" role="status"><Icon name="loader" class="spinning" size={20} /><div><h3>正在读取官网动态</h3><p>等待 GitHub 页面加载，保留原页面顺序。</p></div></div>
     {:else if page?.items.length}
       <ol class="feed-list">
-        {#each page.items as item (item.id)}
+        {#each visibleItems as item (item.id)}
           <li><article class="feed-row">
             <GithubAvatar url={item.avatarUrl} name={item.actor} />
             <div class="feed-copy">
@@ -188,7 +144,7 @@
       <div class="feed-empty"><Icon name="activity" size={27} /><h3>官网暂时没有新动态</h3><p>这里显示 GitHub 实际加载的内容，稍后可以再刷新。</p><button class="button secondary small" disabled={preview || busy} onclick={() => void action('feed_refresh')}>刷新动态</button></div>
     {/if}
     {#if (connected || saved) && page && (page.items.length || page.lastUpdated)}
-      <footer class="feed-footer"><span>{page.loading ? '正在从官网读取…' : `${saved ? '历史记录' : '已读取'} ${page.items.length} 条`}{#if page.lastUpdated} · {saved ? '保存于' : '更新于'} {formatDate(page.lastUpdated, true)}{/if}</span>{#if saved}<span>验证完成后可加载更多</span>{:else if page.hasMore}<button class="button secondary small" disabled={preview || busy} onclick={() => void action('feed_more')}><Icon name={busy ? 'loader' : 'chevronDown'} class={busy ? 'spinning' : ''} size={14} />{pending === 'feed_more' || page.loading ? '正在加载' : '加载更多'}</button>{:else}<span>{page.items.length >= 160 ? '已达到本次读取上限，可刷新重新读取' : '已到官网当前内容末尾'}</span>{/if}</footer>
+      <footer class="feed-footer"><span>{page.loading ? '正在从官网读取…' : `${saved ? '历史记录' : '已读取'} ${page.items.length} 条`}{#if page.lastUpdated} · {saved ? '保存于' : '更新于'} {formatDate(page.lastUpdated, true)}{/if}</span>{#if compact}<span>主页摘要 · 最多 3 条</span>{:else if saved}<span>验证完成后可加载更多</span>{:else if page.hasMore}<button class="button secondary small" disabled={preview || busy} onclick={() => void action('feed_more')}><Icon name={busy ? 'loader' : 'chevronDown'} class={busy ? 'spinning' : ''} size={14} />{pending === 'feed_more' || page.loading ? '正在加载' : '加载更多'}</button>{:else}<span>{page.items.length >= 160 ? '已达到本次读取上限，可刷新重新读取' : '已到官网当前内容末尾'}</span>{/if}</footer>
     {/if}
   </div>
   <p class="feed-source"><Icon name="github" size={14} /><span>来源：{sourceLabel} · 按网页顺序展示</span><button class="text-button" onclick={() => openLink(page?.sourceUrl || 'https://github.com/dashboard-feed')}>打开来源<Icon name="external" size={12} /></button></p>
@@ -196,6 +152,9 @@
 
 <style>
   .feed { min-width: 0; }
+  .feed.compact .feed-row { padding: 15px 17px; }
+  .feed.compact .feed-empty { padding: 22px 18px; }
+  .feed.compact .feed-body { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
   .feed-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
   .feed-title h2 { font-size: 16px; }
   .feed-title p { margin-top: 3px; color: var(--muted); font-size: 12px; }

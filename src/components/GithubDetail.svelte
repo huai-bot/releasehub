@@ -22,10 +22,10 @@
   {:else if repository}
     <div class="detail-body">
       <div class="repo-heading"><Icon name="readme" size={21} /><h2>{note?.name || repository.fullName}</h2></div>
+      {#if note?.description}<div class="local-note"><strong>本地备注</strong><p>{note.description}</p></div>{/if}
       {#if note?.name}<p class="original-name">{repository.fullName} <span>本地备注名</span></p>{/if}
+      <p class="repo-description">{note?.description ? '上游说明：' : ''}{repository.description || '作者尚未填写仓库说明。'}</p>
       <div class="repo-flags">{#if repository.private}<span class="status-badge neutral"><Icon name="private" size={12} />私有</span>{:else}<span class="status-badge neutral">公开</span>{/if}{#if repository.archived}<span class="status-badge warning">已归档</span>{/if}{#if repository.fork}<span class="status-badge neutral">Fork</span>{/if}{#if preview}<span class="status-badge warning">示例仓库</span>{/if}</div>
-      <p class="repo-description">{note?.description || repository.description || '作者尚未填写仓库说明。'}</p>
-      {#if note?.description && repository.description}<p class="author-description">作者说明：{repository.description}</p>{/if}
       {#if repository.homepage}<div class="repo-homepage"><strong>主页</strong>{#if safeGithubUrl(repository.homepage)}<button class="text-button" onclick={() => onopen(repository.homepage!)}>{repository.homepage}<Icon name="external" size={13} /></button>{:else}<span>{repository.homepage}</span><small>可在 GitHub 原页访问主页。</small>{/if}</div>{/if}
       <div class="repo-statline"><span><Icon name="star" size={14} />{repository.stars.toLocaleString()} Stars</span><span><Icon name="fork" size={14} />{repository.forks.toLocaleString()} Forks</span>{#if repository.language}<span>{repository.language}</span>{/if}<span>更新于 {formatDate(repository.updatedAt)}</span></div>
       {#if repository.topics.length}<div class="repo-topics">{#each repository.topics as topic}<span>{topic}</span>{/each}</div>{/if}
@@ -52,12 +52,14 @@
   .detail-body { padding: 18px; min-width: 0; }
   .repo-heading { display: flex; align-items: flex-start; gap: 10px; color: var(--accent); }
   .repo-heading > :global(svg) { margin-top: 3px; }
-  h2 { font-size: 16px; line-height: 1.5; overflow-wrap: anywhere; }
+  h2 { font-size: 20px; font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
   .repo-flags { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
   .repo-description { color: var(--subtle); font-size: 12px; overflow-wrap: anywhere; line-height: 1.8; }
   .original-name { margin-top: 5px; color: var(--subtle); font-size: 12px; overflow-wrap: anywhere; }
   .original-name span { color: var(--muted); font-size: 10px; margin-left: 6px; }
-  .author-description { margin-top: 7px; color: var(--muted); font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+  .local-note { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--border); background: var(--surface-soft); border-radius: 6px; overflow-wrap: anywhere; }
+  .local-note strong { color: var(--muted); font-size: 11px; font-weight: 500; }
+  .local-note p { margin-top: 4px; font-size: 14px; line-height: 1.7; color: var(--heading); }
   .repo-homepage { display: flex; flex-direction: column; align-items: start; gap: 3px; margin-top: 12px; font-size: 12px; overflow-wrap: anywhere; }
   .repo-homepage strong, .repo-homepage small { color: var(--muted); font-size: 11px; font-weight: 400; }
   .repo-homepage .text-button { white-space: normal; overflow-wrap: anywhere; display: block; }
@@ -71,4 +73,15 @@
   .readme-heading h3 { font-size: 12px; font-weight: 600; }
   .readme-heading span { margin-left: auto; font-size: 10.5px; }
   .empty-readme { color: var(--muted); font-size: 12px; }
+  @media (max-height: 720px) {
+    .repo-detail-top { padding: 5px 12px; gap: 8px; }
+    .detail-body { padding: 10px 12px; }
+    .repo-heading { gap: 7px; }
+    h2 { font-size: 19px; line-height: 1.35; }
+    .original-name { margin-top: 3px; font-size: 12px; }
+    .original-name span { display: block; margin-left: 0; }
+    .repo-flags { margin: 6px 0; }
+    .local-note { margin: 7px 0; padding: 7px 9px; }
+    .local-note p { margin-top: 2px; font-size: 13px; line-height: 1.6; }
+  }
 </style>
