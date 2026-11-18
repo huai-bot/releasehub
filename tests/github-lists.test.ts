@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
 import Github from '../src/pages/Github.svelte';
+import { feedState } from '../src/lib/feed-state';
 import { appendGithubRepositories, filterGithubPage } from '../src/lib/github';
 import { createPreviewGithubDetail, createPreviewGithubStatus } from '../src/lib/github-preview';
 import type { GithubListRepositoryPage, GithubRepository, GithubUserList, RepositoryNote } from '../src/lib/types';
@@ -61,14 +62,14 @@ function base(action: string, payload: Record<string, unknown> = {}): unknown {
   }
 }
 beforeEach(() => {
-  vi.clearAllMocks(); cleanup = null; notes = []; catalog = [list('list-a', '桌面工具'), list('list-b', '收藏')];
+  vi.clearAllMocks(); cleanup = null; feedState.clear(); notes = []; catalog = [list('list-a', '桌面工具'), list('list-b', '收藏')];
   dispatchMock.mockImplementation(async (action: string, payload: Record<string, unknown>) => base(action, payload));
   target = document.createElement('div'); document.body.append(target);
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value() { this.setAttribute('open', ''); } });
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value() { this.removeAttribute('open'); } });
   Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) });
 });
-afterEach(async () => { await cleanup?.(); target.remove(); });
+afterEach(async () => { await cleanup?.(); target.remove(); vi.restoreAllMocks(); });
 
 describe('GitHub Lists, loaded Stars and local notes', () => {
   it('extends filtering across cursor pages, including local notes, without calling global search', async () => {
@@ -132,10 +133,20 @@ describe('GitHub Lists, loaded Stars and local notes', () => {
     expect(dispatchMock).toHaveBeenCalledWith('github_assign_lists', { repositories: ['demo/alpha'], listIds: ['list-b'], mode: 'replace', confirmed: true });
   });
 
-  it('refreshes the catalog before replacing memberships changed on GitHub', async () => {
+  it('reuses fresh assignment snapshots and refreshes expired changes made on GitHub', async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
     show(); await settle();
+    const catalogReads = dispatchMock.mock.calls.filter(([action]) => action === 'github_lists').length;
+    const membershipReads = dispatchMock.mock.calls.filter(([action]) => action === 'github_repository_lists').length;
+    await click('设置 demo/alpha 分类');
+    expect([...target.querySelectorAll<HTMLInputElement>('.assignment-options input')].map((checkbox) => checkbox.checked)).toEqual([true, true]);
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'github_lists')).toHaveLength(catalogReads);
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'github_repository_lists')).toHaveLength(membershipReads);
     catalog = [...catalog, list('list-new', '官网新增分类')];
     dispatchMock.mockImplementation(async (action: string, payload: Record<string, unknown>) => action === 'github_repository_lists' ? { listIds: ['list-a', 'list-new'] } : base(action, payload));
+    clock.mockReturnValue(now + 300_001);
+    await click('关闭分类整理');
     await click('设置 demo/alpha 分类');
     expect([...target.querySelectorAll<HTMLInputElement>('.assignment-options input')].map((checkbox) => checkbox.checked)).toEqual([true, false, true]);
     await submit('.assignment-editor form');
