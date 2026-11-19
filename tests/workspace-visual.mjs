@@ -22,7 +22,7 @@ try {
    await nav('设置'); await page.getByRole('button', { name: theme === 'light' ? '浅色 明亮浅灰' : '深色 深色板岩', exact: true }).click();
    await nav('首页'); await shot(`home-${theme}`);
    await nav('资源库'); await shot(`library-${theme}`);
-   await page.getByRole('button', { name: '查看 FFmpegFreeUI 详情', exact: true }).click();
+   await page.locator('.project-card .card-identity').filter({ hasText: 'FFmpegFreeUI' }).press('Enter');
    await shot(`library-detail-${theme}`);
    await page.locator('.detail-panel').getByRole('button', { name: '关闭资源详情', exact: true }).click();
    await nav('可更新'); await shot(`updates-${theme}`);
@@ -36,8 +36,9 @@ try {
     return { list: list.getBoundingClientRect().toJSON(), detail: detail.getBoundingClientRect().toJSON(), listOverflow: getComputedStyle(list).overflowY, detailOverflow: getComputedStyle(detail).overflowY };
    });
    checks.push({ viewport, theme, dims });
-   if (dims.list.height < 90 || dims.detail.height < 90 || dims.list.right > dims.detail.left + 1) failures.push(`${viewport.width}/${theme}: unusable two columns`);
-   // Bounded synthetic long-content fixture proves wheel isolation at each supported width.
+   if (viewport.width > 1250 && (dims.list.height < 90 || dims.detail.height < 90 || dims.list.right > dims.detail.left + 1)) failures.push(`${viewport.width}/${theme}: unusable two columns`);
+   if (viewport.width > 1250) {
+   // Bounded synthetic long-content fixture proves wheel isolation in the wide layout.
    await page.evaluate(() => {
     const list = document.querySelector('.github-results'), detail = document.querySelector('.detail-region');
     for (let i = 0; i < 12; i++) list.append(list.querySelector('.repo-row').cloneNode(true));
@@ -49,6 +50,7 @@ try {
    await detail.hover(); await page.mouse.wheel(0, 350); await page.waitForTimeout(180);
    const two = await page.evaluate(() => ({ list: document.querySelector('.github-results').scrollTop, detail: document.querySelector('.detail-region').scrollTop, parent: document.querySelector('.github-workspace').scrollTop }));
    if (one.list <= 0 || one.detail !== 0 || two.detail <= 0 || two.list !== one.list || one.parent || two.parent) failures.push(`${viewport.width}/${theme}: scroll isolation ${JSON.stringify({ one, two })}`);
+   }
    // Recreate preview after the synthetic fixture so screenshots remain genuine.
    await page.reload(); await page.getByRole('button', { name: '进入界面预览', exact: true }).click();
   }

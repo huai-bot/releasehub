@@ -1,4 +1,5 @@
 use super::*;
+include!("update_opt_in_tests.rs");
 use sha2::{Digest,Sha256};
 fn fixture()->(tempfile::TempDir,Arc<Core>,Project,PathBuf) {
     let dir=tempfile::tempdir().unwrap();let core=Core::new(dir.path().join("data"),true,Arc::new(|_,_|{})).unwrap();
@@ -6,6 +7,7 @@ fn fixture()->(tempfile::TempDir,Arc<Core>,Project,PathBuf) {
     fs::create_dir(target.join("config")).unwrap();fs::write(target.join("config/settings.json"),b"user configuration").unwrap();
     fs::write(target.join("app.exe"),b"old fixture not executable").unwrap();
     let mut p=test_project("fixture","app");p.installed_version=Some("v1".into());p.installed_source=Some("manual".into());p.installed_path=Some(target.to_string_lossy().into_owned());
+    p.backup_enabled = true; // 显式开启备份以满足测试断言
     core.store.put_project(&p).unwrap();(dir,core,p,target)
 }
 fn package(core:&Core,p:&Project,tag:&str,files:&[(&str,&[u8])])->DownloadRecord {
@@ -172,6 +174,19 @@ fn input(d:&DownloadRecord,target:&Path,root:&str,version:Option<&str>)->Install
 #[cfg(windows)]#[test]fn locked_file_is_rejected_before_any_backup_or_mutation(){
     use std::os::windows::fs::OpenOptionsExt;let (_dir,core,p,target)=fixture();let d=package(&core,&p,"v2",&[("app.exe",b"v2")]);
     let _lock=fs::OpenOptions::new().read(true).share_mode(0).open(target.join("app.exe")).unwrap();assert!(core.perform_install(&input(&d,&target,".",Some("v1"))).is_err());assert!(core.get_backup(&p.id).unwrap().is_none());assert!(core.store.journals().unwrap().is_empty());
+}
+#[tokio::test]async fn backup_disabled_avoids_snapshot_and_journal_creation(){
+    let (_dir,core,mut p,target)=fixture();
+    p.backup_enabled = false;
+    core.store.put_project(&p).unwrap();
+    let d=package(&core,&p,"v2",&[("app.exe",b"v2")]);
+    let preview=core.preview_install(&d.id,None).unwrap();
+    assert_eq!(preview.backup_enabled,false);
+    assert_eq!(preview.backup_bytes,0);
+    core.install_confirmed(input(&d,&target,".",Some("v1"))).await.unwrap();
+    assert_eq!(fs::read(target.join("app.exe")).unwrap(),b"v2");
+    assert!(core.get_backup(&p.id).unwrap().is_none());
+    assert!(core.store.journals().unwrap().is_empty());
 }
 #[cfg(any(windows,unix))]#[test]fn links_in_target_or_download_are_never_followed_or_deleted(){
     let (dir,core,p,target)=fixture();let d=package(&core,&p,"v2",&[("app.exe",b"v2")]);let external=dir.path().join("outside.txt");fs::write(&external,b"outside untouched").unwrap();let link=target.join("linked.txt");

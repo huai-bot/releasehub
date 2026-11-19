@@ -33,6 +33,8 @@ pub struct Project {
     pub installed_version: Option<String>, pub installed_path: Option<String>,
     #[serde(default)]
     pub executable_path: Option<String>,
+    #[serde(default)]
+    pub backup_enabled: bool,
     pub installed_source: Option<String>, pub release: Option<Release>,
     pub selected_asset_id: Option<u64>, pub status: String,
     pub checked_at: Option<String>, pub error: Option<String>, pub default_branch: String,
@@ -109,6 +111,7 @@ fn note_text(value: &str, max: usize, label: &str) -> Result<String, String> {
 }
 pub const NAVIGATION_PAGES: [&str; 6] = ["home", "library", "updates", "downloads", "github", "agent"];
 pub fn default_management_mode() -> String { "software".into() }
+pub fn default_true() -> bool { true }
 pub fn default_download_connections() -> usize { 4 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -216,6 +219,7 @@ pub struct AddProjectInput {
 pub struct ProjectChanges {
     pub channel: Option<String>, pub preference: Option<String>,
     pub management_mode: Option<String>,
+    pub backup_enabled: Option<bool>,
     #[serde(default, deserialize_with = "double_option")]
     pub asset_pattern: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
@@ -230,10 +234,11 @@ pub struct ProjectChanges {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallPreview {
-    pub download_id: String, pub project_id: String, pub target_path: String, pub backup_path: String,
+    pub download_id: String, pub project_id: String, pub target_path: String, pub backup_path: Option<String>,
     pub previous_version: Option<String>, pub next_version: String, pub backup_bytes: u64,
     pub package_bytes: u64, pub available_bytes: u64, pub kind: String, pub archive_roots: Vec<String>,
     pub suggested_root: Option<String>, pub requires_root_selection: bool, pub legacy_managed: bool,
+    pub backup_enabled: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -248,6 +253,8 @@ pub struct BackupRecord {
 pub struct InstallJournal {
     pub backup: BackupRecord, pub original_project: Project, pub previous_download: DownloadRecord,
     pub target_empty: bool, pub stage_path: String,
+    #[serde(default = "default_true")]
+    pub snapshot_enabled: bool,
     #[serde(default)]
     pub snapshot_files: Vec<SnapshotEntry>,
     #[serde(default)]
@@ -278,7 +285,9 @@ pub fn validate_choices(channel: &str, preference: &str) -> Result<(), String> {
 pub fn test_project(owner:&str,repo:&str)->Project {
     Project{id:uuid::Uuid::new_v4().to_string(),owner:owner.into(),repo:repo.into(),name:repo.into(),description:String::new(),
         url:format!("https://github.com/{owner}/{repo}"),avatar_url:None,channel:"stable".into(),preference:"auto".into(),
-        management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,executable_path:None,installed_source:None,release:None,
+        management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,executable_path:None,
+        backup_enabled:false,
+        installed_source:None,release:None,
         selected_asset_id:None,status:"notChecked".into(),checked_at:None,error:None,default_branch:"main".into(),
         source_head_sha:None,source_ahead:None,created_at:now()}
 }

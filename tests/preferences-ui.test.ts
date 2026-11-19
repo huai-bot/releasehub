@@ -179,7 +179,7 @@ describe('startup and desktop navigation', () => {
     button('手动下载默认使用外部下载器').click(); await settle(); expect(snapshot.settings.useExternalDownloader).toBe(true);
   });
 
-  it('requires confirmation before sending an external download link', async () => {
+  it('sends an external download link once from the deliberate download click', async () => {
     const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library'; snapshot.settings.useExternalDownloader = true;
     mocks.dispatch.mockImplementation(async (action: string) => {
       if (action === 'snapshot') return snapshot;
@@ -191,14 +191,13 @@ describe('startup and desktop navigation', () => {
     const card = [...target.querySelectorAll<HTMLElement>('.project-card')].find(item => item.textContent?.includes(project.name))!;
     card.querySelector<HTMLButtonElement>('.card-identity')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await settle();
     button('下载已选文件').click(); await settle();
-    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'send_external_download')).toHaveLength(0);
-    button('取消').click(); await settle();
-    button('下载已选文件').click(); await settle(); button('确认发送链接').click(); await settle();
+    expect(target.querySelector('dialog[open]')).toBeNull();
+    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'send_external_download')).toHaveLength(1);
     expect(mocks.dispatch).toHaveBeenCalledWith('send_external_download', { projectId: project.id, assetId: project.selectedAssetId, confirmed: true });
     expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'download_asset')).toHaveLength(0);
   });
 
-  it('offers import and confirmed resend for external tasks without claiming completion', async () => {
+  it('offers import and one-click resend for external tasks without claiming completion', async () => {
     const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'downloads';
     snapshot.downloads = [{ ...snapshot.downloads[0], status: 'external', path: null, sha256: null, verified: false }];
     mocks.dispatch.mockImplementation(async (action: string) => {
@@ -211,8 +210,9 @@ describe('startup and desktop navigation', () => {
     expect(target.textContent).toContain('已交给外部下载器'); expect(target.querySelector('.download-progress')).toBeNull();
     button('导入已下载文件').click(); await settle();
     expect(mocks.dispatch).toHaveBeenCalledWith('import_external_download', { id: snapshot.downloads[0].id, confirmed: true });
-    button('重新发送').click(); await settle(); expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'retry_external_download')).toHaveLength(0);
-    button('确认重新发送').click(); await settle(); expect(mocks.dispatch).toHaveBeenCalledWith('retry_external_download', { id: snapshot.downloads[0].id, confirmed: true });
+    button('重新发送到下载器').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('retry_external_download', { id: snapshot.downloads[0].id, confirmed: true });
+    expect(target.querySelector('dialog[open]')).toBeNull();
   });
 
   it('persists all library layouts and restores the last choice on restart', async () => {
@@ -301,7 +301,7 @@ describe('startup and desktop navigation', () => {
     expect(card().querySelector('strong')?.textContent).toBe(project.name); expect(card().querySelector('small')).toBeNull();
   });
 
-  it('previews an executable with its folder, discards cancellation and commits only after confirmation', async () => {
+  it('keeps paths collapsed, discards a cancelled picker draft and saves without a checkbox', async () => {
     let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library';
     const project = snapshot.projects[0]; project.installedPath = null; project.executablePath = null; project.installedSource = null;
     const selection = { installedPath: 'D:\\Fixture\\App', executablePath: 'D:\\Fixture\\App\\app.exe' };
@@ -317,21 +317,56 @@ describe('startup and desktop navigation', () => {
     });
     const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
     target.querySelector<HTMLButtonElement>('#main-content .card-identity')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await settle();
-    button('管理').click(); await settle(); button('手动记录已安装版本').click(); await settle();
-    button('选择启动程序').click(); await settle();
+    button('修改本机版本').click(); await settle();
+    expect(target.querySelector<HTMLDetailsElement>('dialog details')?.open).toBe(false);
+    target.querySelector('dialog details')!.setAttribute('open', '');
+    button('选择 EXE').click(); await settle();
     expect(mocks.dispatch).toHaveBeenCalledWith('pick_executable', { projectId: project.id });
     expect(target.querySelector<HTMLInputElement>('#mark-path')!.value).toBe(selection.installedPath);
     expect(target.querySelector<HTMLInputElement>('#mark-executable')!.value).toBe(selection.executablePath);
     button('取消').click(); await settle();
     expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'mark_installed' || action === 'open_project')).toHaveLength(0);
     expect(snapshot.projects[0].installedPath).toBeNull();
-    button('手动记录已安装版本').click(); await settle(); expect(target.querySelector<HTMLInputElement>('#mark-path')!.value).toBe('');
-    button('选择启动程序').click(); await settle(); await input('#mark-version', 'v2.0.0');
-    expect(button('确认记录').disabled).toBe(true);
-    target.querySelector<HTMLInputElement>('dialog .confirmation-check input')!.click(); await settle(); button('确认记录').click(); await settle();
+    button('修改本机版本').click(); await settle(); expect(target.querySelector<HTMLInputElement>('#mark-path')!.value).toBe('');
+    target.querySelector('dialog details')!.setAttribute('open', '');
+    button('选择 EXE').click(); await settle(); await input('#mark-version', 'v2.0.0');
+    expect(target.querySelector('dialog input[type="checkbox"]')).toBeNull();
+    expect(button('保存版本').disabled).toBe(false);
+    button('保存版本').click(); await settle();
     expect(mocks.dispatch).toHaveBeenCalledWith('mark_installed', { projectId: project.id, version: 'v2.0.0', path: selection.installedPath, executablePath: selection.executablePath });
     expect(target.querySelector('dialog[open]')).toBeNull(); expect(snapshot.projects[0].executablePath).toBe(selection.executablePath);
     expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'open_project')).toHaveLength(0);
+  });
+
+  it('saves version alone without resending hidden paths', async () => {
+    let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library';
+    const project = snapshot.projects[0]; project.installedPath = 'D:\\Fixture'; project.executablePath = 'D:\\Fixture\\app.exe';
+    mocks.dispatch.mockImplementation(async (action: string, payload: { version?: string }) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'mark_installed') { const saved = { ...project, installedVersion: payload.version! }; snapshot = { ...snapshot, projects: snapshot.projects.map(item => item.id === saved.id ? saved : item) }; return saved; }
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    target.querySelector<HTMLButtonElement>('#main-content .card-identity')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await settle();
+    button('修改本机版本').click(); await settle(); await input('#mark-version', 'v9'); button('保存版本').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('mark_installed', { projectId: project.id, version: 'v9' });
+  });
+
+  it('installs directly when preview already knows the target and archive root', async () => {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'downloads';
+    const download = { ...snapshot.downloads[0], status: 'completed' as const, kind: 'portable' as const, installable: true }; snapshot.downloads = [download];
+    const plan = { downloadId: download.id, projectId: download.projectId, targetPath: 'D:\\Fixture', previousVersion: '1', nextVersion: '2', backupEnabled: false, backupPath: null, backupBytes: 0, packageBytes: 1, availableBytes: 10000, kind: 'portable', archiveRoots: ['.'], suggestedRoot: '.', requiresRootSelection: false, legacyManaged: false };
+    mocks.dispatch.mockImplementation(async (action: string) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'preview_install') return plan;
+      if (action === 'install_download') return { installed: true, message: '已安装' };
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    button('安装 / 更新').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('install_download', { id: download.id, confirmed: true, targetPath: plan.targetPath, previousVersion: '1', archiveRoot: '.' });
+    expect(target.querySelector('dialog[open]')).toBeNull();
+    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'preview_install')).toHaveLength(1);
   });
 
   it('does not claim a saved executable when the native picker is cancelled', async () => {

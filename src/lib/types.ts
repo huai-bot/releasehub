@@ -35,6 +35,8 @@ export interface Release {
 }
 
 export interface Project {
+  /** Missing in older records; backups are opt-in per software. */
+  backupEnabled?: boolean;
   managementMode?: ManagementMode;
   fileStatus?: FileStatus;
   id: string;
@@ -191,6 +193,7 @@ export interface AddProjectInput {
 }
 
 export interface ProjectChanges {
+  backupEnabled?: boolean;
   managementMode?: ManagementMode;
   channel?: Channel;
   preference?: AssetPreference;
@@ -212,7 +215,8 @@ export interface InstallPreview {
   downloadId: string;
   projectId: string;
   targetPath: string;
-  backupPath: string;
+  backupEnabled: boolean;
+  backupPath: string | null;
   previousVersion: string | null;
   nextVersion: string;
   backupBytes: number;

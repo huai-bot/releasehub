@@ -1,4 +1,4 @@
-//! Confirmed in-place installs. All destructive operations are preceded by a durable full snapshot.
+//! Direct in-place installs with opt-in full snapshots and durable interruption tracking.
 #[cfg(test)]
 #[path = "update_tests.rs"]
 mod tests;
@@ -168,20 +168,31 @@ impl Core {
         if self.store.journals()?.iter().any(|j|j.backup.project_id==p.id) { return Err("上次安装尚待恢复，请先恢复备份".into()); }
         let source=install::verify_download(&self.data_dir,&d)?;
         let target=target.or(p.installed_path.as_deref()).ok_or("未记录安装路径，请明确选择软件目录")?;
-        let (target,legacy)=self.validate_target(&p,target)?; let (_,mut backup_bytes)=tree_files(&target)?;
-        if legacy { backup_bytes=backup_bytes.checked_add(tree_files(Path::new(p.installed_path.as_deref().ok_or("旧目录缺失")?))?.1).ok_or("备份大小超限")?; }
+        let (target,legacy)=self.validate_target(&p,target)?;
+        let backup_enabled = p.backup_enabled;
+        let (backup_path, backup_bytes) = if backup_enabled {
+            let (_, mut bytes) = tree_files(&target)?;
+            if legacy { bytes=bytes.checked_add(tree_files(Path::new(p.installed_path.as_deref().ok_or("旧目录缺失")?))?.1).ok_or("备份大小超限")?; }
+            (Some(self.data_dir.join("backups").join(&p.id).to_string_lossy().into_owned()), bytes)
+        } else { (None, 0u64) };
         let (roots,package_bytes,root_file)=if d.kind=="portable" && d.file_name.to_ascii_lowercase().ends_with(".zip") { inspect_zip(&source)? }
             else if d.kind=="installer" || (d.kind=="portable"&&standalone(&p,&d)) { (vec![],d.total_bytes,true) }
             else { return Err("此文件不支持便携安装".into()); };
         let available_bytes=free_bytes(&target)?; let backup_available=free_bytes(&self.data_dir)?;
-        let required=package_bytes.checked_mul(2).and_then(|package|backup_bytes.checked_add(package)).and_then(|v|v.checked_add(16*1024*1024)).ok_or("所需空间超限")?;
-        if backup_available<required || available_bytes<package_bytes.saturating_add(16*1024*1024) { return Err("磁盘空间不足以完整备份并安装".into()); }
+        let required_package = package_bytes.checked_add(16*1024*1024).ok_or("所需空间超限")?;
+        if available_bytes < required_package { return Err("磁盘空间不足以安装".into()); }
+        let required = if backup_enabled {
+            package_bytes.checked_mul(2).and_then(|package|backup_bytes.checked_add(package)).and_then(|v|v.checked_add(16*1024*1024)).ok_or("所需空间超限")?
+        } else { required_package };
+        if backup_available < required {
+            return Err(if backup_enabled { "磁盘空间不足以完整备份并安装" } else { "磁盘空间不足以暂存安装包" }.into());
+        }
         // Never guess a wrapper directory. An explicit root selection is always honored.
         let suggested_root=if !roots.is_empty()&&root_file { Some(".".into()) } else { None };
         Ok(InstallPreview{download_id:d.id,project_id:p.id.clone(),target_path:target.to_string_lossy().into_owned(),
-            backup_path:self.data_dir.join("backups").join(&p.id).to_string_lossy().into_owned(),previous_version:p.installed_version,
+            backup_path,previous_version:p.installed_version,
             next_version:d.tag,backup_bytes,package_bytes,available_bytes,kind:d.kind,requires_root_selection:!roots.is_empty()&&suggested_root.is_none(),
-            suggested_root,archive_roots:roots,legacy_managed:legacy})
+            suggested_root,archive_roots:roots,legacy_managed:legacy,backup_enabled})
     }
     pub(crate) async fn install_confirmed(self:&Arc<Self>,input:InstallInput)->Result<Value,String> {
         if !input.confirmed { return Err("请先确认安装此软件".into()); }
@@ -192,7 +203,7 @@ impl Core {
             if !installing.insert(p.id.clone()) { return Err("此项目正在安装或恢复，请稍后再试".into()); }
         }
         let core=self.clone(); let project_id=p.id.clone();
-        let result=tokio::task::spawn_blocking(move||core.perform_install(&input)).await.map_err(|_|"安装任务被中断，备份将在下次启动时恢复".to_string()).and_then(|r|r);
+        let result=tokio::task::spawn_blocking(move||core.perform_install(&input)).await.map_err(|_|"安装任务被中断，请重新启动以检查安装状态".to_string()).and_then(|r|r);
         if let Ok(mut state)=self.installing.lock() { state.remove(&project_id); }
         self.changed(); result
     }
@@ -297,17 +308,30 @@ impl Core {
         };
         writable_and_idle(&target)?;
         if preview.legacy_managed { writable_and_idle(Path::new(p.installed_path.as_deref().ok_or("旧目录缺失")?))?; }
-        let folder=self.backup_folder(&p.id)?.join(uuid::Uuid::new_v4().to_string());fs::create_dir(&folder).map_err(io_error)?;
-        let stage=folder.join("stage");let snapshot=folder.join("target");fs::create_dir(&stage).map_err(io_error)?;fs::create_dir(&snapshot).map_err(io_error)?;
+        let backup_enabled = preview.backup_enabled;
+        let folder=if backup_enabled { self.backup_folder(&p.id)?.join(uuid::Uuid::new_v4().to_string()) }
+            else { self.data_dir.join("temp").join(uuid::Uuid::new_v4().to_string()) };
+        if backup_enabled { fs::create_dir(&folder).map_err(io_error)?; }
+        else {
+            let temp=self.data_dir.join("temp");
+            if !temp.exists() { fs::create_dir(&temp).map_err(io_error)?; }
+            safe_existing(&temp,true)?;
+        }
+        let stage=if backup_enabled { folder.join("stage") } else { folder.clone() };
+        fs::create_dir(&stage).map_err(io_error)?;
+        let snapshot=if backup_enabled { Some(folder.join("target")) } else { None };
+        if let Some(s) = &snapshot { fs::create_dir(s).map_err(io_error)?; }
         let mut j=InstallJournal{backup:BackupRecord{project_id:p.id.clone(),download_id:d.id.clone(),version:p.installed_version.clone(),
-            installed_source:p.installed_source.clone(),target_path:preview.target_path.clone(),path:folder.to_string_lossy().into_owned(),created_at:now(),bytes:preview.backup_bytes,
-            kind:d.kind.clone(),phase:"preparing".into(),error:None},original_project:p.clone(),previous_download:d.clone(),target_empty:tree_files(&target)?.0.is_empty(),stage_path:stage.to_string_lossy().into_owned(),snapshot_files:vec![],original_files:vec![]};
+            installed_source:p.installed_source.clone(),target_path:preview.target_path.clone(),path:if backup_enabled { folder.to_string_lossy().into_owned() } else { "".into() },created_at:now(),bytes:preview.backup_bytes,
+            kind:d.kind.clone(),phase:"preparing".into(),error:None},original_project:p.clone(),previous_download:d.clone(),target_empty:tree_files(&target)?.0.is_empty(),stage_path:stage.to_string_lossy().into_owned(),snapshot_enabled:preview.backup_enabled,snapshot_files:vec![],original_files:vec![]};
         self.store.put_journal(&j)?;
         let prepared=(|| {
-            j.snapshot_files=snapshot_inventory(&target)?;
-            copy_tree(&target,&snapshot,false)?;
-            if snapshot_inventory(&snapshot)?!=j.snapshot_files || snapshot_inventory(&target)?!=j.snapshot_files {return Err("原目录在备份过程中改变，请关闭软件并重试".into());}
-            if preview.legacy_managed {
+            if let Some(s) = &snapshot {
+                j.snapshot_files=snapshot_inventory(&target)?;
+                copy_tree(&target,s,false)?;
+                if snapshot_inventory(s)?!=j.snapshot_files || snapshot_inventory(&target)?!=j.snapshot_files {return Err("原目录在备份过程中改变，请关闭软件并重试".into());}
+            }
+            if preview.legacy_managed && backup_enabled {
                 let original=folder.join("original");fs::create_dir(&original).map_err(io_error)?;
                 let old=Path::new(p.installed_path.as_deref().ok_or("旧目录缺失")?);
                 j.original_files=snapshot_inventory(old)?;copy_tree(old,&original,false)?;
@@ -319,10 +343,18 @@ impl Core {
                 if let Some(root)=root { if root!="." { safe_existing(&stage.join(root),true)?; } }
             }
             writable_and_idle(&target)?;
-            if snapshot_inventory(&target)?!=j.snapshot_files{return Err("原目录在安装前已改变，请重新备份".into());}
-            self.write_manifest(&j)?;Ok::<_,String>(())
+            if backup_enabled {
+                if snapshot_inventory(&target)?!=j.snapshot_files{return Err("原目录在安装前已改变，请重新备份".into());}
+                self.write_manifest(&j)?;
+            }
+            Ok::<_,String>(())
         })();
-        if let Err(error)=prepared { self.store.remove_journal(&p.id)?;let _=self.remove_snapshot(&j.backup);return Err(error); }
+        if let Err(error)=prepared {
+            self.store.remove_journal(&p.id)?;
+            if j.snapshot_enabled { let _=self.remove_snapshot(&j.backup); }
+            else { self.cleanup_unbacked_stage(&j); }
+            return Err(error);
+        }
         j.backup.phase="installing".into();self.store.put_journal(&j)?;
         let transitioned=self.store.mutate("downloads",&d.id,|record:&mut DownloadRecord|{record.status="installing".into();record.error=None;record.updated_at=now();Ok(())})?;
         self.download_event(&transitioned);
@@ -330,7 +362,11 @@ impl Core {
         let installed=(|| {
             if d.kind=="installer" { launch(&source)?; }
             else {
-                if preview.legacy_managed { copy_tree(&folder.join("original"),&target,true)?; }
+                if preview.legacy_managed {
+                    let original=if j.snapshot_enabled { folder.join("original") }
+                        else { PathBuf::from(p.installed_path.as_deref().ok_or("旧目录缺失")?) };
+                    copy_tree(&original,&target,true)?;
+                }
                 let selected=match root { Some(root) if root!="."=>stage.join(root),_=>stage.clone() };
                 // Overlay only package members: package names win, absent configuration files survive.
                 copy_tree(&selected,&target,true)?;
@@ -342,54 +378,104 @@ impl Core {
                 if preview.legacy_managed { project.executable_path=p.executable_path.as_deref().and_then(|exe|Path::new(exe).strip_prefix(Path::new(p.installed_path.as_deref()?)).ok()).map(|relative|target.join(relative).to_string_lossy().into_owned()); }
                 project.error=None;super::selection::update_status(&mut project);record.status="installed".into();
             } else { record.status="completed".into(); }
-            record.error=None;record.updated_at=now();j.backup.phase="ready".into();self.write_manifest(&j)?;
+            record.error=None;record.updated_at=now();j.backup.phase="ready".into();
+            if j.snapshot_enabled { self.write_manifest(&j)?; }
             self.store.finish_install(&project,&record,&j)?;self.download_event(&record);Ok::<_,String>(())
         })();
         if let Err(error)=installed {
+            if !j.snapshot_enabled {
+                let message=format!("安装失败，未开启备份，目录可能已部分更新。请检查文件后重试：{error}");
+                self.finish_unbacked_interruption(&j,&message)?;
+                return Err(message);
+            }
             j.backup.phase="restoring".into();j.backup.error=Some(error.clone());self.store.put_journal(&j)?;
             match self.restore_journal(&mut j) {
-                Ok(())=>{let _=self.remove_snapshot(&j.backup);return Err(format!("安装失败，已恢复原目录和版本：{error}"));}
+                Ok(())=>{if j.snapshot_enabled { let _=self.remove_snapshot(&j.backup); } return Err(format!("安装失败，已恢复原目录和版本：{error}"));}
                 Err(recovery)=>return Err(format!("安装失败，完整备份保留，需恢复后继续：{recovery}")),
             }
         }
         // The previous snapshot is retired only after the new metadata and backup are durably published.
-        if let Some(old)=old { let _=self.remove_snapshot(&old); }
+        if j.snapshot_enabled {
+            if let Some(old)=old { let _=self.remove_snapshot(&old); }
+        }
         let _=clear_tree(&stage);let _=fs::remove_dir(&stage);
-        if d.kind=="installer" { Ok(json!({"kind":"installer","message":"已完整备份软件文件并打开官方安装向导。完成后请手动记录版本；文件备份不包含注册表和系统安装状态。","path":source.to_string_lossy(),"installed":false})) }
-        else { Ok(json!({"kind":"portable","message":"已备份并更新原目录。同名文件采用新版，其余文件保留。","path":preview.target_path,"installed":true})) }
+        if d.kind=="installer" {
+            let message=if backup_enabled { "已备份软件文件并打开官方安装向导。完成后请记录版本；文件备份不包含注册表和系统安装状态。" }
+                else { "已打开官方安装向导。完成后请记录版本；此项目未开启备份。" };
+            Ok(json!({"kind":"installer","message":message,"path":source.to_string_lossy(),"installed":false}))
+        } else {
+            let message=if backup_enabled { "已备份并更新原目录。" } else { "已更新原目录。此项目未开启备份。" };
+            Ok(json!({"kind":"portable","message":message,"path":preview.target_path,"installed":true}))
+        }
+    }
+    // Delete only this installation's internal staging directory, never its target or old data root.
+    fn cleanup_unbacked_stage(&self,j:&InstallJournal) {
+        let stage=Path::new(&j.stage_path);
+        let Some(run)=stage.file_name().and_then(|s|s.to_str()) else {return;};
+        if uuid::Uuid::parse_str(run).is_err() || stage.parent().and_then(Path::file_name).and_then(|s|s.to_str())!=Some("temp") {return;}
+        let candidate=self.data_dir.join("temp").join(run);
+        if safe_existing(&candidate,true).is_ok() && clear_tree(&candidate).is_ok() {let _=fs::remove_dir(candidate);}
+    }
+    fn finish_unbacked_interruption(&self,j:&InstallJournal,message:&str)->Result<(),String> {
+        let mut project=self.store.project(&j.backup.project_id)?;
+        // The files may already have changed. Do not present the previous version as known installed.
+        project.installed_version=None;project.status="error".into();project.error=Some(message.into());
+        let mut download=self.store.optional_download(&j.previous_download.id)?;
+        if let Some(record)=download.as_mut() {
+            record.status="completed".into();record.error=Some(message.into());record.updated_at=now();
+        }
+        self.store.finish_restore(&project,download.as_ref(),&j.backup.project_id)?;
+        self.cleanup_unbacked_stage(j);
+        if let Some(record)=download {self.download_event(&record);}
+        Ok(())
     }
     fn restore_journal(&self,j:&mut InstallJournal)->Result<(),String> {
+        if !j.snapshot_enabled { return Err("该项目未开启备份，无法执行自动恢复".into()); }
         let result=(|| {
-            let root=self.validate_backup(&j.backup)?;let target=safe_existing(Path::new(&j.backup.target_path),true)?;
+            let root=self.validate_backup(&j.backup)?;
+            let target=safe_existing(Path::new(&j.backup.target_path),true)?;
             if overlaps(&target,&self.data_dir) { return Err("恢复目标与资料库重叠".into()); }
             // Reapply all current path restrictions, but recovery may return to a former managed source.
-            let mut validation=j.original_project.clone();validation.installed_source=Some("manual".into());validation.installed_path=Some(j.backup.target_path.clone());
+            let mut validation=j.original_project.clone();
+            validation.installed_source=Some("manual".into());
+            validation.installed_path=Some(j.backup.target_path.clone());
             self.validate_target(&validation,&j.backup.target_path)?;
-            let snapshot=root.join("target");
-            if snapshot_inventory(&snapshot)?!=j.snapshot_files{return Err("完整备份缺失或内容已改变；为保护当前目录，已拒绝恢复".into());}
-            writable_and_idle(&target)?;
-            if j.original_project.installed_source.as_deref()==Some("managed") {
-                let original=root.join("original");
-                if snapshot_inventory(&original)?!=j.original_files {return Err("旧受管完整备份缺失或内容已改变".into());}
-                let old=safe_existing(Path::new(j.original_project.installed_path.as_deref().ok_or("旧目录记录缺失")?),true)?;
-                let managed_root=safe_existing(&self.data_dir.join("apps").join(&j.backup.project_id),true)?;
-                if old.parent()!=Some(managed_root.as_path()){return Err("旧受管恢复路径不安全".into());}
-                writable_and_idle(&old)?;
+            if j.snapshot_enabled {
+                let snapshot=root.join("target");
+                if snapshot_inventory(&snapshot)?!=j.snapshot_files{return Err("完整备份缺失或内容已改变；为保护当前目录，已拒绝恢复".into());}
             }
-            clear_tree(&target)?;copy_tree(&snapshot,&target,false)?;
-            if j.original_project.installed_source.as_deref()==Some("managed") {
-                let old=Path::new(j.original_project.installed_path.as_deref().ok_or("旧目录记录缺失")?);
-                clear_tree(old)?;copy_tree(&root.join("original"),old,false)?;
+            writable_and_idle(&target)?;
+            if j.snapshot_enabled {
+                if j.original_project.installed_source.as_deref()==Some("managed") {
+                    let original=root.join("original");
+                    if snapshot_inventory(&original)?!=j.original_files {return Err("旧受管完整备份缺失或内容已改变".into());}
+                    let old=safe_existing(Path::new(j.original_project.installed_path.as_deref().ok_or("旧目录记录缺失")?),true)?;
+                    let managed_root=safe_existing(&self.data_dir.join("apps").join(&j.backup.project_id),true)?;
+                    if old.parent()!=Some(managed_root.as_path()){return Err("旧受管恢复路径不安全".into());}
+                    writable_and_idle(&old)?;
+                }
+            }
+            clear_tree(&target)?;
+            if j.snapshot_enabled {
+                copy_tree(&root.join("target"),&target,false)?;
+                if j.original_project.installed_source.as_deref()==Some("managed") {
+                    let old=Path::new(j.original_project.installed_path.as_deref().ok_or("旧目录记录缺失")?);
+                    clear_tree(old)?;copy_tree(&root.join("original"),old,false)?;
+                }
             }
             let mut project=self.store.project(&j.backup.project_id)?;
-            project.installed_version=j.original_project.installed_version.clone();project.installed_path=j.original_project.installed_path.clone();
-            project.installed_source=j.original_project.installed_source.clone();project.executable_path=j.original_project.executable_path.clone();project.error=None;
+            project.installed_version=j.original_project.installed_version.clone();
+            project.installed_path=j.original_project.installed_path.clone();
+            project.installed_source=j.original_project.installed_source.clone();
+            project.executable_path=j.original_project.executable_path.clone();
+            project.error=None;
             super::selection::update_status(&mut project);
             let mut download=self.store.optional_download(&j.previous_download.id)?;
             // A removed download is independent of the backup and must never be recreated by restore.
             if let Some(download)=download.as_mut() { download.status=j.previous_download.status.clone();download.error=Some("已恢复安装前的文件与版本".into());download.updated_at=now(); }
             self.store.finish_restore(&project,download.as_ref(),&j.backup.project_id)?;
-            if let Some(download)=download { self.download_event(&download); }Ok::<_,String>(())
+            if let Some(download)=download { self.download_event(&download); }
+            Ok::<_,String>(())
         })();
         if let Err(error)=&result { j.backup.phase="recoveryRequired".into();j.backup.error=Some(error.clone());self.store.put_journal(j)?; }
         result
@@ -398,16 +484,22 @@ impl Core {
         for mut journal in self.store.journals()? {
             if journal.backup.phase=="preparing" {
                 // A preparation crash never touched the target; retain the previous ready backup.
-                self.store.remove_journal(&journal.backup.project_id)?;let _=self.remove_snapshot(&journal.backup);
-            } else if self.restore_journal(&mut journal).is_ok() {
-                if self.store.backup(&journal.backup.project_id)?.is_none_or(|b|b.path!=journal.backup.path){let _=self.remove_snapshot(&journal.backup);}
+                self.store.remove_journal(&journal.backup.project_id)?;
+                if journal.snapshot_enabled {let _=self.remove_snapshot(&journal.backup);}
+                else {self.cleanup_unbacked_stage(&journal);}
+            } else if journal.snapshot_enabled {
+                if self.restore_journal(&mut journal).is_ok() {
+                    if self.store.backup(&journal.backup.project_id)?.is_none_or(|b|b.path!=journal.backup.path){let _=self.remove_snapshot(&journal.backup);}
+                }
+            } else {
+                self.finish_unbacked_interruption(&journal,"安装被中断，未开启备份，目录可能已部分更新。请检查文件后重试。")?;
             }
         }
         Ok(())
     }
     pub(crate) fn get_backup(&self,project_id:&str)->Result<Option<BackupRecord>,String> {
         self.store.project(project_id)?;
-        if let Some(j)=self.store.journals()?.into_iter().find(|j|j.backup.project_id==project_id&&j.backup.phase!="preparing") { return Ok(Some(j.backup)); }
+        if let Some(j)=self.store.journals()?.into_iter().find(|j|j.backup.project_id==project_id&&j.backup.phase!="preparing"&&j.snapshot_enabled) { return Ok(Some(j.backup)); }
         self.store.backup(project_id)
     }
     pub(crate) fn restore_backup(&self,project_id:&str)->Result<Project,String> {

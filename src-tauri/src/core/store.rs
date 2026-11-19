@@ -143,9 +143,12 @@ impl Store {
     /// Publish installed metadata, download state, latest backup, and journal removal atomically.
     pub fn finish_install(&self,p:&Project,d:&DownloadRecord,j:&InstallJournal)->Result<(),String>{
         let mut db=self.db.lock().map_err(storage_error)?;let tx=db.transaction().map_err(storage_error)?;
-        for (table,id,json) in [("projects",p.id.as_str(),serde_json::to_string(p)),("downloads",d.id.as_str(),serde_json::to_string(d)),
-            ("backups",p.id.as_str(),serde_json::to_string(&j.backup))] {
+        for (table,id,json) in [("projects",p.id.as_str(),serde_json::to_string(p)),("downloads",d.id.as_str(),serde_json::to_string(d))] {
             tx.execute(&format!("INSERT INTO {table}(id,json) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET json=excluded.json"),params![id,json.map_err(storage_error)?]).map_err(storage_error)?;
+        }
+        if j.snapshot_enabled {
+            let json = serde_json::to_string(&j.backup).map_err(storage_error)?;
+            tx.execute("INSERT INTO backups(id,json) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET json=excluded.json",params![p.id,json]).map_err(storage_error)?;
         }
         tx.execute("DELETE FROM install_journals WHERE id=?1",[&p.id]).map_err(storage_error)?;
         tx.commit().map_err(storage_error)

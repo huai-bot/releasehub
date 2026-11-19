@@ -9,6 +9,8 @@ struct Subscription {
     repository:String, channel:String, preference:String, asset_pattern:Option<String>,
     #[serde(default = "default_management_mode")]
     management_mode:String,
+    #[serde(default)]
+    backup_enabled:bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
@@ -44,6 +46,7 @@ fn empty_project(owner:String,repo:String,channel:String,preference:String) -> P
     Project { id:uuid::Uuid::new_v4().to_string(), name:repo.clone(),
         url:format!("https://github.com/{owner}/{repo}"),owner,repo,description:String::new(),avatar_url:None,
         channel,preference,management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,installed_source:None,executable_path:None,
+        backup_enabled:false,
         release:None,selected_asset_id:None,status:"notChecked".into(),checked_at:None,error:None,
         default_branch:"main".into(),source_head_sha:None,source_ahead:None,created_at:time }
 }
@@ -79,6 +82,7 @@ impl Core {
         if installing.contains(id)||self.store.journals()?.iter().any(|j|j.backup.project_id==id) {return Err("正在安装或等待恢复，完成后才能修改项目".into());}
         let _queue=self.download_queue.lock().map_err(|_|"下载队列不可用".to_string())?;
         let downloads=self.store.downloads()?;
+        let reclassify=changes.channel.is_some() || changes.preference.is_some() || changes.management_mode.is_some() || changes.asset_pattern.is_some();
         let p=self.store.mutate("projects",id,|p:&mut Project| {
             if let Some(mode)=changes.management_mode {
                 validate_management_mode(&mode)?;
@@ -91,7 +95,11 @@ impl Core {
                 }
                 p.installed_version=None;p.installed_path=None;p.installed_source=None;p.executable_path=None;
             }
-            if let Some(c)=changes.channel { p.channel=c; p.release=None;p.selected_asset_id=None; p.status="notChecked".into(); }
+            if let Some(backup_enabled)=changes.backup_enabled {
+                p.backup_enabled=backup_enabled;
+            }
+            if p.management_mode=="files" { p.backup_enabled=false; }
+            if let Some(channel)=changes.channel { p.channel=channel;p.release=None;p.selected_asset_id=None;p.status="notChecked".into(); }
             if let Some(v)=changes.preference { p.preference=v; }
             validate_choices(&p.channel,&p.preference)?;
             if let Some(pattern)=changes.asset_pattern {
@@ -118,11 +126,11 @@ impl Core {
                     p.installed_path=Some(root);p.executable_path=Some(exe.to_string_lossy().into_owned());
                 } else {p.executable_path=None;}
             }
-            if let Some(mut r)=p.release.take() {
+            if reclassify { if let Some(mut r)=p.release.take() {
                 for a in &mut r.assets { selection::classify_for_mode(a,p); }
                 p.selected_asset_id=if p.management_mode=="files" {selection::select_for_project(p,&r.assets,p.selected_asset_id)}else{selection::choose(&r.assets)};
                 p.release=Some(r);
-            }
+            } }
             if let Some(selected)=changes.selected_asset_id {
                 if let Some(id)=selected {
                     if !p.release.as_ref().is_some_and(|r| r.assets.iter().any(|a| a.id==id && if p.management_mode=="files"{a.downloadable}else{a.compatible})) {
@@ -194,7 +202,7 @@ impl Core {
     pub(crate) fn export_library(&self)->Result<String,String> {
         let s=self.store.settings()?;
         let library=Library {version:1,projects:self.store.projects()?.into_iter().map(|p|Subscription{
-            repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern,management_mode:p.management_mode}).collect(),
+            repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern,backup_enabled:p.backup_enabled&&p.management_mode=="software",management_mode:p.management_mode}).collect(),
             repository_notes:self.store.repository_notes()?,
             settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),material:Some(s.material),blur:Some(s.blur),library_layout:Some(s.library_layout),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
                 auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray,download_connections:Some(s.download_connections),
@@ -233,6 +241,7 @@ impl Core {
             let (owner,repo)=network::repository(&input.repository)?;
             let mut p=empty_project(owner,repo,input.channel,input.preference);
             p.management_mode=input.management_mode;
+            p.backup_enabled=input.backup_enabled&&p.management_mode=="software";
             if p.management_mode=="files" {p.file_status=Some("notDownloaded".into());}
             p.asset_pattern=input.asset_pattern.map(|s|bounded_text(&s,200,"文件名规则")).transpose()?;ready.push(p);
         }

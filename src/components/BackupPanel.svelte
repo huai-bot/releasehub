@@ -26,13 +26,13 @@
   {#if loading}<p role="status">正在读取备份记录…</p>
   {:else if error}<p class="field-error" role="alert">{error}</p>
   {:else if backup}
-    <p><strong>{backup.version ?? '更新前文件状态'}</strong> · {formatBytes(backup.bytes)}</p><p>{formatDate(backup.createdAt, true)}</p><p class="backup-path">{backup.path}</p>
+    <p><strong>{backup.version ?? '更新前文件状态'}</strong> · {formatBytes(backup.bytes)}</p><p>{formatDate(backup.createdAt, true)}</p>
     {#if backup.kind === 'installer'}<p>仅文件备份，不包括注册表、服务或安装器其他变更。</p>{/if}
     {#if backup.phase !== 'ready'}<p class="warning-text">{backup.phase === 'recoveryRequired' ? '有未完成恢复，请关闭软件后重试。此备份暂时不能删除。' : '正在安装或恢复，备份暂时不能删除。'}</p>{/if}
     {#if backup.error}<p class="field-error">{backup.error}</p>{/if}
     <div class="backup-actions"><button class="button secondary small" disabled={busy || !['ready', 'recoveryRequired'].includes(backup.phase)} onclick={() => onrestore(backup!)}><Icon name="refresh" size={14} />恢复此备份</button><button class="text-button danger-text" disabled={busy || backup.phase !== 'ready'} onclick={() => ondelete(backup!)}><Icon name="trash" size={14} />删除备份</button></div>
-  {:else}<p>{preview ? '预览不会读取真实备份。' : '尚无备份。首次确认更新时会创建完整文件备份。'}</p>{/if}
-  <p>每个软件只保留最近一次。恢复将撤回此后配置改动；删除后这个回退点失效。</p>
+  {:else}<p>{preview ? '预览不会读取真实备份。' : '尚无备份。启用自动备份后，下次更新前会创建。'}</p>{/if}
+  {#if backup}<details><summary>备份位置与说明</summary><p class="backup-path">{backup.path}</p><p>只保留最近一次备份。恢复会覆盖当前目录；删除后无法使用此回退点。</p></details>{/if}
 </section>
 <style>
   .backup-panel { margin-block: 18px; padding-block: 14px; border-block: 1px solid var(--border); }
