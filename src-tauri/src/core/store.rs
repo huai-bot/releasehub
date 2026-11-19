@@ -229,7 +229,8 @@ impl Store {
     pub fn settings(&self) -> Result<Settings, String> {
         let db = self.db.lock().map_err(storage_error)?;
         let json: Option<String> = db.query_row("SELECT json FROM preferences WHERE id='settings'", [], |r| r.get(0)).optional().map_err(storage_error)?;
-        let settings:Settings=match json { Some(j) => serde_json::from_str(&j).map_err(storage_error)?, None => Settings::default() };
+        let mut settings:Settings=match json { Some(j) => serde_json::from_str(&j).map_err(storage_error)?, None => Settings::default() };
+        settings.external_downloader.migrate_legacy_ab();
         settings.validate()?;Ok(settings)
     }
     pub fn save_settings(&self, s: &Settings) -> Result<(), String> { s.validate()?; self.put("preferences", "settings", s) }
@@ -296,25 +297,50 @@ mod tests {
         let json:String=db.query_row("SELECT json FROM projects WHERE id='bad'",[],|r|r.get(0)).unwrap();assert!(!json.contains("managementMode"));
     }
     #[test] fn settings_roundtrip() {
-        let dir = tempfile::tempdir().unwrap(); let s = Store::new(&dir.path().join("db.sqlite")).unwrap();
-        let mut settings = s.settings().unwrap(); settings.auto_download = true;
-        s.save_settings(&settings).unwrap(); assert!(s.settings().unwrap().auto_download);
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("db.sqlite"); let mut store = Store::new(&path).unwrap();
+        let mut settings = store.settings().unwrap(); settings.auto_download = true;
+        for layout in ["two","three","list"] {
+            settings.library_layout=layout.into(); store.save_settings(&settings).unwrap(); drop(store);
+            store=Store::new(&path).unwrap(); let restored=store.settings().unwrap();
+            assert!(restored.auto_download); assert_eq!(restored.library_layout,layout);
+        }
+    }
+    #[test] fn legacy_ab_settings_migrate_on_read_and_persist_after_save() {
+        let dir=tempfile::tempdir().unwrap(); let path=dir.path().join("db.sqlite"); let store=Store::new(&path).unwrap();
+        let mut old=Settings::default(); old.library_layout="two".into(); old.use_external_downloader=true;
+        old.external_downloader=super::super::models::ExternalDownloader { name:"AB Download Manager".into(),
+            endpoint:"http://127.0.0.1:15151/start-headless-download".into(),
+            request_template:r#"{
+                "startDownload": true, "name": "{fileName}",
+                "downloadSource": { "downloadPage": "{pageUrl}", "link": "{url}" }
+            }"#.into() };
+        store.put("preferences","settings",&old).unwrap(); drop(store);
+        let migrated=Store::new(&path).unwrap(); let settings=migrated.settings().unwrap();
+        assert_eq!(settings.library_layout,"two"); assert!(settings.use_external_downloader);
+        assert_eq!(settings.external_downloader.endpoint,"http://127.0.0.1:15151/add");
+        assert_eq!(serde_json::to_value(&settings.external_downloader).unwrap(),
+            serde_json::to_value(super::super::models::ExternalDownloader::default()).unwrap());
+        migrated.save_settings(&settings).unwrap(); drop(migrated);
+        let reopened=Store::new(&path).unwrap(); let persisted:Settings=reopened.get("preferences","settings").unwrap();
+        let expected=serde_json::to_value(&settings).unwrap();
+        assert_eq!(serde_json::to_value(persisted).unwrap(),expected);
+        assert_eq!(serde_json::to_value(reopened.settings().unwrap()).unwrap(),expected);
     }
     #[test] fn old_database_settings_and_notes_survive_portable_reopen() {
         let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("db.sqlite"); let store = Store::new(&path).unwrap();
         let mut old = serde_json::to_value(Settings::default()).unwrap();
-        for key in ["startupPage", "startupGithubTab", "navigationOrder", "proxy"] { old.as_object_mut().unwrap().remove(key); }
-        store.put("preferences", "settings", &old).unwrap(); assert_eq!(store.settings().unwrap().startup_page, "home");
+        for key in ["startupPage", "startupGithubTab", "navigationOrder", "proxy", "libraryLayout"] { old.as_object_mut().unwrap().remove(key); }
+        store.put("preferences", "settings", &old).unwrap(); assert_eq!(store.settings().unwrap().startup_page, "home"); assert_eq!(store.settings().unwrap().library_layout, "three");
         let mut note = RepositoryNote { repository: "Owner/Repo".into(), name: "我的名称".into(), description: "我的描述".into(), updated_at: now() };
         store.save_repository_note(&note).unwrap(); note.repository = "OWNER/REPO".into(); note.name = "新名称".into();
         store.save_repository_note(&note).unwrap(); assert_eq!(store.repository_notes().unwrap().len(), 1);
-        let mut settings = store.settings().unwrap(); settings.startup_page = "github".into(); settings.startup_github_tab = "feed".into(); settings.navigation_order.reverse();
+        let mut settings = store.settings().unwrap(); settings.startup_page = "github".into(); settings.startup_github_tab = "feed".into(); settings.navigation_order.reverse(); settings.library_layout="list".into();
         store.save_settings(&settings).unwrap(); drop(store);
         let moved = dir.path().join("portable.sqlite"); std::fs::copy(path, &moved).unwrap();
         let reopened = Store::new(&moved).unwrap();
         assert_eq!(reopened.repository_notes().unwrap()[0].name, "新名称");
         assert_eq!(reopened.settings().unwrap().navigation_order, settings.navigation_order);
-        assert_eq!(reopened.settings().unwrap().startup_github_tab, "feed");
+        assert_eq!(reopened.settings().unwrap().startup_github_tab, "feed"); assert_eq!(reopened.settings().unwrap().library_layout, "list");
         note.name.clear(); note.description.clear(); assert!(reopened.save_repository_note(&note).unwrap().is_none());
         assert!(reopened.repository_notes().unwrap().is_empty());
     }

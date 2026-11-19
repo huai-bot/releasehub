@@ -1,4 +1,4 @@
-import type { BuildTaskStatus, DownloadRecord, DownloadStatus, FileStatus, ManagedVersion, Project, ProjectStatus, ReleaseAsset } from './types';
+import type { BuildTaskStatus, DownloadRecord, DownloadStatus, FileStatus, ManagedVersion, Project, ProjectStatus, ReleaseAsset, RepositoryNote } from './types';
 
 export type Page = 'home' | 'library' | 'updates' | 'downloads' | 'github' | 'agent' | 'settings';
 export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'accent';
@@ -110,9 +110,16 @@ export function canActivateManagedVersion(project: Pick<Project, 'installedSourc
   return Boolean(confirmed && project && !isFilesProject(project) && project.installedSource === 'managed' && version && !version.active);
 }
 
-export function matchesProject(project: Project, query: string): boolean {
+export function projectPresentation(project: Pick<Project, 'name' | 'description'>, note?: RepositoryNote | null): { title: string | null; description: string | null; annotated: boolean; label: string } {
+  const title = note?.name.trim() ?? '';
+  const description = note?.description.trim() ?? '';
+  if (title || description) return { title: title || null, description: description || null, annotated: true, label: title || description };
+  return { title: project.name, description: project.description || null, annotated: false, label: project.name };
+}
+
+export function matchesProject(project: Project, query: string, note?: RepositoryNote | null): boolean {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-  const haystack = `${project.name} ${project.owner}/${project.repo} ${project.description}`.toLocaleLowerCase();
+  const haystack = `${project.name} ${project.owner}/${project.repo} ${project.description} ${note?.name ?? ''} ${note?.description ?? ''}`.toLocaleLowerCase();
   return terms.every((term) => haystack.includes(term));
 }
 

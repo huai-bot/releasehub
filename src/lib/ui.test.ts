@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assetKindLabel, canActivateManagedVersion, canDownloadAsset, canInstallAsset, canInstallDownload, downloadPercent, formatBytes, getDownloadStatus, getProjectStatus, hasProjectUpdate, isFilesProject, matchesProject, needsProjectAttention, parseRepository, readableError, safeGithubUrl } from './ui';
+import { assetKindLabel, canActivateManagedVersion, canDownloadAsset, canInstallAsset, canInstallDownload, downloadPercent, formatBytes, getDownloadStatus, getProjectStatus, hasProjectUpdate, isFilesProject, matchesProject, needsProjectAttention, parseRepository, projectPresentation, readableError, safeGithubUrl } from './ui';
 import { createPreviewManagedVersions, createPreviewSnapshot } from './preview';
 import { applyDownloadProgress, isDownloadRecord, mergeSnapshotDownloads } from './download-state';
 import type { DownloadRecord, FileStatus, Project, ReleaseAsset } from './types';
@@ -227,6 +227,17 @@ describe('readable list states', () => {
     expect(matchesProject(project, 'lake1059 ffmpeg')).toBe(true);
     expect(matchesProject(project, 'kazumi')).toBe(false);
     expect(matchesProject(project, '  ')).toBe(true);
+  });
+  it('uses only optional note text when either note field is present', () => {
+    const project = createPreviewSnapshot().projects[0];
+    const note = { repository: `${project.owner}/${project.repo}`, name: ' 转码工具 ', description: ' 常用视频工具 ', updatedAt: new Date().toISOString() };
+    expect(projectPresentation(project)).toMatchObject({ title: project.name, annotated: false, label: project.name });
+    expect(projectPresentation(project, note)).toEqual({ title: '转码工具', description: '常用视频工具', annotated: true, label: '转码工具' });
+    expect(projectPresentation(project, { ...note, name: '' })).toEqual({ title: null, description: '常用视频工具', annotated: true, label: '常用视频工具' });
+    expect(projectPresentation(project, { ...note, description: '' })).toEqual({ title: '转码工具', description: null, annotated: true, label: '转码工具' });
+    expect(projectPresentation(project, { ...note, name: ' ', description: '' })).toMatchObject({ title: project.name, annotated: false });
+    expect(matchesProject(project, '转码 常用', note)).toBe(true);
+    expect(matchesProject(project, `${project.owner} ${project.repo}`, note)).toBe(true);
   });
   it('does not invent progress when the total is unknown', () => {
     expect(downloadPercent({ receivedBytes: 20, totalBytes: 0 })).toBe(0);

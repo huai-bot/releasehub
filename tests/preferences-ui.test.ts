@@ -4,6 +4,7 @@ import App from '../src/App.svelte';
 import Sidebar from '../src/components/Sidebar.svelte';
 import TitleBar from '../src/components/TitleBar.svelte';
 import ProxySettings from '../src/components/ProxySettings.svelte';
+import ExternalDownloadSettings from '../src/components/ExternalDownloadSettings.svelte';
 import { createPreviewSnapshot } from '../src/lib/preview';
 import { defaultNavigationOrder, moveNavigation, normalizeNavigation } from '../src/lib/navigation';
 import type { ProxyTestResult, Settings } from '../src/lib/types';
@@ -21,7 +22,9 @@ let target: HTMLDivElement;
 let cleanup: (() => Promise<void>) | undefined;
 async function settle() { for (let count = 0; count < 12; count++) { await Promise.resolve(); flushSync(); } }
 function button(label: string) {
-  const item = [...target.querySelectorAll<HTMLButtonElement>('button')].find(item => item.getAttribute('aria-label') === label || item.textContent?.trim() === label);
+  const matches = (item: HTMLButtonElement) => item.getAttribute('aria-label') === label || item.textContent?.trim() === label;
+  const item = [...(target.querySelector('dialog[open]')?.querySelectorAll<HTMLButtonElement>('button') ?? [])].find(matches)
+    ?? [...target.querySelectorAll<HTMLButtonElement>('button')].find(matches);
   if (!item) throw new Error(`Missing button ${label}`);
   return item;
 }
@@ -172,7 +175,7 @@ describe('startup and desktop navigation', () => {
     expect(mocks.dispatch).toHaveBeenCalledWith('save_settings', { settings: { downloadConnections: 3 } });
     await input('#downloader-name', '本机测试下载器'); button('保存下载器配置').click(); await settle();
     expect(snapshot.settings.externalDownloader?.name).toBe('本机测试下载器');
-    button('测试端口连接').click(); await settle(); expect(mocks.dispatch).toHaveBeenCalledWith('test_external_downloader', { config: snapshot.settings.externalDownloader });
+    button('测试下载器连接').click(); await settle(); expect(mocks.dispatch).toHaveBeenCalledWith('test_external_downloader', { config: snapshot.settings.externalDownloader });
     button('手动下载默认使用外部下载器').click(); await settle(); expect(snapshot.settings.useExternalDownloader).toBe(true);
   });
 
@@ -212,6 +215,136 @@ describe('startup and desktop navigation', () => {
     button('确认重新发送').click(); await settle(); expect(mocks.dispatch).toHaveBeenCalledWith('retry_external_download', { id: snapshot.downloads[0].id, confirmed: true });
   });
 
+  it('persists all library layouts and restores the last choice on restart', async () => {
+    let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library';
+    mocks.dispatch.mockImplementation(async (action: string, payload: { settings?: Partial<Settings> }) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'save_settings') { snapshot = { ...snapshot, settings: { ...snapshot.settings, ...payload.settings } }; return snapshot.settings; }
+      throw new Error(`Unexpected action ${action}`);
+    });
+    let instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    for (const [label, layout] of [['切换双列视图', 'two'], ['切换三列视图', 'three'], ['切换列表视图', 'list']] as const) {
+      button(label).click(); await settle();
+      expect(mocks.dispatch).toHaveBeenCalledWith('save_settings', { settings: { libraryLayout: layout } });
+      expect(target.querySelector('#main-content .library-card-grid')?.classList.contains(`layout-${layout}`)).toBe(true);
+      expect(button(label).getAttribute('aria-pressed')).toBe('true');
+    }
+    await cleanup(); instance = mount(App, { target }); await settle();
+    expect(button('切换列表视图').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('shows description-only notes without the original title and restores it after clearing', async () => {
+    let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library';
+    const project = snapshot.projects[0];
+    mocks.dispatch.mockImplementation(async (action: string, payload: { repository?: string; name?: string; description?: string }) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'save_repository_note') {
+        const note = { repository: payload.repository!.toLowerCase(), name: payload.name!, description: payload.description!, updatedAt: new Date().toISOString() };
+        snapshot = { ...snapshot, repositoryNotes: note.name || note.description ? [note] : [] };
+        return note.name || note.description ? note : null;
+      }
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    const card = () => target.querySelector<HTMLElement>('#main-content .project-card')!;
+    const edit = async () => { card().querySelector<HTMLButtonElement>('.card-more')!.click(); await settle(); button('编辑备注').click(); await settle(); };
+    await edit(); await input('#note-description', '  我的转码工具  ');
+    target.querySelector('dialog form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('save_repository_note', { repository: `${project.owner}/${project.repo}`, name: '', description: '我的转码工具' });
+    expect(target.querySelector('dialog')).toBeNull();
+    expect(card().querySelector('strong')).toBeNull(); expect(card().querySelector('small')?.textContent).toBe('我的转码工具');
+    expect(card().getAttribute('aria-label')).toBe('我的转码工具'); expect(card().textContent).not.toContain(project.name);
+    const search = target.querySelector<HTMLInputElement>('.titlebar input')!;
+    search.value = '我的转码'; search.dispatchEvent(new Event('input', { bubbles: true })); await settle();
+    expect(target.querySelectorAll('#main-content .project-card')).toHaveLength(1);
+    search.value = ''; search.dispatchEvent(new Event('input', { bubbles: true })); await settle();
+    card().querySelector('.card-identity')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); await settle();
+    expect(target.querySelector('.detail-identity h2')).toBeNull(); expect(target.querySelector('.detail-identity p')?.textContent).toBe('我的转码工具');
+    button('关闭资源详情').click(); await settle();
+    await edit(); await input('#note-name', '本地名称'); await input('#note-description', '简短用途');
+    target.querySelector('dialog form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle();
+    expect(card().querySelector('strong')?.textContent).toBe('本地名称'); expect(card().querySelector('small')?.textContent).toBe('简短用途');
+    expect(card().textContent).not.toContain(project.name);
+    await edit(); await input('#note-name', ''); await input('#note-description', '');
+    target.querySelector('dialog form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle();
+    expect(card().querySelector('strong')?.textContent).toBe(project.name); expect(card().querySelector('small')).toBeNull();
+  });
+
+  it('shows only a description note, saves edits, searches notes and restores the original after clearing', async () => {
+    let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library';
+    const project = snapshot.projects[0]; const repository = `${project.owner}/${project.repo}`;
+    snapshot.repositoryNotes = [{ repository: repository.toLowerCase(), name: '', description: '本地视频工具', updatedAt: new Date().toISOString() }];
+    mocks.dispatch.mockImplementation(async (action: string, payload: { repository?: string; name?: string; description?: string }) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'save_repository_note') {
+        const note = payload.name || payload.description ? { repository: repository.toLowerCase(), name: payload.name!, description: payload.description!, updatedAt: new Date().toISOString() } : null;
+        snapshot = { ...snapshot, repositoryNotes: note ? [note] : [] }; return note;
+      }
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    const card = () => target.querySelector<HTMLElement>('#main-content .project-card')!;
+    expect(card().querySelector('strong')).toBeNull(); expect(card().querySelector('small')?.textContent).toBe('本地视频工具');
+    expect(card().getAttribute('aria-label')).toBe('本地视频工具'); expect(card().innerHTML).not.toContain(project.name);
+    await input('.titlebar input', '本地视频工具'); expect(target.querySelectorAll('#main-content .project-card')).toHaveLength(1);
+    const editNote = async () => {
+      card().querySelector<HTMLButtonElement>('.card-identity')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })); await settle();
+      button('编辑备注').click(); await settle();
+    };
+    await editNote(); await input('#note-name', '  视频转换  '); await input('#note-description', '  常用工具  ');
+    button('保存备注').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('save_repository_note', { repository, name: '视频转换', description: '常用工具' });
+    await input('.titlebar input', '视频转换'); expect(card().querySelector('strong')?.textContent).toBe('视频转换');
+    expect(card().querySelector('small')?.textContent).toBe('常用工具'); expect(card().textContent).not.toContain(project.name);
+    await editNote(); await input('#note-name', ''); await input('#note-description', ''); button('保存备注').click(); await settle();
+    expect(snapshot.repositoryNotes).toHaveLength(0); await input('.titlebar input', '');
+    expect(card().querySelector('strong')?.textContent).toBe(project.name); expect(card().querySelector('small')).toBeNull();
+  });
+
+  it('previews an executable with its folder, discards cancellation and commits only after confirmation', async () => {
+    let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library';
+    const project = snapshot.projects[0]; project.installedPath = null; project.executablePath = null; project.installedSource = null;
+    const selection = { installedPath: 'D:\\Fixture\\App', executablePath: 'D:\\Fixture\\App\\app.exe' };
+    mocks.dispatch.mockImplementation(async (action: string, payload: { version?: string; path?: string; executablePath?: string }) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'pick_executable') return selection;
+      if (action === 'get_backup') return null;
+      if (action === 'mark_installed') {
+        const saved = { ...project, installedVersion: payload.version!, installedPath: payload.path!, executablePath: payload.executablePath! };
+        snapshot = { ...snapshot, projects: snapshot.projects.map(item => item.id === project.id ? saved : item) }; return saved;
+      }
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    target.querySelector<HTMLButtonElement>('#main-content .card-identity')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); await settle();
+    button('管理').click(); await settle(); button('手动记录已安装版本').click(); await settle();
+    button('选择启动程序').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('pick_executable', { projectId: project.id });
+    expect(target.querySelector<HTMLInputElement>('#mark-path')!.value).toBe(selection.installedPath);
+    expect(target.querySelector<HTMLInputElement>('#mark-executable')!.value).toBe(selection.executablePath);
+    button('取消').click(); await settle();
+    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'mark_installed' || action === 'open_project')).toHaveLength(0);
+    expect(snapshot.projects[0].installedPath).toBeNull();
+    button('手动记录已安装版本').click(); await settle(); expect(target.querySelector<HTMLInputElement>('#mark-path')!.value).toBe('');
+    button('选择启动程序').click(); await settle(); await input('#mark-version', 'v2.0.0');
+    expect(button('确认记录').disabled).toBe(true);
+    target.querySelector<HTMLInputElement>('dialog .confirmation-check input')!.click(); await settle(); button('确认记录').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('mark_installed', { projectId: project.id, version: 'v2.0.0', path: selection.installedPath, executablePath: selection.executablePath });
+    expect(target.querySelector('dialog[open]')).toBeNull(); expect(snapshot.projects[0].executablePath).toBe(selection.executablePath);
+    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'open_project')).toHaveLength(0);
+  });
+
+  it('does not claim a saved executable when the native picker is cancelled', async () => {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library';
+    snapshot.projects[0].installedPath = null; snapshot.projects[0].executablePath = null; snapshot.projects[0].installedSource = null;
+    mocks.dispatch.mockImplementation(async (action: string) => { if (action === 'snapshot') return snapshot; if (action === 'pick_project_executable') return null; throw new Error(`Unexpected action ${action}`); });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    target.querySelector<HTMLButtonElement>('#main-content .card-identity')!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('pick_project_executable', { projectId: snapshot.projects[0].id });
+    expect(target.querySelector('.toast-stack')?.textContent).not.toContain('已保存启动程序');
+    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'open_project')).toHaveLength(0);
+  });
+
   it('uses native window controls and releases its resize listener', async () => {
     const instance = mount(TitleBar, { target, props: { title: 'GitHub' } });
     cleanup = async () => { await unmount(instance); }; await settle();
@@ -219,6 +352,49 @@ describe('startup and desktop navigation', () => {
     expect(mocks.minimized).toHaveBeenCalledOnce(); expect(mocks.maximized).toHaveBeenCalledOnce(); expect(mocks.closed).toHaveBeenCalledOnce();
     expect(target.querySelector('header')?.hasAttribute('data-tauri-drag-region')).toBe(true);
     await cleanup(); cleanup = undefined; expect(mocks.resizeCleanup).toHaveBeenCalledOnce();
+  });
+});
+
+describe('external downloader preference regression', () => {
+  const preset = { endpoint: 'http://127.0.0.1:15151/add', requestTemplate: '{"items":[{"type":"http","link":"{url}","downloadPage":"{pageUrl}","suggestedName":"{fileName}"}],"options":{"silentAdd":true,"silentStart":true}}', name: 'AB Download Manager' };
+  async function show(enabled = false, save = vi.fn(async (_changes: Partial<Settings>) => true)) {
+    const settings = { ...createPreviewSnapshot().settings, useExternalDownloader: enabled, externalDownloader: preset };
+    const instance = mount(ExternalDownloadSettings, { target, props: { settings, busy: false, preview: false, onsave: save } });
+    cleanup = async () => { await unmount(instance); }; await settle(); return { save, settings };
+  }
+  it('ignores backend property order and keeps the switch available', async () => {
+    const { save } = await show();
+    expect(button('保存下载器配置').disabled).toBe(true);
+    expect(button('手动下载默认使用外部下载器').disabled).toBe(false);
+    button('手动下载默认使用外部下载器').click(); await settle();
+    expect(save).toHaveBeenCalledWith({ useExternalDownloader: true });
+  });
+  it('saves an edited configuration together with enabling, but does not save it while disabling', async () => {
+    const { save } = await show(); await input('#downloader-name', '我的 AB');
+    button('手动下载默认使用外部下载器').click(); await settle();
+    expect(save).toHaveBeenCalledWith({ useExternalDownloader: true, externalDownloader: { ...preset, name: '我的 AB' } });
+    await cleanup!(); cleanup = undefined;
+    const second = await show(true); await input('#downloader-endpoint', 'invalid draft');
+    button('手动下载默认使用外部下载器').click(); await settle();
+    expect(second.save).toHaveBeenCalledWith({ useExternalDownloader: false });
+  });
+  it('keeps a failed draft and the persisted switch state, then allows a corrected retry', async () => {
+    const save = vi.fn().mockRejectedValueOnce(new Error('接口地址无效')).mockResolvedValue(true);
+    await show(false, save); await input('#downloader-endpoint', 'wrong');
+    button('手动下载默认使用外部下载器').click(); await settle();
+    expect(button('手动下载默认使用外部下载器').getAttribute('aria-checked')).toBe('false');
+    expect(target.querySelector('[role="alert"]')?.textContent).toContain('接口地址无效');
+    expect(target.querySelector<HTMLInputElement>('#downloader-endpoint')!.value).toBe('wrong');
+    await input('#downloader-endpoint', preset.endpoint); button('手动下载默认使用外部下载器').click(); await settle();
+    expect(save).toHaveBeenCalledTimes(2); expect(target.querySelector('[role="alert"]')).toBeNull();
+  });
+  it('does not send twice while a save is pending', async () => {
+    let resolve!: (saved: boolean) => void;
+    const save = vi.fn((_changes: Partial<Settings>) => new Promise<boolean>(done => { resolve = done; }));
+    await show(false, save); button('手动下载默认使用外部下载器').click(); await settle();
+    expect(button('手动下载默认使用外部下载器').disabled).toBe(true);
+    button('手动下载默认使用外部下载器').click(); expect(save).toHaveBeenCalledOnce();
+    resolve(false); await settle(); expect(button('手动下载默认使用外部下载器').disabled).toBe(false);
   });
 });
 

@@ -116,12 +116,22 @@ pub struct ExternalDownloader {
     pub name: String, pub endpoint: String, pub request_template: String,
 }
 impl Default for ExternalDownloader {
-    fn default() -> Self { Self { name: "AB Download Manager".into(), endpoint: "http://127.0.0.1:15151/start-headless-download".into(),
-        request_template: r#"{"downloadSource":{"link":"{url}","downloadPage":"{pageUrl}"},"name":"{fileName}","startDownload":true}"#.into() } }
+    fn default() -> Self { Self { name: "AB Download Manager".into(), endpoint: "http://127.0.0.1:15151/add".into(),
+        request_template: r#"{"items":[{"type":"http","link":"{url}","downloadPage":"{pageUrl}","suggestedName":"{fileName}"}],"options":{"silentAdd":true,"silentStart":true}}"#.into() } }
+}
+impl ExternalDownloader {
+    pub fn migrate_legacy_ab(&mut self) {
+        let legacy=serde_json::json!({"downloadSource":{"link":"{url}","downloadPage":"{pageUrl}"},"name":"{fileName}","startDownload":true});
+        if self.name=="AB Download Manager" && self.endpoint=="http://127.0.0.1:15151/start-headless-download"
+            && serde_json::from_str::<serde_json::Value>(&self.request_template).ok().as_ref()==Some(&legacy) {
+            *self=Self::default();
+        }
+    }
 }
 pub fn default_color_scheme() -> String { "blue".into() }
 pub fn default_material() -> String { "acrylic".into() }
 pub fn default_blur() -> bool { true }
+pub fn default_library_layout() -> String { "three".into() }
 pub fn validate_management_mode(mode: &str) -> Result<(), String> {
     if !["software", "files"].contains(&mode) { return Err("管理模式无效".into()); }
     Ok(())
@@ -143,6 +153,8 @@ pub struct Settings {
     pub material: String,
     #[serde(default = "default_blur")]
     pub blur: bool,
+    #[serde(default = "default_library_layout")]
+    pub library_layout: String,
     pub auto_download: bool, pub max_concurrent_downloads: usize, pub close_to_tray: bool,
     #[serde(default = "default_download_connections")]
     pub download_connections: usize,
@@ -162,7 +174,7 @@ pub struct Settings {
 }
 impl Default for Settings {
     fn default() -> Self {
-        Self { theme: "system".into(), color_scheme: default_color_scheme(), material: default_material(), blur: default_blur(), check_interval_minutes: 60, notifications: true,
+        Self { theme: "system".into(), color_scheme: default_color_scheme(), material: default_material(), blur: default_blur(), library_layout: default_library_layout(), check_interval_minutes: 60, notifications: true,
             auto_download: false, max_concurrent_downloads: 2, close_to_tray: true,
             download_connections: default_download_connections(), use_external_downloader: false, external_downloader: ExternalDownloader::default(),
             agent_enabled: false, agent_port: 47831, startup_page: default_startup_page(),
@@ -175,6 +187,7 @@ impl Settings {
         if !["system", "light", "dark"].contains(&self.theme.as_str()) { return Err("主题设置无效".into()); }
         if !["blue", "teal", "violet", "amber"].contains(&self.color_scheme.as_str()) { return Err("配色设置无效".into()); }
         if !["acrylic", "mica"].contains(&self.material.as_str()) { return Err("材质设置无效".into()); }
+        if !["two", "three", "list"].contains(&self.library_layout.as_str()) { return Err("资源库布局无效".into()); }
         if self.check_interval_minutes != 0 && !(5..=10080).contains(&self.check_interval_minutes) { return Err("检查间隔须为0（仅手动检查）或5至10080分钟".into()); }
         if !(1..=4).contains(&self.max_concurrent_downloads) { return Err("同时下载数量须为1至4".into()); }
         if !(1..=8).contains(&self.download_connections) { return Err("单文件连接数须为1至8".into()); }
@@ -310,6 +323,55 @@ mod tests {
             assert_eq!(settings.validate().unwrap_err(),"材质设置无效");
         }
     }
+    #[test] fn library_layout_choices_are_validated_and_roundtrip() {
+        let defaults=Settings::default(); assert_eq!(defaults.library_layout,"three");
+        for layout in ["two","three","list"] {
+            let mut settings=defaults.clone(); settings.library_layout=layout.into(); settings.validate().unwrap();
+            let value=serde_json::to_value(&settings).unwrap(); assert_eq!(value["libraryLayout"],layout);
+            let restored:Settings=serde_json::from_value(value).unwrap(); assert_eq!(restored.library_layout,layout);
+        }
+        for layout in ["","grid","TWO"] {
+            let mut settings=defaults.clone(); settings.library_layout=layout.into();
+            assert_eq!(settings.validate().unwrap_err(),"资源库布局无效");
+        }
+    }
+    #[test] fn legacy_ab_defaults_migrate_despite_json_format_and_key_order() {
+        for template in [
+            r#"{"downloadSource":{"link":"{url}","downloadPage":"{pageUrl}"},"name":"{fileName}","startDownload":true}"#,
+            r#"{
+                "startDownload": true,
+                "name": "{fileName}",
+                "downloadSource": { "downloadPage": "{pageUrl}", "link": "{url}" }
+            }"#,
+        ] {
+            let mut config=ExternalDownloader { name:"AB Download Manager".into(),
+                endpoint:"http://127.0.0.1:15151/start-headless-download".into(),request_template:template.into() };
+            config.migrate_legacy_ab();
+            assert_eq!(config.name,"AB Download Manager"); assert_eq!(config.endpoint,"http://127.0.0.1:15151/add");
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&config.request_template).unwrap(),serde_json::json!({
+                "items":[{"type":"http","link":"{url}","downloadPage":"{pageUrl}","suggestedName":"{fileName}"}],
+                "options":{"silentAdd":true,"silentStart":true}
+            }));
+            let migrated=serde_json::to_value(&config).unwrap(); config.migrate_legacy_ab();
+            assert_eq!(serde_json::to_value(&config).unwrap(),migrated);
+        }
+    }
+    #[test] fn legacy_ab_migration_preserves_custom_configuration() {
+        let endpoint="http://127.0.0.1:15151/start-headless-download";
+        let template=r#"{"downloadSource":{"link":"{url}","downloadPage":"{pageUrl}"},"name":"{fileName}","startDownload":true}"#;
+        for (name,endpoint,template) in [
+            ("AB Download Manager (fixture)",endpoint,template),
+            ("ab download manager",endpoint,template),
+            ("AB Download Manager","http://127.0.0.1:15152/start-headless-download",template),
+            ("AB Download Manager","http://localhost:15151/start-headless-download",template),
+            ("AB Download Manager",endpoint,r#"{"downloadSource":{"link":"{url}","downloadPage":"{pageUrl}"},"name":"{fileName}","startDownload":false}"#),
+            ("AB Download Manager",endpoint,r#"{"downloadSource":{"link":"{url}","downloadPage":"{pageUrl}"},"name":"{fileName}","startDownload":true,"fixtureOption":true}"#),
+        ] {
+            let mut config=ExternalDownloader { name:name.into(),endpoint:endpoint.into(),request_template:template.into() };
+            let original=serde_json::to_value(&config).unwrap(); config.migrate_legacy_ab();
+            assert_eq!(serde_json::to_value(&config).unwrap(),original,"{name} {endpoint} {template}");
+        }
+    }
     #[test] fn manual_checks_and_bounded_intervals_are_valid() {
         let mut settings=Settings::default();
         for minutes in [0,5,60,10080] {settings.check_interval_minutes=minutes;assert!(settings.validate().is_ok(),"{minutes}");}
@@ -317,10 +379,10 @@ mod tests {
     }
     #[test] fn old_settings_gain_startup_navigation_and_proxy_defaults() {
         let mut value = serde_json::to_value(Settings::default()).unwrap();
-        for key in ["startupPage", "startupGithubTab", "navigationOrder", "proxy", "downloadConnections", "useExternalDownloader", "externalDownloader"] { value.as_object_mut().unwrap().remove(key); }
+        for key in ["startupPage", "startupGithubTab", "navigationOrder", "proxy", "libraryLayout", "downloadConnections", "useExternalDownloader", "externalDownloader"] { value.as_object_mut().unwrap().remove(key); }
         let settings: Settings = serde_json::from_value(value).unwrap();
-        assert_eq!(settings.startup_page, "home"); assert_eq!(settings.startup_github_tab, "explore");
-        assert_eq!(settings.download_connections, 4); assert!(!settings.use_external_downloader); assert_eq!(settings.external_downloader.endpoint, "http://127.0.0.1:15151/start-headless-download");
+        assert_eq!(settings.startup_page, "home"); assert_eq!(settings.startup_github_tab, "explore"); assert_eq!(settings.library_layout, "three");
+        assert_eq!(settings.download_connections, 4); assert!(!settings.use_external_downloader); assert_eq!(settings.external_downloader.endpoint, "http://127.0.0.1:15151/add");
         for connections in [0,9,usize::MAX] { let mut invalid=settings.clone(); invalid.download_connections=connections; assert!(invalid.validate().is_err()); }
         assert_eq!(settings.navigation_order, default_navigation_order()); assert_eq!(settings.proxy.mode, "system");
         settings.validate().unwrap();

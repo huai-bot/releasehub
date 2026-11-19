@@ -27,6 +27,8 @@ struct LibrarySettings {
     material: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     blur: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    library_layout: Option<String>,
     max_concurrent_downloads: usize, close_to_tray: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     download_connections: Option<usize>,
@@ -101,15 +103,20 @@ impl Core {
                 p.installed_source=p.installed_version.as_ref().map(|_| "manual".into());
             }
             if let Some(path)=changes.installed_path {
-                p.installed_path=path.map(|s| bounded_text(&s,4096,"已安装路径")).transpose()?;
-                p.executable_path=None;
-                if p.installed_version.is_some(){p.installed_source=Some("manual".into());}
+                let path=path.map(|s| bounded_text(&s,4096,"已安装路径")).transpose()?;
+                if p.installed_path!=path {
+                    p.installed_path=path;p.executable_path=None;
+                    if p.installed_version.is_some(){p.installed_source=Some("manual".into());}
+                }
             }
             if let Some(executable)=changes.executable_path {
-                p.executable_path=executable.map(|s|{
-                    let s=bounded_text(&s,4096,"主程序路径")?;
-                    self.validate_executable(p,&s).map(|path|path.to_string_lossy().into_owned())
-                }).transpose()?;
+                if let Some(path)=executable {
+                    let path=bounded_text(&path,4096,"主程序路径")?;
+                    let (root,exe)=self.resolve_executable_selection(p,&path)?;
+                    let root=root.to_string_lossy().into_owned();
+                    if !p.installed_path.as_deref().is_some_and(|old|std::fs::canonicalize(old).ok()==std::fs::canonicalize(&root).ok()) {p.installed_source=Some("manual".into());}
+                    p.installed_path=Some(root);p.executable_path=Some(exe.to_string_lossy().into_owned());
+                } else {p.executable_path=None;}
             }
             if let Some(mut r)=p.release.take() {
                 for a in &mut r.assets { selection::classify_for_mode(a,p); }
@@ -189,7 +196,7 @@ impl Core {
         let library=Library {version:1,projects:self.store.projects()?.into_iter().map(|p|Subscription{
             repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern,management_mode:p.management_mode}).collect(),
             repository_notes:self.store.repository_notes()?,
-            settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),material:Some(s.material),blur:Some(s.blur),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
+            settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),material:Some(s.material),blur:Some(s.blur),library_layout:Some(s.library_layout),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
                 auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray,download_connections:Some(s.download_connections),
                 startup_page:Some(s.startup_page),startup_github_tab:Some(s.startup_github_tab),navigation_order:Some(s.navigation_order)}};
         serde_json::to_string_pretty(&library).map_err(|_|"订阅导出失败".into())
@@ -203,6 +210,7 @@ impl Core {
         if let Some(color)=library.settings.color_scheme {settings.color_scheme=color;}
         if let Some(material)=library.settings.material {settings.material=material;}
         if let Some(blur)=library.settings.blur {settings.blur=blur;}
+        if let Some(layout)=library.settings.library_layout {settings.library_layout=layout;}
         settings.notifications=library.settings.notifications;settings.auto_download=library.settings.auto_download;
         settings.max_concurrent_downloads=library.settings.max_concurrent_downloads;settings.close_to_tray=library.settings.close_to_tray;
         if let Some(connections)=library.settings.download_connections {settings.download_connections=connections;}
@@ -268,31 +276,60 @@ mod tests {
         assert!(target.import_library(&value.to_string()).is_err());
         assert_eq!(target.store.settings().unwrap().material,"mica"); assert!(!target.store.settings().unwrap().blur);
     }
+    #[test] fn library_layout_export_import_and_preserve_legacy_choice() {
+        let dir=tempfile::tempdir().unwrap();
+        let source=Core::new(dir.path().join("source"),true,Arc::new(|_,_|{})).unwrap();
+        let target=Core::new(dir.path().join("target"),true,Arc::new(|_,_|{})).unwrap();
+        let mut value=Value::Null;
+        for layout in ["two","three","list"] {
+            let mut settings=source.store.settings().unwrap(); settings.library_layout=layout.into(); source.store.save_settings(&settings).unwrap();
+            let exported=source.export_library().unwrap(); value=serde_json::from_str(&exported).unwrap();
+            assert_eq!(value["settings"]["libraryLayout"],layout);
+            target.import_library(&exported).unwrap(); assert_eq!(target.store.settings().unwrap().library_layout,layout);
+        }
+        value["settings"].as_object_mut().unwrap().remove("libraryLayout");
+        for layout in ["two","three","list"] {
+            let mut settings=target.store.settings().unwrap(); settings.library_layout=layout.into(); target.store.save_settings(&settings).unwrap();
+            target.import_library(&value.to_string()).unwrap(); assert_eq!(target.store.settings().unwrap().library_layout,layout);
+        }
+        let legacy=Core::new(dir.path().join("legacy"),true,Arc::new(|_,_|{})).unwrap(); legacy.import_library(&value.to_string()).unwrap();
+        assert_eq!(legacy.store.settings().unwrap().library_layout,"three");
+        value["settings"]["libraryLayout"]=json!("grid");
+        assert_eq!(target.import_library(&value.to_string()).unwrap_err(),"资源库布局无效");
+        assert_eq!(target.store.settings().unwrap().library_layout,"list");
+    }
     #[test] fn exports_only_subscriptions() {
         let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().into(),true,Arc::new(|_,_|{})).unwrap();
         let mut p=empty_project("owner".into(),"repo".into(),"stable".into(),"portable".into());
-        p.installed_path=Some("C:\\private\\app".into());p.installed_version=Some("1.2.0".into());core.store.put_project(&p).unwrap();
-        let mut settings=core.store.settings().unwrap();settings.auto_download=true;settings.agent_enabled=true;core.store.save_settings(&settings).unwrap();
+        p.installed_path=Some(dir.path().join("fixture-app").to_string_lossy().into_owned());
+        p.executable_path=Some(dir.path().join("fixture-app").join("fixture.exe").to_string_lossy().into_owned());
+        p.installed_version=Some("1.2.0".into());core.store.put_project(&p).unwrap();
+        let mut settings=core.store.settings().unwrap();settings.auto_download=true;settings.agent_enabled=true;settings.library_layout="list".into();core.store.save_settings(&settings).unwrap();
         core.set_github_token(Some("private-test-token".into()));let export=core.export_library().unwrap();
+        let value:Value=serde_json::from_str(&export).unwrap(); assert_eq!(value["settings"]["libraryLayout"],"list");
         assert!(!export.contains("private-test-token"));assert!(!export.contains("installedPath"));assert!(!export.contains("installedVersion"));
+        assert!(!export.contains("executablePath"));assert!(!export.contains("fixture-app"));
         assert!(!export.contains("buildTasks"));assert!(!export.contains("agentPort"));assert!(!export.contains("agentEnabled"));
         assert_eq!(core.import_library(&export).unwrap()["skipped"],1);
         let imported=Core::new(dir.path().join("fresh-import"),true,Arc::new(|_,_|{})).unwrap();
         assert_eq!(imported.import_library(&export).unwrap()["imported"],1);
-        assert!(imported.store.settings().unwrap().auto_download);assert!(!imported.store.settings().unwrap().agent_enabled);
+        assert!(imported.store.settings().unwrap().auto_download);assert!(!imported.store.settings().unwrap().agent_enabled);assert_eq!(imported.store.settings().unwrap().library_layout,"list");
         assert!(!imported.github.token_configured());assert!(imported.store.downloads().unwrap().is_empty());
-        let restored=&imported.store.projects().unwrap()[0];assert!(restored.installed_path.is_none());assert!(restored.installed_version.is_none());
+        let restored=&imported.store.projects().unwrap()[0];assert!(restored.installed_path.is_none());assert!(restored.installed_version.is_none());assert!(restored.executable_path.is_none());
     }
     #[test] fn notes_and_startup_preferences_export_without_proxy_or_credentials() {
         let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().join("source"),true,Arc::new(|_,_|{})).unwrap();
         let note=RepositoryNote { repository:"Owner/Unsubscribed".into(),name:"本地名称".into(),description:"不会发给 GitHub".into(),updated_at:now() };
         core.store.save_repository_note(&note).unwrap();
         let mut settings=core.store.settings().unwrap(); settings.startup_page="github".into(); settings.startup_github_tab="starred".into(); settings.navigation_order.reverse(); settings.download_connections=8; settings.use_external_downloader=true; settings.external_downloader.name="fixture-local-downloader".into();
+        settings.library_layout="two".into(); settings.external_downloader.endpoint="http://127.0.0.1:15152/fixture-export-only".into();
+        settings.external_downloader.request_template=r#"{"fixtureLink":"{url}"}"#.into();
         settings.proxy=crate::proxy::ProxySettings { mode:"manual".into(),url:"http://127.0.0.1:9".into(),username:"fixture-proxy-user".into() };
         core.store.save_settings(&settings).unwrap(); core.proxy.configure(settings.proxy.clone(),Some("fixture-only-password".into())).unwrap();
         let export=core.export_library().unwrap(); let value:Value=serde_json::from_str(&export).unwrap();
         assert!(value["settings"].get("proxy").is_none()); assert!(!export.contains("fixture-proxy-user")); assert!(!export.contains("fixture-only-password"));
         assert_eq!(value["settings"]["downloadConnections"],8); assert!(value["settings"].get("externalDownloader").is_none()); assert!(value["settings"].get("useExternalDownloader").is_none()); assert!(!export.contains("fixture-local-downloader"));
+        assert_eq!(value["settings"]["libraryLayout"],"two"); assert!(!export.contains("fixture-export-only")); assert!(!export.contains("fixtureLink"));
         assert_eq!(value["repositoryNotes"][0]["repository"],"owner/unsubscribed");
         let target=Core::new(dir.path().join("target"),true,Arc::new(|_,_|{})).unwrap();
         let mut target_settings=target.store.settings().unwrap(); target_settings.proxy.mode="direct".into(); target.store.save_settings(&target_settings).unwrap();
@@ -300,6 +337,8 @@ mod tests {
         assert_eq!(target.store.settings().unwrap().startup_page,"github"); assert_eq!(target.store.settings().unwrap().startup_github_tab,"starred");
         assert_eq!(target.store.settings().unwrap().navigation_order,settings.navigation_order); assert_eq!(target.store.settings().unwrap().proxy.mode,"direct");
         assert_eq!(target.store.settings().unwrap().download_connections,8); assert!(!target.store.settings().unwrap().use_external_downloader);
+        assert_eq!(target.store.settings().unwrap().library_layout,"two");
+        assert_eq!(serde_json::to_value(target.store.settings().unwrap().external_downloader).unwrap(),serde_json::to_value(ExternalDownloader::default()).unwrap());
         assert_eq!(target.store.repository_notes().unwrap()[0].name,"本地名称");
         let mut old=value; old.as_object_mut().unwrap().remove("repositoryNotes");
         for key in ["startupPage","startupGithubTab","navigationOrder","downloadConnections"] {old["settings"].as_object_mut().unwrap().remove(key);}

@@ -272,7 +272,7 @@ async fn dispatch(window: tauri::WebviewWindow, app: tauri::AppHandle, state: ta
             agent.rotate_token(token.clone())?;
             Ok(json!({"address": agent.address, "token": token}))
         }
-        "pick_project_executable" => {
+        "pick_project_executable" | "pick_executable" => {
             let project_id = object_string(&payload, "projectId")?.to_owned();
             let dialog_app = app.clone();
             let chosen = tauri::async_runtime::spawn_blocking(move || dialog_app.dialog().file()
@@ -280,6 +280,7 @@ async fn dispatch(window: tauri::WebviewWindow, app: tauri::AppHandle, state: ta
                 .await.map_err(|_| "无法打开程序选择窗口。")?;
             let Some(chosen) = chosen else { return Ok(Value::Null); };
             let path = chosen.into_path().map_err(|_| "请选择本机 EXE 文件。")?;
+            if action == "pick_executable" { return host.core.preview_project_executable(&project_id, &path.to_string_lossy()); }
             let value = host.core.save_project_executable(&project_id, &path.to_string_lossy())?;
             let _ = app.emit("releasehub:changed", json!({}));
             Ok(value)

@@ -231,7 +231,7 @@ code, .mono, kbd { font-family: "Cascadia Code", Consolas, "Microsoft YaHei", mo
 .inline-callout strong { display: block; font-size: 11.5px; font-weight: 600; }
 .inline-callout span { display: block; color: var(--subtle); font-size: 10.5px; margin-top: 2px; }
 .inline-callout.error { background: var(--danger-bg); color: var(--danger); }
-.list-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 13px; padding: 13px 18px; min-height: 58px; }
+.list-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 13px; padding: 13px 18px; min-height: 58px; border-bottom: 1px solid var(--border-strong); margin-bottom: 16px; }
 .segmented-tabs { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
 .segmented-tabs button { font-size: 13px; color: var(--muted); padding: 7px 13px; border-radius: 24px; display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
 .segmented-tabs button:hover { background: var(--surface-soft); }
@@ -254,7 +254,7 @@ code, .mono, kbd { font-family: "Cascadia Code", Consolas, "Microsoft YaHei", mo
 .empty-state.spacious { padding: 68px 30px; min-height: 300px; }
 .empty-state.compact { padding: 27px 10px; }
 .empty-state.compact p { font-size: 11px; }
-.detail-panel { flex: 0 0 379px; width: 379px; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border); overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+.detail-panel { flex: 0 0 379px; width: 379px; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); border-left: 1px solid var(--border-strong); overflow-y: auto; overscroll-behavior-y: contain; scrollbar-gutter: stable; box-shadow: -4px 0 24px rgba(0,0,0,0.03); }
 .detail-panel > * { flex-shrink: 0; }
 .detail-topline { padding: 12px 18px 4px 23px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 10px; flex-shrink: 0; }
 .detail-identity { text-align: center; padding: 4px 25px 17px; flex-shrink: 0; }
@@ -392,7 +392,7 @@ code, .mono, kbd { font-family: "Cascadia Code", Consolas, "Microsoft YaHei", mo
 .task-details dd { margin: 0; color: var(--subtle); min-width: 0; overflow-wrap: anywhere; flex: 1; }
 .task-details dd .icon-button { width: 22px; height: 20px; margin-left: 5px; }
 .settings-layout { display: flex; flex-direction: column; gap: 18px; max-width: 980px; }
-.settings-section { padding: 24px; }
+.settings-section { padding: 20px; margin-bottom: 12px; border-radius: 14px; border: 1px solid var(--border-strong); }
 .settings-heading { display: flex; align-items: flex-start; gap: 11px; margin-bottom: 19px; color: var(--accent); }
 .settings-heading > svg { margin-top: 2px; }
 .settings-heading > div { flex: 1; }
@@ -691,7 +691,7 @@ body::after { width: 75vw; height: 80vh; left: 28vw; top: 31vh; border: 72px sol
 .sidebar::before { background: var(--glass-sidebar); }
 .topbar { background: color-mix(in srgb, var(--glass-control) 45%, transparent); border-color: var(--glass-border); }
 .surface, .overview-hero, .stat-grid, .quiet-card, .download-card, .build-task-card, .startup-card { background: var(--glass-card); border-color: var(--glass-border); box-shadow: inset 0 1px 0 var(--glass-highlight); }
-.section-heading { background: transparent; }
+.section-heading { background: transparent; padding: 10px 14px; margin-bottom: 12px; }
 .nav-item.active { background: var(--glass-card); box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight); }
 .nav-item:hover:not(.active), .quiet-card:hover { background: var(--glass-card-hover); }
 .nav-item.active, .nav-item.active:hover { color: var(--accent); background: var(--glass-card-selected); }

@@ -28,8 +28,9 @@ export interface Actions {
   delete_backup: { payload: { projectId: string; confirmed: true }; result: null };
   delete_download: { payload: { id: string; confirmed: true }; result: null };
   pick_project_executable: { payload: { projectId: string }; result: Project | null };
+  pick_executable: { payload: { projectId: string }; result: { executablePath: string; installedPath: string } | null };
   open_project: { payload: { projectId: string }; result: null };
-  mark_installed: { payload: { projectId: string; version: string; path?: string }; result: Project };
+  mark_installed: { payload: { projectId: string; version: string; path?: string; executablePath?: string }; result: Project };
   list_managed_versions: { payload: { projectId: string }; result: ManagedVersion[] };
   activate_managed_version: { payload: { projectId: string; downloadId: string; confirmed: true }; result: Project };
   save_settings: { payload: { settings: Partial<Settings> }; result: Settings };

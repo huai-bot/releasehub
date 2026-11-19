@@ -120,11 +120,36 @@ fn input(d:&DownloadRecord,target:&Path,root:&str,version:Option<&str>)->Install
     p.installed_path=None;core.store.put_project(&p).unwrap();assert!(core.preview_install(&d.id,None).unwrap_err().contains("明确选择"));assert!(core.preview_install(&d.id,Some(target.to_str().unwrap())).unwrap_err().contains("先明确记录原软件路径"));
     let other=target.join("other");fs::create_dir(&other).unwrap();let mut q=test_project("fixture","other");q.installed_path=Some(other.to_string_lossy().into_owned());core.store.put_project(&q).unwrap();assert!(core.preview_install(&d.id,Some(target.to_str().unwrap())).is_err());
 }
-#[test]fn executable_is_optional_validated_and_cleared_on_directory_change(){
-    let (dir,core,p,target)=fixture();assert!(core.project_executable(&p.id).is_err());core.save_project_executable(&p.id,target.join("app.exe").to_str().unwrap()).unwrap();
-    assert_eq!(core.project_executable(&p.id).unwrap(),fs::canonicalize(target.join("app.exe")).unwrap());
-    assert!(core.save_project_executable(&p.id,target.join("config/settings.json").to_str().unwrap()).is_err());let external=dir.path().join("external.exe");fs::write(&external,b"fixture").unwrap();assert!(core.save_project_executable(&p.id,external.to_str().unwrap()).is_err());
-    let changes=serde_json::from_value(json!({"installedPath":target})).unwrap();let updated=core.update_project(&p.id,changes).unwrap();assert!(updated.executable_path.is_none());
+#[test]fn executable_selection_records_parent_and_preserves_encompassing_root(){
+    let (dir,core,mut p,target)=fixture();p.installed_path=None;core.store.put_project(&p).unwrap();
+    let exe=target.join("app.exe");let preview=core.preview_project_executable(&p.id,exe.to_str().unwrap()).unwrap();
+    assert_eq!(Path::new(preview["installedPath"].as_str().unwrap()),fs::canonicalize(&target).unwrap());
+    assert!(core.store.project(&p.id).unwrap().installed_path.is_none());
+    core.save_project_executable(&p.id,exe.to_str().unwrap()).unwrap();
+    assert_eq!(core.project_executable(&p.id).unwrap(),fs::canonicalize(&exe).unwrap());
+    let saved=core.store.project(&p.id).unwrap();assert_eq!(Path::new(saved.installed_path.as_deref().unwrap()),fs::canonicalize(&target).unwrap());
+    assert!(core.save_project_executable(&p.id,target.join("config/settings.json").to_str().unwrap()).is_err());
+    let bin=target.join("bin");fs::create_dir(&bin).unwrap();let nested=bin.join("APP.EXE");fs::write(&nested,b"fixture not executable").unwrap();
+    core.save_project_executable(&p.id,nested.to_str().unwrap()).unwrap();
+    let same=core.update_project(&p.id,serde_json::from_value(json!({"installedPath":core.store.project(&p.id).unwrap().installed_path})).unwrap()).unwrap();
+    assert_eq!(Path::new(same.installed_path.as_deref().unwrap()),fs::canonicalize(&target).unwrap());assert!(same.executable_path.is_some());
+    let other=dir.path().join("other");fs::create_dir(&other).unwrap();let other_exe=other.join("app.exe");fs::write(&other_exe,b"fixture not executable").unwrap();
+    core.save_project_executable(&p.id,other_exe.to_str().unwrap()).unwrap();
+    assert_eq!(core.project_executable(&p.id).unwrap(),fs::canonicalize(&other_exe).unwrap());
+    let changed=core.update_project(&p.id,serde_json::from_value(json!({"installedPath":target})).unwrap()).unwrap();assert!(changed.executable_path.is_none());
+    let unsafe_exe=core.data_dir.join("app.exe");fs::write(&unsafe_exe,b"fixture").unwrap();assert!(core.save_project_executable(&p.id,unsafe_exe.to_str().unwrap()).is_err());
+    assert!(core.save_project_executable(&p.id,"relative.exe").is_err());
+}
+#[tokio::test]async fn mark_installed_preserves_omitted_paths_and_commits_executable_atomically(){
+    let (dir,core,p,target)=fixture();core.save_project_executable(&p.id,target.join("app.exe").to_str().unwrap()).unwrap();
+    core.handle("mark_installed",json!({"projectId":p.id,"version":"v2"})).await.unwrap();
+    let saved=core.store.project(&p.id).unwrap();assert_eq!(saved.installed_version.as_deref(),Some("v2"));assert!(saved.executable_path.is_some());
+    let other=dir.path().join("chosen");fs::create_dir(&other).unwrap();let exe=other.join("app.exe");fs::write(&exe,b"fixture not executable").unwrap();
+    core.handle("mark_installed",json!({"projectId":p.id,"version":"v3","executablePath":exe})).await.unwrap();
+    let saved=core.store.project(&p.id).unwrap();assert_eq!(saved.installed_version.as_deref(),Some("v3"));assert_eq!(core.project_executable(&p.id).unwrap(),fs::canonicalize(&exe).unwrap());
+    assert_eq!(Path::new(saved.installed_path.as_deref().unwrap()),fs::canonicalize(&other).unwrap());
+    assert!(core.handle("mark_installed",json!({"projectId":p.id,"version":"v4","executablePath":other.join("missing.exe")})).await.is_err());
+    assert_eq!(core.store.project(&p.id).unwrap().installed_version.as_deref(),Some("v3"));
 }
 #[test]fn installers_backup_files_before_wizard_and_never_claim_registry_rollback(){
     for extension in ["exe","msi"] {

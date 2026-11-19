@@ -86,11 +86,36 @@ async fn send(config: &ExternalDownloader, record: &DownloadRecord, page: &str) 
 impl Core {
     pub(crate) async fn test_external_downloader(&self, config: ExternalDownloader) -> Result<Value, String> {
         validate_config(&config)?;
-        let url = endpoint(&config.endpoint)?;
+        let mut url = endpoint(&config.endpoint)?;
+        if config.name == "AB Download Manager" && url.path() == "/add" {
+            // GET /queues is read-only, shares /add's optional authentication, and never adds a download.
+            url.set_path("/queues");
+            let response = match local_client()?.get(url).send().await {
+                Ok(response) => response,
+                Err(_) => return Ok(json!({"ok":false,"message":"AB 集成接口未连接，请打开下载器并启用浏览器集成服务。"})),
+            };
+            if matches!(response.status().as_u16(),401|403) {
+                return Ok(json!({"ok":false,"message":"AB 接口要求访问密钥，当前配置不支持密钥验证。请核对 AB 的集成设置，或改用内置下载。"}));
+            }
+            if !response.status().is_success() {
+                return Ok(json!({"ok":false,"message":format!("AB 集成接口返回 HTTP {}，请检查端口和接口地址。",response.status().as_u16())}));
+            }
+            let mut stream=response.bytes_stream();let mut body=Vec::new();
+            while let Some(chunk)=stream.next().await {
+                let chunk=match chunk {Ok(chunk)=>chunk,Err(_)=>return Ok(json!({"ok":false,"message":"AB 接口响应读取失败，请稍后重试连接测试。"}))};
+                if body.len()+chunk.len()>64*1024 {return Ok(json!({"ok":false,"message":"接口响应过大，未确认兼容 AB；请检查端口和接口地址。"}));}
+                body.extend_from_slice(&chunk);
+            }
+            // AB responds with text Content-Type; validate bounded JSON, not its MIME label or a brand claim.
+            let compatible=serde_json::from_slice::<Value>(&body).ok().is_some_and(|value|value.as_array().is_some_and(|queues|queues.iter().all(|queue| {
+                queue.get("id").is_some_and(|id|id.as_i64().is_some())&&queue.get("name").is_some_and(|name|name.is_string())
+            })));
+            return Ok(json!({"ok":compatible,"message":if compatible {"AB 兼容集成接口已连接，队列响应正常；测试没有添加下载任务。"}else{"接口响应不符合 AB 队列格式，请检查端口和接口地址。"}}));
+        }
         let host = if url.host_str() == Some("[::1]") { "::1" } else { url.host_str().ok_or("接口地址无效")? };
         let reachable = tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect((host, url.port_or_known_default().unwrap_or(80)))).await;
         let ok = matches!(reachable, Ok(Ok(_)));
-        Ok(json!({"ok":ok,"message":if ok { "本机端口可以连接；实际接口格式会在发送下载时验证。" } else { "本机端口未连接，请打开下载器并启用接口服务。" }}))
+        Ok(json!({"ok":ok,"message":if ok { "本机端口可以连接；自定义接口格式会在发送下载时验证。" } else { "本机端口未连接，请打开下载器并启用接口服务。" }}))
     }
     pub(crate) async fn send_external_download(self: &Arc<Self>, project_id: &str, asset_id: u64) -> Result<DownloadRecord, String> {
         let _serial = self.external_requests.lock().await;
@@ -181,6 +206,40 @@ mod tests {
         }
         config = ExternalDownloader::default(); config.request_template = r#"{"url":"{unknown}"}"#.into(); assert!(validate_config(&config).is_err());
     }
+    #[tokio::test] async fn ab_connection_test_checks_read_only_bounded_queues_without_credentials() {
+        use axum::{http::StatusCode, routing::{get, post}, Router};
+        let temp=tempfile::tempdir().unwrap();let core=Core::new(temp.path().join("data"),true,Arc::new(|_,_|{})).unwrap();
+        for (status,body,ok,reason) in [
+            (StatusCode::OK,r#"[{"id":1,"name":"main"}]"#.to_owned(),true,"队列响应正常"),
+            (StatusCode::OK,"[]".to_owned(),true,"队列响应正常"),
+            (StatusCode::OK,r#"[{"id":"1","name":"main"}]"#.to_owned(),false,"队列格式"),
+            (StatusCode::OK,r#"{"id":1,"name":"main"}"#.to_owned(),false,"队列格式"),
+            (StatusCode::OK,"<html>other service</html>".to_owned(),false,"队列格式"),
+            (StatusCode::OK,"x".repeat(64*1024+1),false,"响应过大"),
+            (StatusCode::UNAUTHORIZED,"denied".to_owned(),false,"访问密钥"),
+            (StatusCode::FORBIDDEN,"denied".to_owned(),false,"访问密钥"),
+            (StatusCode::FOUND,"redirect".to_owned(),false,"HTTP 302"),
+            (StatusCode::INTERNAL_SERVER_ERROR,"failed".to_owned(),false,"HTTP 500"),
+        ] {
+            let reads=Arc::new(std::sync::Mutex::new(Vec::new()));let seen=reads.clone();
+            let adds=Arc::new(std::sync::atomic::AtomicUsize::new(0));let posted=adds.clone();
+            let router=Router::new().route("/queues",get(move |headers:axum::http::HeaderMap| {
+                let seen=seen.clone();let body=body.clone();async move {seen.lock().unwrap().push(headers);(status,[("content-type","text/plain")],body)}
+            })).route("/add",post(move || {let posted=posted.clone();async move {posted.fetch_add(1,std::sync::atomic::Ordering::SeqCst);"OK"}}));
+            let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let port=listener.local_addr().unwrap().port();
+            let server=tokio::spawn(async move {axum::serve(listener,router).await.unwrap();});
+            let mut config=ExternalDownloader::default();config.endpoint=format!("http://127.0.0.1:{port}/add");
+            let result=core.test_external_downloader(config).await.unwrap();
+            assert_eq!(result["ok"],ok,"{reason}");assert!(result["message"].as_str().unwrap().contains(reason),"{result}");
+            assert_eq!(adds.load(std::sync::atomic::Ordering::SeqCst),0);
+            let captured=reads.lock().unwrap();assert_eq!(captured.len(),1);
+            for secret in ["authorization","cookie","x-api-key"] {assert!(!captured[0].contains_key(secret));}
+            drop(captured);assert!(core.store.downloads().unwrap().is_empty());server.abort();
+        }
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let port=listener.local_addr().unwrap().port();drop(listener);
+        let mut config=ExternalDownloader::default();config.endpoint=format!("http://127.0.0.1:{port}/add");
+        let result=core.test_external_downloader(config).await.unwrap();assert_eq!(result["ok"],false);assert!(result["message"].as_str().unwrap().contains("未连接"));
+    }
     fn fixture(core: &Core, content: &[u8]) -> (Project, DownloadRecord) {
         let mut p = test_project("example", "app"); let time = now();
         let d = DownloadRecord { id: uuid::Uuid::new_v4().to_string(), project_id: p.id.clone(), project_name: p.name.clone(), asset_id: 1,
@@ -203,7 +262,7 @@ mod tests {
         let (p, _) = fixture(&core, b"fixture bytes"); let mut settings = core.store.settings().unwrap(); settings.external_downloader.endpoint = format!("http://127.0.0.1:{port}/send"); core.store.save_settings(&settings).unwrap();
         assert!(core.handle("send_external_download", json!({"projectId":p.id,"assetId":1})).await.is_err()); assert!(seen.lock().unwrap().is_empty());
         let first = core.send_external_download(&p.id, 1).await.unwrap(); let second = core.send_external_download(&p.id, 1).await.unwrap(); assert_eq!(first.id, second.id);
-        let captured = seen.lock().unwrap(); assert_eq!(captured.len(), 1); assert!(!captured[0].0.contains_key("authorization")); assert!(!captured[0].0.contains_key("cookie")); assert_eq!(captured[0].1["downloadSource"]["link"], first.url); assert_eq!(captured[0].1["startDownload"], true); drop(captured);
+        let captured = seen.lock().unwrap(); assert_eq!(captured.len(), 1); assert!(!captured[0].0.contains_key("authorization")); assert!(!captured[0].0.contains_key("cookie")); assert_eq!(captured[0].1["items"][0]["link"], first.url); assert_eq!(captured[0].1["items"][0]["suggestedName"], first.file_name); assert_eq!(captured[0].1["options"]["silentAdd"], true); assert_eq!(captured[0].1["options"]["silentStart"], true); drop(captured);
         server.abort(); assert!(core.retry_external_download(&first.id).await.is_err()); let retained = core.store.download(&first.id).unwrap(); assert_eq!(retained.status, "external"); assert!(retained.error.is_some());
     }
     #[tokio::test] async fn external_import_checks_digest_and_never_overwrites() {

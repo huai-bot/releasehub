@@ -104,6 +104,7 @@ export interface BuildTask {
   updatedAt: string;
 }
 
+export type LibraryLayout = 'two' | 'three' | 'list';
 export type WorkspacePage = 'home' | 'library' | 'updates' | 'downloads' | 'github' | 'agent';
 export type GithubTab = 'explore' | 'owned' | 'starred' | 'activity' | 'feed';
 export interface ProxySettings {
@@ -140,6 +141,7 @@ export interface Settings {
   colorScheme?: ColorScheme;
   material?: Material;
   blur?: boolean;
+  libraryLayout?: LibraryLayout;
   startupPage: WorkspacePage;
   startupGithubTab: GithubTab;
   navigationOrder: WorkspacePage[];

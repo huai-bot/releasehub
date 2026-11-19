@@ -13,10 +13,11 @@
   import GithubFeed from '../components/GithubFeed.svelte';
   import type { GithubPreviewScenario } from '../lib/github-preview';
 
-  let { projects, preview, active = true, preload = false, initialTab = 'explore', onadd, onopen, oncopy, onnotice }: {
-    projects: Project[]; preview: boolean; active?: boolean; preload?: boolean; initialTab?: Tab;
+  let { projects, repositoryNotes, preview, active = true, preload = false, initialTab = 'explore', onadd, onopen, oncopy, onnotice, onnotes }: {
+    projects: Project[]; repositoryNotes?: RepositoryNote[]; preview: boolean; active?: boolean; preload?: boolean; initialTab?: Tab;
     onadd: (repository: GithubRepository) => Promise<boolean>;
     onopen: (url: string) => void; oncopy: (text: string) => void; onnotice: (message: string, tone?: Tone) => void;
+    onnotes?: (notes: RepositoryNote[]) => void;
   } = $props();
   type Tab = GithubRepositoryTab | 'activity' | 'feed';
   const tabs = [
@@ -78,6 +79,11 @@
   let assignmentError = $state('');
   let notes = $state<RepositoryNote[]>([]);
   let notesError = $state('');
+  $effect(() => {
+    if (!preview && repositoryNotes !== undefined) {
+      noteRequest += 1; notes = repositoryNotes; notesError = '';
+    }
+  });
   let editingNote = $state<string | null>(null);
   let noteName = $state('');
   let noteDescription = $state('');
@@ -597,6 +603,7 @@
     } finally { if (!destroyed && session === sessionRevision) assignmentBusy = false; }
   }
   async function loadNotes() {
+    if (!preview && repositoryNotes !== undefined) return;
     const request = ++noteRequest;
     notesError = '';
     try {
@@ -621,6 +628,7 @@
       if (destroyed || session !== sessionRevision) return;
       notes = notes.filter((note) => note.repository.toLowerCase() !== repository.toLowerCase());
       if (result) notes = [...notes, result];
+      onnotes?.(notes);
       editingNote = null; onnotice(result ? '本地备注已保存。' : '本地备注已清除。', 'success');
       await loadNotes();
     } catch (error) { if (!destroyed && session === sessionRevision) noteError = readableError(error); }

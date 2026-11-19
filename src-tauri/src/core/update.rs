@@ -468,7 +468,27 @@ impl Core {
         require_software(p)?;let root=safe_existing(Path::new(p.installed_path.as_deref().ok_or("请先记录软件安装目录")?),true)?;
         let exe=safe_existing(Path::new(path),false)?;
         if !exe.starts_with(&root)||exe.extension().and_then(|x|x.to_str()).is_none_or(|x|!x.eq_ignore_ascii_case("exe")) {return Err("主程序必须是安装目录内的 EXE 文件".into());}
-        if overlaps(&root,&self.data_dir)&&p.installed_source.as_deref()!=Some("managed") {return Err("软件主程序目录不安全".into());}Ok(exe)
+        let data=fs::canonicalize(&self.data_dir).map_err(io_error)?;
+        if overlaps(&root,&data)&&p.installed_source.as_deref()!=Some("managed") {return Err("软件主程序目录不安全".into());}Ok(exe)
+    }
+    pub(super) fn resolve_executable_selection(&self,p:&Project,path:&str)->Result<(PathBuf,PathBuf),String> {
+        require_software(p)?;
+        let exe=safe_existing(Path::new(path),false)?;
+        if exe.extension().and_then(|x|x.to_str()).is_none_or(|x|!x.eq_ignore_ascii_case("exe")) {return Err("请选择本机 EXE 启动程序".into());}
+        // Preserve an already-recorded encompassing install root (for example an app with bin/app.exe).
+        if let Some(root)=p.installed_path.as_deref().and_then(|root|safe_existing(Path::new(root),true).ok()).filter(|root|exe.starts_with(root)) {
+            self.validate_executable(p,path)?;
+            return Ok((root,exe));
+        }
+        let root=exe.parent().ok_or("启动程序目录无效")?.to_owned();
+        let data=fs::canonicalize(&self.data_dir).map_err(io_error)?;
+        if overlaps(&root,&data) {return Err("请选择独立的软件目录，不能使用追新数据目录或其上层目录".into());}
+        Ok((root,exe))
+    }
+    pub fn preview_project_executable(&self,project_id:&str,path:&str)->Result<Value,String> {
+        let project=self.store.project(project_id)?;
+        let (root,exe)=self.resolve_executable_selection(&project,path)?;
+        Ok(json!({"installedPath":root.to_string_lossy(),"executablePath":exe.to_string_lossy()}))
     }
     pub fn save_project_executable(&self,project_id:&str,path:&str)->Result<Value,String> {
         let changes=serde_json::from_value(json!({"executablePath":path})).map_err(|_|"主程序路径格式无效".to_string())?;

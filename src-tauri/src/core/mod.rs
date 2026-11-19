@@ -142,8 +142,10 @@ impl Core {
             }
             "mark_installed" => {
                 let id = text(&payload, "projectId", 128)?; let version = text(&payload, "version", 200)?;
-                let path = optional_text(&payload, "path", 4096)?;
-                let changes=decode(json!({"installedVersion":version,"installedPath":path}))?;
+                let mut patch=json!({"installedVersion":version});
+                if payload.get("path").is_some() {patch["installedPath"]=json!(optional_text(&payload,"path",4096)?);}
+                if payload.get("executablePath").is_some() {patch["executablePath"]=json!(optional_text(&payload,"executablePath",4096)?);}
+                let changes=decode(patch)?;
                 output(self.update_project(&id,changes)?)
             }
             "get_repository_notes" => output(self.store.repository_notes()?),

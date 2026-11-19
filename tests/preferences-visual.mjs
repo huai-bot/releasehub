@@ -29,14 +29,27 @@ try {
         return null;
       });
       if (issue) failures.push(`${viewport.width}/${name}: ${issue}`);
+      // Exercise the real dismiss action so stacked preview notifications cannot hide the page.
+      while (await page.getByRole('button', { name: '关闭通知', exact: true }).count()) {
+        await page.getByRole('button', { name: '关闭通知', exact: true }).first().click();
+      }
       await page.screenshot({ path: resolve(output, `${viewport.width}-${name}.png`) });
     };
     const nav = async label => page.locator('.sidebar .nav-item').filter({ has: page.locator('span', { hasText: new RegExp(`^${label}$`) }) }).click();
     await check('home-light');
     await nav('资源库');
     await check('library-light');
+    for (const [label, layout] of [['切换双列视图', 'two'], ['切换三列视图', 'three'], ['切换列表视图', 'list']]) {
+      await page.getByRole('button', { name: label, exact: true }).click();
+      await page.locator(`#main-content .library-card-grid.layout-${layout}`).waitFor();
+      await check(`library-${layout}-light`);
+    }
+    await page.getByRole('button', { name: '切换三列视图', exact: true }).click();
+    await page.locator('#main-content .card-identity').first().press('Enter');
+    await check('software-detail-light');
+    await page.getByRole('complementary').getByRole('button', { name: '关闭资源详情', exact: true }).click();
     await page.getByRole('button', { name: '文件', exact: true }).click();
-    await page.getByRole('button', { name: '查看 文件资料（界面示例） 的版本与说明', exact: true }).click();
+    await page.locator('#main-content .card-identity').first().press('Enter');
     await check('files-detail-light');
     await page.getByRole('complementary').getByRole('button', { name: '关闭资源详情', exact: true }).click();
     await nav('下载');
@@ -52,6 +65,14 @@ try {
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
     await page.locator('#main-content').evaluate(element => element.scrollTop = 0);
     await check('settings-dark');
+    await nav('资源库');
+    await page.getByRole('button', { name: '软件', exact: true }).click();
+    for (const [label, layout] of [['切换双列视图', 'two'], ['切换三列视图', 'three'], ['切换列表视图', 'list']]) {
+      await page.getByRole('button', { name: label, exact: true }).click();
+      await page.locator(`#main-content .library-card-grid.layout-${layout}`).waitFor();
+      await check(`library-${layout}-dark`);
+    }
+    await nav('设置');
     for (const [label, scheme] of [['青绿', 'teal'], ['柔紫', 'violet'], ['暖琥珀', 'amber']]) {
       await page.getByRole('button', { name: label, exact: true }).click();
       await page.waitForFunction(value => document.documentElement.dataset.colorScheme === value, scheme);
