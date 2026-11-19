@@ -83,7 +83,8 @@ impl Core {
         let _queue=self.download_queue.lock().map_err(|_|"下载队列不可用".to_string())?;
         let downloads=self.store.downloads()?;
         let reclassify=changes.channel.is_some() || changes.preference.is_some() || changes.management_mode.is_some() || changes.asset_pattern.is_some();
-        let p=self.store.mutate("projects",id,|p:&mut Project| {
+        let local_edit=changes.installed_version.is_some() || changes.installed_path.is_some() || changes.executable_path.is_some();
+        let p=self.store.mutate_project(id,local_edit,|p:&mut Project| {
             if let Some(mode)=changes.management_mode {
                 validate_management_mode(&mode)?;
                 if p.management_mode!=mode {p.selected_asset_id=None;}
@@ -150,6 +151,7 @@ impl Core {
         let allow_auto=match payload.get("allowAutoDownload") { None=>true, Some(Value::Bool(v))=>*v,_=>return Err("自动下载参数无效".into()) };
         let ids:Option<Vec<String>>=match payload.get("projectIds") { None=>None,Some(v)=>Some(super::decode(v.clone())?) };
         if ids.as_ref().is_some_and(|v| v.len()>1000) { return Err("一次最多检查1000个项目".into()); }
+        self.verify_installations(true).await?;
         let projects=self.store.projects()?;
         if let Some(ids)=&ids { for id in ids { if !projects.iter().any(|p| &p.id==id) { return Err("要检查的项目不存在".into()); } } }
         let mut checked=0; let mut updates=0; let mut errors=0;

@@ -173,7 +173,7 @@
     media.addEventListener('change', updateSystem);
     void initialize();
     const poll = setInterval(() => {
-      if (!unlisten && !preview && snapshot && !document.hidden && (snapshot.runtime.agent.enabled || snapshot.downloads.some((item) => ['queued', 'downloading', 'installing'].includes(item.status)) || snapshot.buildTasks.some((item) => ['claimed', 'running'].includes(item.status)))) void refreshSnapshot().catch(reportError);
+      if (!unlisten && !preview && snapshot && !document.hidden && (snapshot.runtime.agent.enabled || (snapshot.installations ?? []).some(item => ['waiting', 'detecting', 'rebootRequired'].includes(item.status)) || snapshot.downloads.some((item) => ['queued', 'downloading', 'installing'].includes(item.status)) || snapshot.buildTasks.some((item) => ['claimed', 'running'].includes(item.status)))) void refreshSnapshot().catch(reportError);
     }, 5_000);
     return () => { destroyed = true; unlisten?.(); clearInterval(poll); toastTimers.forEach(clearTimeout); media.removeEventListener('change', updateSystem); };
   });
@@ -206,6 +206,12 @@
   async function showInstall(download: DownloadRecord) {
     if (busy || download.installable === false || download.kind === 'other') return;
     if (preview) { openDialog({ kind: 'install', download }); return; }
+    const project = snapshot?.projects.find(item => item.id === download.projectId);
+    if (download.kind === 'installer' && !project?.backupEnabled) {
+      const result = await operate('install_download', { id: download.id, confirmed: true, targetPath: '' }, { key: `install:${download.id}` });
+      if (result) notify(result.message || '已打开安装器，完成后将自动检测版本。');
+      return;
+    }
     const key = `preview-install:${download.id}`;
     setPending(key, true);
     let plan: InstallPreview | undefined;
@@ -216,6 +222,18 @@
     if (plan && !plan.requiresRootSelection && !plan.legacyManaged) {
       await submitInstall(plan, plan.suggestedRoot ?? undefined);
     } else openDialog({ kind: 'install', download, plan });
+  }
+
+  async function verifyInstallation(projectId: string) {
+    const checks = await operate('verify_installations', { projectId }, { key: `verify:${projectId}` });
+    if (!checks) return;
+    const current = checks.filter(item => item.projectId === projectId && item.status !== 'superseded')
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+    notify(current?.status === 'verified' ? '已验证安装版本并同步记录。' : '已检查本机版本；尚未确认时将保留原记录。', current?.status === 'verified' ? 'success' : 'warning');
+  }
+  async function confirmInstallation(id: string) {
+    const project = await operate('confirm_installation', { id }, { success: '已记录本次安装版本。', key: `confirm-install:${id}` });
+    if (project && snapshot) snapshot = { ...snapshot, projects: snapshot.projects.map(item => item.id === project.id ? project : item) };
   }
 
   function showManagedVersions(projectId: string) {
@@ -434,9 +452,9 @@
       {#each ['library', 'updates'] as localPage}
          {#if visitedLocal.has(localPage as Page) || page === localPage}<main class="page-content" id={page === localPage ? 'main-content' : undefined} hidden={page !== localPage}><Library projects={snapshot.projects} notes={snapshot.repositoryNotes} layout={snapshot.settings.libraryLayout ?? 'three'} onlayout={(libraryLayout) => void saveSettings({ libraryLayout })} onnote={showNote} updatesOnly={localPage === 'updates'} active={page === localPage} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} onOpen={(project) => void runProject(project)} onFiles={showProjectFiles} onBackup={showProjectBackup} onRepository={(project) => void openUrl(`https://github.com/${project.owner}/${project.repo}`)} /></main>{/if}
        {/each}
-       {#if visitedLocal.has('downloads') || page === 'downloads'}<main class="page-content" id={page === 'downloads' ? 'main-content' : undefined} hidden={page !== 'downloads'}><Downloads downloads={snapshot.downloads} {query} {busy} onexternalretry={(download) => showExternalDownload([], download)} onexternalimport={(download) => void importExternalDownload(download)} onretry={(id) => void operate('retry_download', { id }, { success: '已重新加入下载队列。' })} oncancel={(id) => void operate('cancel_download', { id }, { success: '已请求取消下载。' })} oninstall={showInstall} onDelete={(download) => void directDeleteDownload(download)} onfolder={(id) => void operate('open_download', { id }, { refresh: false })} onmark={markDownloaded} onproject={openProject} oncopy={(text) => void copy(text)} onversions={showManagedVersions} /></main>{/if}
+       {#if visitedLocal.has('downloads') || page === 'downloads'}<main class="page-content" id={page === 'downloads' ? 'main-content' : undefined} hidden={page !== 'downloads'}><Downloads installations={snapshot.installations ?? []} onVerify={(id) => void verifyInstallation(id)} onConfirmInstallation={(id) => void confirmInstallation(id)} downloads={snapshot.downloads} {query} {busy} onexternalretry={(download) => showExternalDownload([], download)} onexternalimport={(download) => void importExternalDownload(download)} onretry={(id) => void operate('retry_download', { id }, { success: '已重新加入下载队列。' })} oncancel={(id) => void operate('cancel_download', { id }, { success: '已请求取消下载。' })} oninstall={showInstall} onDelete={(download) => void directDeleteDownload(download)} onfolder={(id) => void operate('open_download', { id }, { refresh: false })} onmark={markDownloaded} onproject={openProject} oncopy={(text) => void copy(text)} onversions={showManagedVersions} /></main>{/if}
        {#if githubVisited || page === 'github'}<main class="page-content github-workspace" id={page === 'github' ? 'main-content' : undefined} hidden={page !== 'github'}><Github projects={snapshot.projects} repositoryNotes={snapshot.repositoryNotes} {preview} preload active={page === 'github'} initialTab={snapshot.settings.startupGithubTab} onadd={addGithubRepository} onopen={(url) => void openUrl(url)} oncopy={(text) => void copy(text)} onnotice={notify} onnotes={(notes) => { if (snapshot) snapshot = { ...snapshot, repositoryNotes: notes }; }} /></main>{/if}
-      {#if showingDetails && selectedProject}<button class="detail-backdrop" aria-label="关闭资源详情" onclick={() => selectedId = null}></button>{#key `${selectedProject.id}:${detailRevision}`}<ProjectDetail project={selectedProject} note={noteFor(selectedProject)} onnote={showNote} {busy} {preview} onexternal={(project) => showExternalDownload([project])} onrun={(project) => void runProject(project)} onexecutable={(project) => void chooseExecutable(project)} onrestore={(backup) => void directApplyBackup(backup, 'restore')} ondeletebackup={(backup) => void directApplyBackup(backup, 'delete')} onclose={() => selectedId = null} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onupdate={(id, changes) => void updateProject(id, changes)} onmark={showMark} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => void removeProject(project)} onopen={(url) => void openUrl(url)} onSettings={(project) => openDialog({ kind: 'settings', project })} />{/key}{/if}</div>
+      {#if showingDetails && selectedProject}<button class="detail-backdrop" aria-label="关闭资源详情" onclick={() => selectedId = null}></button>{#key `${selectedProject.id}:${detailRevision}`}<ProjectDetail installations={snapshot.installations ?? []} onVerify={(id) => void verifyInstallation(id)} onConfirmInstallation={(id) => void confirmInstallation(id)} project={selectedProject} note={noteFor(selectedProject)} onnote={showNote} {busy} {preview} onexternal={(project) => showExternalDownload([project])} onrun={(project) => void runProject(project)} onexecutable={(project) => void chooseExecutable(project)} onrestore={(backup) => void directApplyBackup(backup, 'restore')} ondeletebackup={(backup) => void directApplyBackup(backup, 'delete')} onclose={() => selectedId = null} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onupdate={(id, changes) => void updateProject(id, changes)} onmark={showMark} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => void removeProject(project)} onopen={(url) => void openUrl(url)} onSettings={(project) => openDialog({ kind: 'settings', project })} />{/key}{/if}</div>
     </div>
   </div>
 {/if}

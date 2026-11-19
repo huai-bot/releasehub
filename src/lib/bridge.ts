@@ -4,7 +4,7 @@ import { isDownloadRecord } from './download-state';
 import type {
   AddProjectInput, AgentConnection, AgentIntegration, BuildTask, CheckResult, DownloadRecord,
   GithubCacheEntry, GithubCacheOperation, GithubCacheStats, GithubActivityPage, GithubFeedPage, GithubListRepositoryPage, GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubRepositoryTab, GithubStatus, GithubUserList,
-  BackupRecord, InstallPreview, InstallResult, ManagedVersion, Project, ProjectChanges, ProxySettings, ProxyTestResult, RepositoryNote, Settings, Snapshot,
+  BackupRecord, InstallationCheck, InstallPreview, InstallResult, ManagedVersion, Project, ProjectChanges, ProxySettings, ProxyTestResult, RepositoryNote, Settings, Snapshot,
 } from './types';
 
 /** Keep every desktop operation behind the one audited host command. */
@@ -23,6 +23,8 @@ export interface Actions {
   cancel_download: { payload: { id: string }; result: null };
   preview_install: { payload: { id: string; targetPath?: string }; result: InstallPreview };
   install_download: { payload: { id: string; confirmed: true; targetPath: string; archiveRoot?: string; previousVersion?: string | null }; result: InstallResult };
+  verify_installations: { payload: { projectId?: string }; result: InstallationCheck[] };
+  confirm_installation: { payload: { id: string }; result: Project };
   get_backup: { payload: { projectId: string }; result: BackupRecord | null };
   restore_backup: { payload: { projectId: string; confirmed: true }; result: Project };
   delete_backup: { payload: { projectId: string; confirmed: true }; result: null };

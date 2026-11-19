@@ -366,6 +366,15 @@ async fn dispatch(window: tauri::WebviewWindow, app: tauri::AppHandle, state: ta
     }
 }
 
+async fn scheduled_installation_checks(core: Arc<Core>) {
+    let _ = core.verify_installations(true).await;
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        // The core throttles each pending task and linked-software checks separately.
+        let _ = core.verify_installations(false).await;
+    }
+}
+
 async fn scheduled_checks(app: tauri::AppHandle, host: Arc<HostState>) {
     let mut first = true;
     let mut previous_check = Instant::now();
@@ -542,6 +551,8 @@ pub fn run() {
             setup_tray(app)?;
             #[cfg(windows)]
             refresh_executable_icon(&executable);
+            let install_core = host.core.clone();
+            tauri::async_runtime::spawn(scheduled_installation_checks(install_core));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(snapshot) = host.core.handle("snapshot", json!({})).await {
@@ -561,6 +572,12 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if window.label() != "main" { return; }
+            if let tauri::WindowEvent::Focused(true) = event {
+                if let Some(host) = window.app_handle().try_state::<Arc<HostState>>() {
+                    let core = host.core.clone();
+                    tauri::async_runtime::spawn(async move { let _ = core.verify_installations(true).await; });
+                }
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if let Some(host) = window.app_handle().try_state::<Arc<HostState>>() {
                     if host.close_to_tray.load(Ordering::Relaxed) { api.prevent_close(); let _ = window.hide(); }

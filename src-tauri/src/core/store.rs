@@ -3,7 +3,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{path::Path, sync::Mutex};
 
-const SCHEMA_VERSION:i64=4;
+#[path = "installation_checks_store.rs"]
+mod installation_checks_store;
+
+const SCHEMA_VERSION:i64=5;
 fn migrate(db:&mut Connection)->Result<(),String> {
     let version:i64=db.pragma_query_value(None,"user_version",|r|r.get(0)).map_err(storage_error)?;
     if version>SCHEMA_VERSION {return Err("资料库由更新版本创建，请升级 ReleaseHub 后打开".into());}
@@ -57,6 +60,13 @@ fn migrate(db:&mut Connection)->Result<(),String> {
             UPDATE projects SET json=json_set(json,'$.executablePath',NULL) WHERE json_type(json,'$.executablePath') IS NULL;
             PRAGMA user_version=4;").map_err(storage_error)?;
     }
+    if version<5 {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS installation_checks (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, download_id TEXT NOT NULL, json TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS installation_checks_project ON installation_checks(project_id);
+            CREATE INDEX IF NOT EXISTS installation_checks_download ON installation_checks(download_id);
+            CREATE TABLE IF NOT EXISTS installation_bindings (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+            PRAGMA user_version=5;").map_err(storage_error)?;
+    }
     tx.commit().map_err(storage_error)
 }
 pub struct Store { db: Mutex<Connection> }
@@ -104,6 +114,12 @@ impl Store {
         Ok(())
     }
     pub fn mutate<T: Serialize + DeserializeOwned>(&self, table: &str, id: &str, f: impl FnOnce(&mut T) -> Result<(), String>) -> Result<T, String> {
+        self.mutate_record(table, id, false, f)
+    }
+    pub fn mutate_project(&self, id: &str, invalidate_installation: bool, f: impl FnOnce(&mut Project) -> Result<(), String>) -> Result<Project, String> {
+        self.mutate_record("projects", id, invalidate_installation, f)
+    }
+    fn mutate_record<T: Serialize + DeserializeOwned>(&self, table: &str, id: &str, invalidate_installation: bool, f: impl FnOnce(&mut T) -> Result<(), String>) -> Result<T, String> {
         if !["projects", "downloads", "tasks"].contains(&table) { return Err("数据类型无效".into()); }
         let mut db = self.db.lock().map_err(storage_error)?;
         let tx = db.transaction().map_err(storage_error)?;
@@ -111,9 +127,16 @@ impl Store {
         let mut value: T = serde_json::from_str(&json.ok_or_else(|| "记录不存在，可能已被删除".to_string())?).map_err(storage_error)?;
         f(&mut value)?;
         tx.execute(&format!("UPDATE {} SET json=?1 WHERE id=?2", table), params![serde_json::to_string(&value).map_err(storage_error)?, id]).map_err(storage_error)?;
-        if table=="projects" && serde_json::to_value(&value).map_err(storage_error)?.get("managementMode").and_then(serde_json::Value::as_str)==Some("files") {
-            // Revoke historical installation permission in the same transaction as the mode change.
-            tx.execute("UPDATE downloads SET json=json_set(json,'$.installable',json('false')) WHERE json_extract(json,'$.projectId')=?1",[id]).map_err(storage_error)?;
+        if table=="projects" {
+            let files = serde_json::to_value(&value).map_err(storage_error)?.get("managementMode").and_then(serde_json::Value::as_str)==Some("files");
+            if files {
+                // Revoke historical installation permission in the same transaction as the mode change.
+                tx.execute("UPDATE downloads SET json=json_set(json,'$.installable',json('false')) WHERE json_extract(json,'$.projectId')=?1",[id]).map_err(storage_error)?;
+            }
+            if files || invalidate_installation { installation_checks_store::invalidate_project(&tx, id)?; }
+        }
+        if table=="downloads" && serde_json::to_value(&value).map_err(storage_error)?.get("status").and_then(serde_json::Value::as_str)==Some("deleted") {
+            installation_checks_store::invalidate_download(&tx,id)?;
         }
         tx.commit().map_err(storage_error)?;
         Ok(value)
@@ -122,9 +145,12 @@ impl Store {
     pub fn project(&self, id: &str) -> Result<Project, String> { self.get("projects", id) }
     pub fn put_project(&self, p: &Project) -> Result<(), String> { self.put("projects", &p.id, p) }
     pub fn remove_project(&self, id: &str) -> Result<(), String> {
-        self.project(id)?;
-        self.db.lock().map_err(storage_error)?.execute("DELETE FROM projects WHERE id=?1", [id]).map_err(storage_error)?;
-        Ok(())
+        let mut db = self.db.lock().map_err(storage_error)?;
+        let tx = db.transaction().map_err(storage_error)?;
+        if tx.execute("DELETE FROM projects WHERE id=?1", [id]).map_err(storage_error)? == 0 { return Err("项目已删除".into()); }
+        tx.execute("DELETE FROM installation_checks WHERE project_id=?1", [id]).map_err(storage_error)?;
+        tx.execute("DELETE FROM installation_bindings WHERE id=?1", [id]).map_err(storage_error)?;
+        tx.commit().map_err(storage_error)
     }
     pub fn backup(&self, id: &str) -> Result<Option<BackupRecord>, String> {
         let db=self.db.lock().map_err(storage_error)?;
@@ -146,6 +172,7 @@ impl Store {
         for (table,id,json) in [("projects",p.id.as_str(),serde_json::to_string(p)),("downloads",d.id.as_str(),serde_json::to_string(d))] {
             tx.execute(&format!("INSERT INTO {table}(id,json) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET json=excluded.json"),params![id,json.map_err(storage_error)?]).map_err(storage_error)?;
         }
+        installation_checks_store::invalidate_project(&tx, &p.id)?;
         if j.snapshot_enabled {
             let json = serde_json::to_string(&j.backup).map_err(storage_error)?;
             tx.execute("INSERT INTO backups(id,json) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET json=excluded.json",params![p.id,json]).map_err(storage_error)?;
@@ -158,6 +185,7 @@ impl Store {
         tx.execute("UPDATE projects SET json=?1 WHERE id=?2",params![serde_json::to_string(p).map_err(storage_error)?,p.id]).map_err(storage_error)?;
         if let Some(d)=d { tx.execute("UPDATE downloads SET json=?1 WHERE id=?2",params![serde_json::to_string(d).map_err(storage_error)?,d.id]).map_err(storage_error)?; }
         tx.execute("DELETE FROM install_journals WHERE id=?1",[id]).map_err(storage_error)?;
+        installation_checks_store::invalidate_project(&tx, id)?;
         tx.commit().map_err(storage_error)
     }
     pub fn downloads(&self) -> Result<Vec<DownloadRecord>, String> { self.list("downloads") }
@@ -169,6 +197,7 @@ impl Store {
     }
     pub fn remove_download(&self,id:&str)->Result<(),String>{
         let mut db=self.db.lock().map_err(storage_error)?;let tx=db.transaction().map_err(storage_error)?;
+        installation_checks_store::invalidate_download(&tx, id)?;
         tx.execute("DELETE FROM download_digests WHERE id=?1",[id]).map_err(storage_error)?;
         tx.execute("DELETE FROM downloads WHERE id=?1",[id]).map_err(storage_error)?;
         tx.commit().map_err(storage_error)
@@ -250,6 +279,17 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn version_four_adds_installation_tables_without_changing_existing_records() {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();
+        let p=super::super::models::test_project("fixture","schema-four");store.put_project(&p).unwrap();
+        store.db.lock().unwrap().execute_batch("DROP TABLE installation_checks; DROP TABLE installation_bindings; PRAGMA user_version=4;").unwrap();
+        drop(store);
+        let migrated=Store::new(&path).unwrap();
+        assert_eq!(migrated.project(&p.id).unwrap().repo,"schema-four");
+        assert!(migrated.installations(None).unwrap().is_empty());
+        assert!(migrated.install_bindings(None).unwrap().is_empty());
+        assert_eq!(migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),5);
+    }
     #[test] fn version_three_migrates_backup_schema_and_executable_without_losing_metadata() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();
         let p=super::super::models::test_project("fixture","schema");let mut value=serde_json::to_value(&p).unwrap();value.as_object_mut().unwrap().remove("executablePath");
@@ -257,7 +297,7 @@ mod tests {
         store.db.lock().unwrap().execute_batch("DROP TABLE backups;DROP TABLE install_journals;PRAGMA user_version=3;").unwrap();drop(store);
         let migrated=Store::new(&path).unwrap();assert_eq!(migrated.settings().unwrap().color_scheme,"teal");assert!(migrated.project(&p.id).unwrap().executable_path.is_none());
         assert!(migrated.backup(&p.id).unwrap().is_none());assert!(migrated.journals().unwrap().is_empty());
-        assert_eq!(migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),4);
+        assert_eq!(migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),5);
         drop(migrated);assert_eq!(Store::new(&path).unwrap().project(&p.id).unwrap().repo,"schema");
     }
     #[test] fn version_two_migrates_old_records_once_without_losing_preferences() {
@@ -284,12 +324,12 @@ mod tests {
         let migrated_project=migrated.project(&id).unwrap();assert_eq!(migrated_project.management_mode,"software");
         let asset=&migrated_project.release.as_ref().unwrap().assets[0];assert!(asset.downloadable);assert!(!asset.installable);
         for kind in ["portable","installer","other"] {assert_eq!(migrated.download(kind).unwrap().installable,kind!="other");}
-        let version:i64=migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();assert_eq!(version,4);
+        let version:i64=migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();assert_eq!(version,5);
         let mut settings=migrated.settings().unwrap();settings.color_scheme="amber".into();migrated.save_settings(&settings).unwrap();drop(migrated);
         let reopened=Store::new(&path).unwrap();assert_eq!(reopened.settings().unwrap().color_scheme,"amber");
-        reopened.db.lock().unwrap().pragma_update(None,"user_version",5).unwrap();drop(reopened);
+        reopened.db.lock().unwrap().pragma_update(None,"user_version",6).unwrap();drop(reopened);
         assert!(Store::new(&path).err().unwrap().contains("更新版本"));
-        let db=Connection::open(path).unwrap();assert_eq!(db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),5);
+        let db=Connection::open(path).unwrap();assert_eq!(db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),6);
     }
     #[test] fn migration_failure_rolls_back_data_and_version() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();

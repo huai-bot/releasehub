@@ -2,7 +2,7 @@
 #[cfg(test)]
 #[path = "update_tests.rs"]
 mod tests;
-use super::{install, models::*, Core};
+use super::{install, installation_checks::{Identity, Probe}, models::*, windows_probe::{self, InstallerProcess, LaunchError}, Core};
 use serde_json::{json, Value};
 use std::{collections::{BTreeSet, HashSet}, fs, io::Write, path::{Component, Path, PathBuf}, sync::Arc};
 
@@ -294,13 +294,35 @@ impl Core {
     fn remove_snapshot(&self,b:&BackupRecord)->Result<(),String> {
         let path=self.validate_backup(b)?;clear_tree(&path)?;safe_existing(&path,true)?;fs::remove_dir(path).map_err(io_error)
     }
-    fn perform_install(&self,input:&InstallInput)->Result<Value,String> {
-        self.perform_install_with(input,install::launch_installer)
+    fn perform_install(self: &Arc<Self>,input:&InstallInput)->Result<Value,String> {
+        self.perform_install_checked(input,windows_probe::launch,windows_probe::probe,|id,project,process|self.watch_installer(id,project,process))
     }
+    #[cfg(test)]
     fn perform_install_with(&self,input:&InstallInput,launch:impl FnOnce(&Path)->Result<(),String>)->Result<Value,String> {
-        let preview=self.preview_install(&input.id,Some(&input.target_path))?;
+        self.perform_install_checked(input,|path|launch(path).map(|_|None).map_err(|message|LaunchError{cancelled:false,message}),
+            |_,_|Probe::default(),|_,_,_|{})
+    }
+    fn perform_install_checked(&self,input:&InstallInput,launch:impl FnOnce(&Path)->Result<Option<InstallerProcess>,LaunchError>,
+        probe:impl FnOnce(&Project,&[Identity])->Probe, watch:impl FnOnce(String,String,InstallerProcess))->Result<Value,String> {
         let d=self.store.download(&input.id)?;let p=self.store.project(&d.project_id)?;
+        require_software(&p)?;
+        if !d.installable || !matches!(d.status.as_str(),"completed"|"installed") { return Err("请先完成支持安装的软件包下载".into()); }
+        if self.store.journals()?.iter().any(|j|j.backup.project_id==p.id) { return Err("此项目还有待恢复的安装，请先处理备份".into()); }
         if input.previous_version.as_ref().is_some_and(|expected|expected!=&p.installed_version) { return Err("已安装版本已改变，请重新预览并确认".into()); }
+        if d.kind=="installer" && !p.backup_enabled {
+            let source=install::verify_download(&self.data_dir,&d)?;
+            let id=self.launch_checked_installer(&p,&d,&source,None,probe,launch,watch,&mut false)?;
+            let message="已打开官方安装向导，完成后将核实版本。此项目未开启备份。";
+            return Ok(json!({"kind":"installer","message":message,"path":source.to_string_lossy(),"installed":false,"installationId":id}));
+        }
+        let target_request=if d.kind=="installer" && input.target_path.trim().is_empty() {
+            if p.installed_source.as_deref()==Some("managed") {
+                return Err("此项目已开启备份；请先为旧受管软件选择新的空目录，再启动安装向导。".into());
+            }
+            p.installed_path.as_deref().filter(|path| !path.trim().is_empty())
+                .ok_or("此项目已开启备份；请先明确选择软件目录，再启动安装向导。")?
+        } else {input.target_path.as_str()};
+        let preview=self.preview_install(&input.id,Some(target_request))?;
         let source=install::verify_download(&self.data_dir,&d)?; let target=PathBuf::from(&preview.target_path);
         let root=if preview.archive_roots.is_empty() { None } else {
             let root=input.archive_root.as_deref().ok_or("请明确选择 ZIP 中的软件根目录")?;
@@ -359,9 +381,13 @@ impl Core {
         let transitioned=self.store.mutate("downloads",&d.id,|record:&mut DownloadRecord|{record.status="installing".into();record.error=None;record.updated_at=now();Ok(())})?;
         self.download_event(&transitioned);
         let old=self.store.backup(&p.id)?;
+        let mut wizard_open=false;
+        let mut installation_id=None;
         let installed=(|| {
-            if d.kind=="installer" { launch(&source)?; }
-            else {
+            if d.kind=="installer" {
+                installation_id=Some(self.launch_checked_installer(&p,&d,&source,Some(&j),probe,launch,watch,&mut wizard_open)?);
+                return Ok::<_,String>(());
+            } else {
                 if preview.legacy_managed {
                     let original=if j.snapshot_enabled { folder.join("original") }
                         else { PathBuf::from(p.installed_path.as_deref().ok_or("旧目录缺失")?) };
@@ -383,6 +409,7 @@ impl Core {
             self.store.finish_install(&project,&record,&j)?;self.download_event(&record);Ok::<_,String>(())
         })();
         if let Err(error)=installed {
+            if wizard_open { return Err(format!("安装向导已经打开，但本机记录暂未保存，请先完成向导，再重新打开追新：{error}")); }
             if !j.snapshot_enabled {
                 let message=format!("安装失败，未开启备份，目录可能已部分更新。请检查文件后重试：{error}");
                 self.finish_unbacked_interruption(&j,&message)?;
@@ -400,13 +427,32 @@ impl Core {
         }
         let _=clear_tree(&stage);let _=fs::remove_dir(&stage);
         if d.kind=="installer" {
-            let message=if backup_enabled { "已备份软件文件并打开官方安装向导。完成后请记录版本；文件备份不包含注册表和系统安装状态。" }
-                else { "已打开官方安装向导。完成后请记录版本；此项目未开启备份。" };
-            Ok(json!({"kind":"installer","message":message,"path":source.to_string_lossy(),"installed":false}))
+            let message="已备份软件文件并打开官方安装向导。完成后将核实版本；文件备份不包含注册表和系统安装状态。";
+            Ok(json!({"kind":"installer","message":message,"path":source.to_string_lossy(),"installed":false,"installationId":installation_id}))
         } else {
             let message=if backup_enabled { "已备份并更新原目录。" } else { "已更新原目录。此项目未开启备份。" };
             Ok(json!({"kind":"portable","message":message,"path":preview.target_path,"installed":true}))
         }
+    }
+    fn launch_checked_installer(&self,p:&Project,d:&DownloadRecord,source:&Path,journal:Option<&InstallJournal>,
+        probe:impl FnOnce(&Project,&[Identity])->Probe,launch:impl FnOnce(&Path)->Result<Option<InstallerProcess>,LaunchError>,
+        watch:impl FnOnce(String,String,InstallerProcess),wizard_open:&mut bool)->Result<String,String> {
+        let ready=journal.map(|j|{let mut j=j.clone();j.backup.phase="ready".into();j});
+        if let Some(j)=&ready { self.write_manifest(j)?; }
+        let binding=self.store.install_binding(&p.id)?;
+        let baseline=probe(p,binding.as_ref().map_or(&[][..],|b|b.identities.as_slice()));
+        let task=self.prepare_installation_check(p,d,baseline);
+        self.store.begin_installation_check(&task,journal)?;
+        let id=task.check.id;
+        let process=match launch(source) {
+            Ok(process)=>process,
+            Err(error)=>{self.store.fail_installer_launch(&id,error.cancelled,&error.message)?;return Err(error.message);}
+        };
+        *wizard_open=true;
+        let download=self.store.finish_installer_launch(&id,ready.as_ref(),process.is_some(),false)?;
+        if ready.is_some() { self.download_event(&download); }
+        if let Some(process)=process { watch(id.clone(),p.id.clone(),process); }
+        Ok(id)
     }
     // Delete only this installation's internal staging directory, never its target or old data root.
     fn cleanup_unbacked_stage(&self,j:&InstallJournal) {
@@ -487,6 +533,19 @@ impl Core {
                 self.store.remove_journal(&journal.backup.project_id)?;
                 if journal.snapshot_enabled {let _=self.remove_snapshot(&journal.backup);}
                 else {self.cleanup_unbacked_stage(&journal);}
+            } else if journal.backup.kind=="installer" && journal.backup.phase=="installing" && journal.snapshot_enabled
+                && self.store.active_installation_records(Some(&journal.backup.project_id))?.iter().any(|t|t.check.download_id==journal.backup.download_id && !t.launched) {
+                // The external wizard may still be running. Do not restore files beneath it.
+                if let Some(task)=self.store.active_installation_records(Some(&journal.backup.project_id))?.into_iter().find(|t|t.check.download_id==journal.backup.download_id && !t.launched) {
+                    let old=self.store.backup(&journal.backup.project_id)?;
+                    journal.backup.phase="ready".into();
+                    self.store.finish_installer_launch(&task.check.id,Some(&journal),false,true)?;
+                    if let Some(old)=old.filter(|old|old.path!=journal.backup.path) { let _=self.remove_snapshot(&old); }
+                    let stage=Path::new(&journal.stage_path);
+                    if Path::new(&journal.backup.path).join("stage")==stage && self.validate_backup(&journal.backup).is_ok() && safe_existing(stage,true).is_ok() {
+                        let _=clear_tree(stage);let _=fs::remove_dir(stage);
+                    }
+                }
             } else if journal.snapshot_enabled {
                 if self.restore_journal(&mut journal).is_ok() {
                     if self.store.backup(&journal.backup.project_id)?.is_none_or(|b|b.path!=journal.backup.path){let _=self.remove_snapshot(&journal.backup);}

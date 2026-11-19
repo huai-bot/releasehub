@@ -7,7 +7,7 @@ import ProxySettings from '../src/components/ProxySettings.svelte';
 import ExternalDownloadSettings from '../src/components/ExternalDownloadSettings.svelte';
 import { createPreviewSnapshot } from '../src/lib/preview';
 import { defaultNavigationOrder, moveNavigation, normalizeNavigation } from '../src/lib/navigation';
-import type { ProxyTestResult, Settings } from '../src/lib/types';
+import type { InstallationCheck, ProxyTestResult, Settings } from '../src/lib/types';
 
 const mocks = vi.hoisted(() => ({
   dispatch: vi.fn(), minimized: vi.fn(async () => {}), maximized: vi.fn(async () => {}), closed: vi.fn(async () => {}),
@@ -481,5 +481,73 @@ describe('network proxy preferences', () => {
     expect(target.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe('draft-value');
     await input('#proxy-url', 'http://127.0.0.1:7890'); submit(); await settle();
     expect(save).toHaveBeenCalledTimes(2); expect(target.querySelector('[role="alert"]')).toBeNull();
+  });
+});
+
+describe('desktop installation verification integration', () => {
+  function fixture(status?: InstallationCheck['status']) {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'downloads';
+    snapshot.downloads = [{ ...snapshot.downloads[0], kind: 'installer', status: 'completed', tag: 'v6.5.0' }];
+    const record = snapshot.downloads[0];
+    const check: InstallationCheck = { id: 'fixture-attempt', projectId: record.projectId, downloadId: record.id, expectedVersion: record.tag, previousVersion: '6.4.0', status: status ?? 'waiting', startedAt: '2026-11-19T12:00:00Z', checkedAt: null, detectedVersion: null, source: null, message: '等待实际版本验证' };
+    snapshot.installations = status ? [check] : [];
+    return { snapshot, check, record };
+  }
+  it('opens an EXE/MSI immediately without portable-directory preview or confirmation', async () => {
+    const { snapshot, record } = fixture();
+    mocks.dispatch.mockImplementation(async (action: string) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'install_download') return { installed: false, installationId: 'fixture-attempt', message: '安装器已打开' };
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    button('打开安装程序').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('install_download', { id: record.id, targetPath: '', confirmed: true });
+    expect(mocks.dispatch.mock.calls.some(([action]) => action === 'preview_install')).toBe(false);
+    expect(target.querySelector('dialog')).toBeNull();
+  });
+  it('requests only a necessary directory when backups are enabled without an associated path', async () => {
+    const { snapshot } = fixture();
+    snapshot.projects[0].backupEnabled = true; snapshot.projects[0].installedPath = null;
+    mocks.dispatch.mockImplementation(async (action: string) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'preview_install') throw new Error('未记录安装路径，请明确选择软件目录');
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    button('打开安装程序').click(); await settle();
+    expect(target.querySelector('dialog[open]')).not.toBeNull();
+    expect(target.querySelector('dialog input[type="checkbox"]')).toBeNull();
+    expect(mocks.dispatch.mock.calls.some(([action]) => action === 'install_download')).toBe(false);
+  });
+  it('checks only the selected software on explicit detection and does not invent success', async () => {
+    const { snapshot, check } = fixture('unconfirmed');
+    mocks.dispatch.mockImplementation(async (action: string) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'verify_installations') return [check];
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    button('立即检测').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('verify_installations', { projectId: check.projectId });
+    expect(target.querySelector('.toasts')?.textContent ?? target.textContent).toContain('保留原记录');
+    expect(target.textContent).not.toContain('已验证安装版本并同步记录');
+  });
+  it('records the downloaded task target in one click without requesting the latest release', async () => {
+    const { snapshot, check } = fixture('unconfirmed');
+    mocks.dispatch.mockImplementation(async (action: string) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'confirm_installation') {
+        const project = snapshot.projects.find(item => item.id === check.projectId)!;
+        project.installedVersion = check.expectedVersion; snapshot.installations![0] = { ...check, status: 'manual', source: 'manual' };
+        return project;
+      }
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    button('标记已安装 v6.5.0').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('confirm_installation', { id: check.id });
+    expect(mocks.dispatch.mock.calls.some(([action]) => action === 'check_updates')).toBe(false);
+    expect(target.querySelector('dialog')).toBeNull(); expect(snapshot.installations![0].status).toBe('manual');
   });
 });

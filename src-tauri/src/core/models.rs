@@ -70,6 +70,41 @@ impl From<DownloadRecordWire> for DownloadRecord {
             sha256:d.sha256, verified:d.verified, error:d.error, created_at:d.created_at, updated_at:d.updated_at }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstallationStatus {
+    Waiting,
+    Detecting,
+    Verified,
+    Manual,
+    RebootRequired,
+    Unconfirmed,
+    Cancelled,
+    Failed,
+    Superseded,
+}
+impl InstallationStatus {
+    pub(super) fn can_check(self) -> bool {
+        matches!(self, Self::Waiting | Self::Detecting | Self::RebootRequired | Self::Unconfirmed)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallationCheck {
+    pub id: String,
+    pub project_id: String,
+    pub download_id: String,
+    pub expected_version: String,
+    pub previous_version: Option<String>,
+    pub status: InstallationStatus,
+    pub started_at: String,
+    pub checked_at: Option<String>,
+    pub detected_version: Option<String>,
+    pub source: Option<String>,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedVersion {

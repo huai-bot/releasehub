@@ -165,6 +165,23 @@ fn input(d:&DownloadRecord,target:&Path,root:&str,version:Option<&str>)->Install
         assert_eq!(core.store.project(&p.id).unwrap().installed_version.as_deref(),Some("v1"));assert_eq!(core.store.download(&d.id).unwrap().status,"completed");assert_eq!(core.get_backup(&p.id).unwrap().unwrap().phase,"ready");
     }
 }
+#[test]fn installer_with_backup_enabled_requires_a_directory_before_launch(){
+    let (_dir,core,mut p,target)=fixture();
+    let mut d=package(&core,&p,"v2",&[("unused",b"fixture")]);
+    let source=Path::new(d.path.as_deref().unwrap()).with_file_name("setup.msi");
+    let bytes=b"not a real installer";fs::write(&source,bytes).unwrap();
+    d.kind="installer".into();d.file_name="setup.msi".into();d.path=Some(source.to_string_lossy().into_owned());
+    d.total_bytes=bytes.len() as u64;d.received_bytes=d.total_bytes;d.sha256=Some(format!("{:x}",Sha256::digest(bytes)));core.store.put_download(&d).unwrap();
+    let mut request=input(&d,&target,".",Some("v1"));request.target_path.clear();
+    for (path, origin, message) in [(None, "manual", "明确选择软件目录"), (p.installed_path.clone(), "managed", "选择新的空目录")] {
+        p.installed_path=path;p.installed_source=Some(origin.into());core.store.put_project(&p).unwrap();
+        let error=core.perform_install_with(&request,|_|panic!("must not launch without preparing the enabled backup")).unwrap_err();
+        assert!(error.contains(message),"{error}");
+        assert!(core.store.installations(Some(&p.id)).unwrap().is_empty());
+        assert!(core.store.journals().unwrap().is_empty());
+        assert_eq!(core.store.download(&d.id).unwrap().status,"completed");
+    }
+}
 #[test]fn failed_wizard_launch_restores_files_and_retains_previous_snapshot(){
     let (_dir,core,p,target)=fixture();let mut d=package(&core,&p,"v2",&[("app.exe",b"v2")]);core.perform_install(&input(&d,&target,".",Some("v1"))).unwrap();let old=core.get_backup(&p.id).unwrap().unwrap();
     let folder=Path::new(d.path.as_deref().unwrap()).parent().unwrap();let source=folder.join("setup.exe");fs::write(&source,b"fixture").unwrap();d.kind="installer".into();d.file_name="setup.exe".into();d.path=Some(source.to_string_lossy().into_owned());d.total_bytes=7;d.sha256=Some(format!("{:x}",Sha256::digest(b"fixture")));d.status="completed".into();core.store.put_download(&d).unwrap();

@@ -6,12 +6,14 @@ mod downloads;
 mod download_transfer;
 mod external_downloads;
 mod install;
+mod installation_checks;
+mod windows_probe;
 mod update;
 mod library;
 mod tasks;
 
 use models::*;
-pub use models::RepositoryNote;
+pub use models::{InstallationCheck, RepositoryNote};
 use crate::proxy::ProxyState;
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf, sync::{atomic::AtomicBool, Arc, Mutex}};
@@ -29,6 +31,7 @@ pub struct Core {
     pub(crate) download_queue: Mutex<()>,
     pub(crate) installing: Mutex<std::collections::HashSet<String>>,
     pub(crate) checks: tokio::sync::Mutex<()>,
+    installation_verification: tokio::sync::Mutex<()>,
     pub(crate) external_requests: tokio::sync::Mutex<()>,
     // Keep this last so the database and other fields close before the directory lock is released.
     _data_lock: std::fs::File,
@@ -63,9 +66,11 @@ impl Core {
         let core=Arc::new(Self { store, data_dir, portable, events,
             github: network::Github::new(proxy.clone())?, proxy, active_downloads: Mutex::new(HashMap::new()),
             download_queue: Mutex::new(()), installing: Mutex::new(std::collections::HashSet::new()),
-            checks: tokio::sync::Mutex::new(()), external_requests: tokio::sync::Mutex::new(()), _data_lock: data_lock });
+            checks: tokio::sync::Mutex::new(()), installation_verification: tokio::sync::Mutex::new(()),
+            external_requests: tokio::sync::Mutex::new(()), _data_lock: data_lock });
         core.repair_backup_paths()?;
         core.recover_installs()?;
+        core.store.recover_installation_checks()?;
         Ok(core)
     }
     pub fn set_github_token(&self, token: Option<String>) { self.github.set_token(token); }
@@ -85,7 +90,7 @@ impl Core {
             "snapshot" => {
                 let downloads=self.store.downloads()?;let mut projects=self.store.projects()?;
                 for p in &mut projects { selection::update_file_status(p,&downloads,&self.data_dir); }
-                Ok(json!({"projects": projects, "downloads": downloads,
+                Ok(json!({"projects": projects, "downloads": downloads, "installations": self.store.installations(None)?,
                     "buildTasks": self.store.tasks()?, "repositoryNotes": self.store.repository_notes()?, "settings": self.store.settings()?,
                     "runtime": {"appVersion": env!("CARGO_PKG_VERSION"), "dataDir": self.data_dir.to_string_lossy(),
                         "portable": self.portable, "githubTokenConfigured": self.github.token_configured(),
@@ -122,6 +127,8 @@ impl Core {
             "cancel_download" => { self.cancel_download(&text(&payload, "id", 128)?)?; Ok(Value::Null) }
             "preview_install" => output(self.preview_install(&text(&payload,"id",128)?,optional_text(&payload,"targetPath",4096)?.as_deref())?),
             "install_download" => self.install_confirmed(decode(payload)?).await,
+            "verify_installations" => output(self.verify_installations_for(optional_text(&payload,"projectId",128)?,true,None).await?),
+            "confirm_installation" => output(self.confirm_installation(&text(&payload,"id",128)?)?),
             "get_backup" => output(self.get_backup(&text(&payload,"projectId",128)?)?),
             "restore_backup" => {
                 if payload.get("confirmed").and_then(Value::as_bool)!=Some(true){return Err("请先确认恢复备份：当前软件文件将被备份完整替换".into());}

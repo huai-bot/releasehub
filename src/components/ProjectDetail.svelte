@@ -1,10 +1,11 @@
 <script lang="ts">
-  import type { AssetPreference, BackupRecord, Channel, ManagementMode, Project, ProjectChanges, RepositoryNote } from '../lib/types';
+  import type { AssetPreference, BackupRecord, Channel, InstallationCheck, ManagementMode, Project, ProjectChanges, RepositoryNote } from '../lib/types';
   import { assetKindLabel, canDownloadAsset, canInstallAsset, formatBytes, formatDate, getProjectStatus, isFilesProject, projectInitials, projectPresentation } from '../lib/ui';
   import Icon from './Icon.svelte';
+  import { canConfirmInstallation, canVerifyInstallation, installationLabel, installationSourceLabel, latestInstallation } from '../lib/installation-state';
   import ReleaseNotes from './ReleaseNotes.svelte';
-  let { project, note = null, busy, onclose, oncheck, ondownload, onupdate, onmark, onremove, onopen, onversions, ondiagnostic, preview = false, onrun, onexecutable, onrestore, ondeletebackup, onexternal, onnote, onSettings, initialTab = 'notes' }: {
-    project: Project; note?: RepositoryNote | null; busy: boolean; onclose: () => void; oncheck: (ids: string[]) => void;
+  let { project, note = null, installations = [], busy, onclose, oncheck, ondownload, onupdate, onmark, onremove, onopen, onversions, ondiagnostic, preview = false, onrun, onexecutable, onrestore, ondeletebackup, onexternal, onnote, onSettings, onVerify, onConfirmInstallation, initialTab = 'notes' }: {
+    project: Project; note?: RepositoryNote | null; installations?: InstallationCheck[]; busy: boolean; onclose: () => void; oncheck: (ids: string[]) => void;
     ondownload: (project: Project) => void; onexternal?: (project: Project) => void; onupdate: (id: string, changes: ProjectChanges) => void;
     onmark: (project: Project) => void;
     onremove: (project: Project) => void; onopen: (url: string) => void; onversions: (projectId: string) => void;
@@ -13,6 +14,7 @@
     onrestore: (backup: BackupRecord) => void; ondeletebackup: (backup: BackupRecord) => void;
     onnote?: (project: Project) => void;
     onSettings: (project: Project) => void;
+    onVerify?: (projectId: string) => void; onConfirmInstallation?: (id: string) => void;
   } = $props();
   const presentation = $derived(projectPresentation(project, note));
   let tab = $state<'notes' | 'assets'>('notes');
@@ -21,6 +23,7 @@
   let panel = $state<HTMLElement>();
   $effect(() => { project.id; if (panel) panel.scrollTop = 0; });
   const files = $derived(isFilesProject(project));
+  const installation = $derived(files ? null : latestInstallation(installations, 'projectId', project.id));
   const status = $derived(getProjectStatus(project));
   const chosenAsset = $derived(project.release?.assets.find((asset) => asset.id === project.selectedAssetId));
   const selectedAsset = $derived(chosenAsset && canDownloadAsset(chosenAsset) ? chosenAsset : undefined);
@@ -44,8 +47,18 @@
       </button>
     {/if}
   </div>
-  <div class="version-summary"><div><span>{files ? '管理方式' : '已记录版本'}</span><strong>{files ? '只保存文件' : project.installedVersion ?? '尚未记录'}</strong><small>{files ? '下载后查看位置与校验结果' : project.installedSource === 'managed' ? '由追新管理' : project.installedSource === 'manual' ? '手动确认' : '可手动记录或交给 AI 识别'}</small></div><Icon name="arrowRight" size={18} /><div><span>最新发行 <em class:preview-label={project.release?.prerelease}>{project.release?.prerelease ? '预览' : '正式'}</em></span><strong class="accent-text">{project.release?.tag ?? '暂无信息'}</strong><small>{formatDate(project.release?.publishedAt ?? null)}</small></div></div>
-  <div class="detail-primary-actions"><button class="button primary" disabled={busy || !selectedAsset} onclick={() => ondownload(project)}><Icon name="download" size={16} />下载已选文件</button><button class="button secondary" disabled={busy} aria-label={`检查 ${presentation.label} 更新`} onclick={() => oncheck([project.id])}><Icon name="refresh" size={16} /></button></div>
+  <div class="version-summary"><div><span>{files ? '管理方式' : '已记录版本'}</span><strong>{files ? '只保存文件' : project.installedVersion ?? '尚未记录'}</strong><small>{files ? '下载后查看位置与校验结果' : project.installedSource === 'managed' ? '由追新管理' : project.installedSource === 'installer' ? '已自动验证' : project.installedSource === 'manual' ? '手动确认' : '可手动记录或交给 AI 识别'}</small></div><Icon name="arrowRight" size={18} /><div><span>最新发行 <em class:preview-label={project.release?.prerelease}>{project.release?.prerelease ? '预览' : '正式'}</em></span><strong class="accent-text">{project.release?.tag ?? '暂无信息'}</strong><small>{formatDate(project.release?.publishedAt ?? null)}</small></div></div>
+  {#if installation}
+    <div class="installation-box">
+      <p role="status">{installationLabel(installation)}</p>
+      <details><summary>安装检测详情</summary>
+        <p>{installation.message}</p>
+        {#if installation.detectedVersion}<p>本机检测版本：{installation.detectedVersion} · {installationSourceLabel(installation.source)}</p>{/if}
+        {#if canConfirmInstallation(installation) && onConfirmInstallation}<button class="text-button" disabled={busy} onclick={() => onConfirmInstallation?.(installation.id)}>标记已安装 {installation.expectedVersion}</button>{/if}
+      </details>
+    </div>
+  {/if}
+  <div class="detail-primary-actions">{#if installation && canVerifyInstallation(installation) && onVerify}<button class="button primary" disabled={busy} onclick={() => onVerify?.(project.id)}><Icon name="refresh" size={16} />立即检测</button>{:else}<button class="button primary" disabled={busy || !selectedAsset} onclick={() => ondownload(project)}><Icon name="download" size={16} />下载已选文件</button>{/if}{#if !installation || !canVerifyInstallation(installation) || !onVerify}<button class="button secondary" disabled={busy} aria-label={`检查 ${presentation.label} 更新`} onclick={() => oncheck([project.id])}><Icon name="refresh" size={16} /></button>{/if}</div>
   {#if !files}<div class="managed-entry"><button class="button secondary small" disabled={busy} onclick={() => onrun(project)}><Icon name="play" size={15} />{project.executablePath ? '打开软件' : '选择启动程序'}</button><button class="text-button" disabled={busy} onclick={() => onmark(project)}>修改本机版本</button></div>{/if}
   {#if project.error}<div class="detail-error" role="alert"><Icon name="alert" size={16} /><span>{project.error}</span></div>{/if}
   {#if project.release && !selectedAsset}<button class="asset-needed" onclick={() => tab = 'assets'}><Icon name="info" size={16} /><span>选择发行文件</span><Icon name="chevronRight" size={14} /></button>{/if}
@@ -74,4 +87,9 @@
 <style>
   .managed-entry { display: flex; flex-direction: column; gap: 6px; margin: 0 23px 14px; }
   .detail-footer { padding: 14px 23px; border-top: 1px solid var(--border); text-align: center; }
+  .installation-box { margin: 0 23px 14px; font-size: 12px; color: var(--muted); }
+  .installation-box summary { cursor: pointer; padding: 6px 0; }
+  .installation-box details > p { line-height: 1.6; overflow-wrap: anywhere; }
+  .installation-box button { margin-top: 6px; }
+  .installation-box p { margin: 2px 0; }
 </style>

@@ -52,7 +52,7 @@ export interface Project {
   installedVersion: string | null;
   installedPath: string | null;
   executablePath?: string | null;
-  installedSource: 'manual' | 'managed' | null;
+  installedSource: 'manual' | 'managed' | 'installer' | null;
   release: Release | null;
   selectedAssetId: number | null;
   status: ProjectStatus;
@@ -177,6 +177,7 @@ export interface RuntimeInfo {
 export interface Snapshot {
   projects: Project[];
   downloads: DownloadRecord[];
+  installations?: InstallationCheck[];
   buildTasks: BuildTask[];
   repositoryNotes: RepositoryNote[];
   settings: Settings;
@@ -205,6 +206,7 @@ export interface ProjectChanges {
 }
 
 export interface InstallResult {
+  installationId?: string;
   kind: 'installer' | 'portable';
   message: string;
   path: string;
@@ -233,7 +235,7 @@ export interface BackupRecord {
   projectId: string;
   downloadId: string;
   version: string | null;
-  installedSource: 'manual' | 'managed' | null;
+  installedSource: 'manual' | 'managed' | 'installer' | null;
   targetPath: string;
   path: string;
   createdAt: string;
@@ -401,3 +403,17 @@ export interface GithubCacheEntry<T = unknown> {
 }
 export interface GithubCacheStats { bytes: number; entries: number }
 export type GithubCacheOperation = 'github_repositories' | 'github_repository' | 'github_activity' | 'github_lists' | 'github_list_repositories' | 'github_repository_lists';
+export type InstallationStatus = 'waiting' | 'detecting' | 'verified' | 'manual' | 'rebootRequired' | 'unconfirmed' | 'cancelled' | 'failed' | 'superseded';
+export interface InstallationCheck {
+  id: string;
+  projectId: string;
+  downloadId: string;
+  expectedVersion: string;
+  previousVersion: string | null;
+  status: InstallationStatus;
+  startedAt: string;
+  checkedAt: string | null;
+  detectedVersion: string | null;
+  source: string | null;
+  message: string;
+}

@@ -1,7 +1,10 @@
 use super::{downloads, models::*, Core};
+#[cfg(test)]
 use serde_json::{json,Value};
 use sha2::{Digest,Sha256};
-use std::{fs,io::{Read,Write},path::{Component,Path,PathBuf},sync::Arc};
+use std::{fs,io::{Read,Write},path::{Component,Path,PathBuf}};
+#[cfg(test)]
+use std::sync::Arc;
 
 const MAX_ENTRIES:usize=10000;
 const MAX_EXPANDED:u64=8*1024*1024*1024;
@@ -117,25 +120,6 @@ pub(super) fn extract_zip(source:&Path,stage:&Path)->Result<(),String>{
     }
     Ok(())
 }
-#[cfg(windows)]
-pub(super) fn launch_installer(path:&Path)->Result<(),String>{
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name="shell32")]
-    extern "system" {
-        fn ShellExecuteW(window:*mut std::ffi::c_void,operation:*const u16,file:*const u16,
-            parameters:*const u16,directory:*const u16,show:i32)->isize;
-    }
-    let extension=path.extension().and_then(|v|v.to_str()).unwrap_or("").to_ascii_lowercase();
-    if !["exe","msi"].contains(&extension.as_str()){return Err("仅支持 EXE/MSI 安装器".into());}
-    let file:Vec<u16>=path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let verb:Vec<u16>="open".encode_utf16().chain(Some(0)).collect();
-    // Native ShellExecute opens exactly the verified local installer with no arguments or scripts.
-    let result=unsafe{ShellExecuteW(std::ptr::null_mut(),verb.as_ptr(),file.as_ptr(),
-        std::ptr::null(),std::ptr::null(),1)};
-    if result<=32{return Err("安装器未启动或用户取消了权限确认，请手动打开下载文件".into());}Ok(())
-}
-#[cfg(not(windows))]
-pub(super) fn launch_installer(_: &Path)->Result<(),String>{Err("安装器只能在 Windows 上启动".into())}
 impl Core{
     pub(crate) fn list_managed_versions(&self,project_id:&str)->Result<Vec<ManagedVersion>,String>{
         let project=self.store.project(project_id)?;
@@ -159,7 +143,7 @@ impl Core{
             return Err("只能切换此项目已准备好的受管便携版本".into());
         }
         let path=managed_version_path(&self.data_dir,&record)?.ok_or("受管版本目录已丢失，无法切换")?;
-        let project=self.store.mutate("projects",project_id,|p:&mut Project|{
+        let project=self.store.mutate_project(project_id,true,|p:&mut Project|{
             if p.id!=project_id||p.installed_source.as_deref()!=Some("managed")
                 ||p.installed_path.as_deref().and_then(|s|Path::new(s).parent())!=path.parent(){
                 return Err("只能切换当前受管项目，手动记录的外部安装不会修改".into());
@@ -204,12 +188,7 @@ impl Core{
         require_software(&self.store.project(&p.id)?)?;
         if !d.installable||!self.store.download(&d.id)?.installable{return Err("此附件仅供下载，不能安装".into());}
         let source=verify_download(&self.data_dir,d)?;
-        if d.kind=="installer"{
-            launch_installer(&source)?;
-            let updated=self.store.mutate("downloads",&d.id,|d:&mut DownloadRecord|{d.status="completed".into();d.error=None;d.updated_at=now();Ok(())})?;
-            self.download_event(&updated);
-            return Ok(json!({"kind":"installer","message":"已打开官方安装器。完成后请手动记录已安装版本。","path":source.to_string_lossy(),"installed":false}));
-        }
+        if d.kind=="installer" { return Err("受管便携安装不启动安装向导".into()); }
         let standalone=p.owner.eq_ignore_ascii_case("Lake1059")&&p.repo.eq_ignore_ascii_case("FFmpegFreeUI")
             &&d.file_name.eq_ignore_ascii_case("FFmpegFreeUI.x64.exe");
         let archive=d.file_name.to_ascii_lowercase().ends_with(".zip");
