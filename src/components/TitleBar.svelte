@@ -31,9 +31,9 @@
 </script>
 
 <header class="topbar titlebar" data-tauri-drag-region>
-  <div class="breadcrumb" data-tauri-drag-region><span data-tauri-drag-region>工作空间</span><Icon name="chevronRight" size={13} /><strong data-tauri-drag-region>{title}</strong></div>
+  <div class="breadcrumb" data-tauri-drag-region><strong data-tauri-drag-region>{title}</strong></div>
   {#if searchable}
-    <div class="global-search"><Icon name="search" size={16} /><input bind:this={inputElement} bind:value={query} aria-label={title === '下载' ? '搜索下载文件' : '搜索资源库、作者或仓库'} aria-keyshortcuts="Control+K Meta+K" placeholder={title === '下载' ? '搜索下载文件…' : '搜索资源库、作者或仓库…'} oninput={onsearch} />{#if query}<button class="icon-button" aria-label="清空搜索" onclick={() => query = ''}><Icon name="close" size={13} /></button>{:else}<kbd>Ctrl K</kbd>{/if}</div>
+    <div class="global-search"><Icon name="search" size={16} /><input bind:this={inputElement} bind:value={query} aria-label={title === '下载' ? '搜索下载' : '搜索资源库'} aria-keyshortcuts="Control+K Meta+K" placeholder={title === '下载' ? '搜索下载…' : '搜索资源库…'} oninput={onsearch} />{#if query}<button class="icon-button" aria-label="清空搜索" onclick={() => query = ''}><Icon name="close" size={13} /></button>{:else}<kbd>Ctrl K</kbd>{/if}</div>
     <button class="icon-button topbar-refresh" disabled={busy || refreshing} aria-label="刷新本机状态" title="刷新本机状态" onclick={onrefresh}><Icon name="refresh" class={refreshing ? 'spinning' : ''} size={17} /></button>
   {/if}
   <div class="window-controls" aria-label="窗口操作">
@@ -53,5 +53,5 @@
   .window-controls .window-close:hover:not(:disabled) { background: #c42b1c; color: #fff; }
   .window-controls button:focus-visible { outline-offset: -4px; }
   .window-controls button:disabled { opacity: .55; cursor: default; }
-  @media (max-width: 1130px) { .titlebar { gap: 8px; padding-left: 18px; } .global-search { width: 215px; } .breadcrumb > span, .breadcrumb :global(> svg) { display: none; } .breadcrumb { min-width: 56px; } .window-controls button { width: 38px; } }
+  @media (max-width: 1130px) { .titlebar { gap: 8px; padding-left: 18px; } .global-search { width: 215px; } .breadcrumb { min-width: 56px; } .window-controls button { width: 38px; } }
 </style>

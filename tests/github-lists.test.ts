@@ -178,7 +178,7 @@ describe('GitHub Lists, loaded Stars and local notes', () => {
   it('saves notes without a subscription and shows original identity in the row and detail', async () => {
     show(); await settle(); await click('编辑 demo/alpha 本地备注');
     await input('dialog input[data-initial-focus]', '快捷启动');
-    await input('dialog input[placeholder="记录用途或下次查看的线索"]', '工具箱');
+    await input('dialog input[placeholder="用途或线索"]', '工具箱');
     await submit('dialog form');
     expect(dispatchMock).toHaveBeenCalledWith('save_repository_note', { repository: 'demo/alpha', name: '快捷启动', description: '工具箱' });
     expect(onadd).not.toHaveBeenCalled();
@@ -188,7 +188,7 @@ describe('GitHub Lists, loaded Stars and local notes', () => {
     expect(target.querySelector('.github-detail h2')?.textContent).toBe('快捷启动');
     await click('编辑本地备注');
     await input('dialog input[data-initial-focus]', '');
-    await input('dialog input[placeholder="记录用途或下次查看的线索"]', '');
+    await input('dialog input[placeholder="用途或线索"]', '');
     await submit('dialog form');
     expect(target.querySelector('.github-detail h2')?.textContent).toBe('demo/alpha');
   });

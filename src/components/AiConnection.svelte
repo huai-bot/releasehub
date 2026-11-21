@@ -63,17 +63,10 @@
 </script>
 
 <section class="surface settings-section ai-connection" aria-labelledby="ai-connection-title">
-  <div class="settings-heading"><Icon name="agent" size={19} /><div><h2 id="ai-connection-title">连接你的 Agent 平台</h2><p>通过 MCP 或命令行，把软件资料交给你常用的 AI。</p></div><span class={`status-badge ${runtime.agent.enabled ? 'success' : 'neutral'}`}>{runtime.agent.enabled ? '连接已开启' : settings.agentEnabled ? '连接未启动' : '尚未开启'}</span></div>
-  <div class="setting-row"><div><strong>开启软件资料连接</strong><p>使用期间保持追新打开，凭据由本机连接程序自动获取。</p></div><Toggle checked={settings.agentEnabled} label="开启软件资料连接" disabled={busy || preview} onchange={() => onsave({ agentEnabled: !settings.agentEnabled })} /></div>
+  <div class="settings-heading"><h2 id="ai-connection-title">本机 AI 连接</h2><span class={`status-badge ${runtime.agent.enabled ? 'success' : 'neutral'}`}>{runtime.agent.enabled ? '连接已开启' : settings.agentEnabled ? '连接未启动' : '尚未开启'}</span></div>
+  <div class="setting-row"><div><strong>开启软件资料连接</strong><p>只读 · 仅本机 {runtime.agent.address ?? `127.0.0.1:${settings.agentPort}`} · 提供版本、发行包与诊断，不含执行或安装</p></div><Toggle checked={settings.agentEnabled} label="开启软件资料连接" disabled={busy || preview} onchange={() => onsave({ agentEnabled: !settings.agentEnabled })} /></div>
   {#if runtime.agent.error}<p class="field-error" role="alert">{runtime.agent.error}</p>{/if}
-  <dl class="capability-list">
-    <div><dt>版本与发行包</dt><dd>软件列表、版本、安装位置和发行文件</dd></div>
-    <div><dt>源码与诊断</dt><dd>固定源码提交、下载错误和基础环境</dd></div>
-  </dl>
-  <p class="handoff-note">追新提供资料；编译、修复和安装由你的外部 Agent 平台完成。</p>
-  <ol class="connection-steps"><li>开启连接，选择平台格式并复制配置，保留平台已有的连接。</li><li>在同一台电脑的客户端添加并重新载入连接，然后让 Agent 读取软件列表。</li></ol>
-  <p class="field-hint">支持能启动本机 stdio 程序的 MCP 客户端；纯云端连接无法直接访问这台电脑。</p>
-  {#if preview}<div class="preview-connection"><span class="field-hint">当前为界面预览，可查看虚拟路径示例。</span><button class="button secondary small" disabled={loading} onclick={() => { example = true; void loadIntegration(true); }}>查看配置示例</button></div>{/if}
+  {#if preview}<div class="preview-connection"><span class="field-hint">界面预览 · 虚拟路径示例</span><button class="button secondary small" disabled={loading} onclick={() => { example = true; void loadIntegration(true); }}>查看配置示例</button></div>{/if}
   {#if loading}<div class="config-loading" role="status">正在准备连接配置…<div class="skeleton-lines"><span></span><span></span></div></div>
   {:else if error}<div class="field-error" role="alert">{error}<button class="text-button" onclick={() => void loadIntegration(example)}>重新读取</button></div>
   {:else if integration}
@@ -84,22 +77,15 @@
       <p class="field-hint">{selectedClient.hint}</p>
     </div>
     {#if cliExample}
-      <details class="connection-detail"><summary>命令行查询</summary><p class="field-hint">在 PowerShell 粘贴下方命令。把 list 换成 schema 可看全部用法；去掉 --json 则显示易读文字。</p><div class="cli-command"><label for="agent-cli-command" class="field-hint">查询已保存的软件列表</label><textarea id="agent-cli-command" class="mono" readonly value={cliExample} rows={3} spellcheck="false"></textarea><button class="button secondary small" disabled={preview} onclick={() => oncopy(cliExample)}><Icon name="copy" size={15} />复制查询命令</button></div></details>
+      <details class="connection-detail"><summary>命令行查询</summary><div class="cli-command"><label for="agent-cli-command" class="field-hint">PowerShell · list / schema</label><textarea id="agent-cli-command" class="mono" readonly value={cliExample} rows={3} spellcheck="false"></textarea><button class="button secondary small" disabled={preview} onclick={() => oncopy(cliExample)}><Icon name="copy" size={15} />复制查询命令</button></div></details>
     {/if}
-    {#if integration.tools?.length}<details class="connection-detail"><summary>可用查询工具 · {integration.tools.length} 项</summary><ul class="tool-list">{#each integration.tools as tool}<li><code>{tool.name}</code><p>{tool.description}</p></li>{/each}</ul></details>{/if}
-  {:else if !runtime.agent.enabled}<p class="closed-hint"><Icon name="disconnected" size={16} />开启后会显示这台电脑的配置和查询命令。</p>{/if}
-  <details class="connection-advanced"><summary>高级设置 · 本机端口</summary><form class="setting-row last" onsubmit={savePort}><div><label for="ai-agent-port">连接端口</label><p>{runtime.agent.address ?? `127.0.0.1:${settings.agentPort}`} · 通常无需修改</p></div><div class="port-input"><input id="ai-agent-port" name="port" type="number" min="1024" max="65535" step="1" required value={settings.agentPort} aria-describedby={portError ? 'agent-port-error' : undefined} aria-invalid={portError ? 'true' : undefined} disabled={busy || preview} /><button class="button secondary small" type="submit" disabled={busy || preview}>应用</button></div></form>{#if portError}<p id="agent-port-error" class="field-error" role="alert">{portError}</p>{/if}{#if integration}<dl class="launch-details"><dt>启动程序</dt><dd><code>{integration.command}</code></dd><dt>启动参数</dt><dd><code>{JSON.stringify(integration.args)}</code></dd></dl>{/if}</details>
+    {#if integration.tools?.length}<details class="connection-detail"><summary>可用查询工具 · {integration.tools.length}</summary><ul class="tool-list">{#each integration.tools as tool}<li><code>{tool.name}</code><p>{tool.description}</p></li>{/each}</ul></details>{/if}
+  {/if}
+  <details class="connection-advanced"><summary>本机端口</summary><form class="setting-row last" onsubmit={savePort}><label for="ai-agent-port">连接端口</label><div class="port-input"><input id="ai-agent-port" name="port" type="number" min="1024" max="65535" step="1" required value={settings.agentPort} aria-describedby={portError ? 'agent-port-error' : undefined} aria-invalid={portError ? 'true' : undefined} disabled={busy || preview} /><button class="button secondary small" type="submit" disabled={busy || preview}>应用</button></div></form>{#if portError}<p id="agent-port-error" class="field-error" role="alert">{portError}</p>{/if}{#if integration}<dl class="launch-details"><dt>启动程序</dt><dd><code>{integration.command}</code></dd><dt>启动参数</dt><dd><code>{JSON.stringify(integration.args)}</code></dd></dl>{/if}</details>
 </section>
 
 <style>
   .ai-connection { min-width: 0; }
-  .capability-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; margin: 16px 0 8px; }
-  .capability-list dt { font-size: 12px; color: var(--heading); font-weight: 600; }
-  .capability-list dd { margin: 3px 0 0; font-size: 12px; color: var(--subtle); }
-  .handoff-note { font-size: 12px; color: var(--subtle); }
-  .connection-steps { margin: 16px 0 6px; padding-left: 20px; color: var(--subtle); font-size: 12px; line-height: 1.7; }
-  .connection-steps li { padding-left: 4px; margin: 4px 0; }
-  .connection-steps li::marker { color: var(--muted); font-variant-numeric: tabular-nums; }
   .preview-connection { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 11px 0; }
   .config-loading { color: var(--muted); font-size: 12px; margin: 18px 0; }
   .config-section { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 18px; }
@@ -109,13 +95,11 @@
   .config-section textarea, .cli-command textarea { width: 100%; font-size: 12px; line-height: 1.6; tab-size: 2; background: var(--surface-soft); }
   .config-section .field-hint { margin-top: 6px; }
   .field-error .text-button { margin-left: 12px; }
-  .closed-hint { display: flex; align-items: center; gap: 8px; padding: 13px 0; color: var(--muted); font-size: 12px; }
-  .connection-advanced { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 13px; }
+  .connection-advanced { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 13px; }
   summary { cursor: pointer; font-size: 12px; color: var(--subtle); padding: 3px 0; }
   summary:hover { color: var(--accent); }
   .connection-detail { margin-top: 14px; }
-  .connection-detail > .field-hint { margin: 8px 0; }
-  .cli-command { display: flex; flex-wrap: wrap; gap: 8px; }
+  .cli-command { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
   .cli-command label { width: 100%; }
   .tool-list { list-style: none; padding: 0; margin: 10px 0; }
   .tool-list li { padding: 8px 0; border-bottom: 1px solid var(--border); }

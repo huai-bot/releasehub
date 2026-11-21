@@ -19,7 +19,7 @@ try {
    await page.screenshot({ path: resolve(output, `${viewport.width}-${name}.png`) });
   };
   for (const theme of ['light', 'dark']) {
-   await nav('设置'); await page.getByRole('button', { name: theme === 'light' ? '浅色 明亮浅灰' : '深色 深色板岩', exact: true }).click();
+   await nav('设置'); await page.getByRole('button', { name: theme === 'light' ? '浅色' : '深色', exact: true }).click();
    await nav('首页'); await shot(`home-${theme}`);
    await nav('资源库'); await shot(`library-${theme}`);
    await page.locator('.project-card .card-identity').filter({ hasText: 'FFmpegFreeUI' }).press('Enter');

@@ -437,8 +437,8 @@
 <svelte:head><title>ReleaseHub 追新 · 发行资源工作空间</title><meta name="description" content="集中管理 GitHub 软件更新、Stars 分类、项目备注与首页动态。" /></svelte:head>
 
 {#if !snapshot}
-  <div class="startup-titlebar"><TitleBar title="ReleaseHub · 追新" searchable={false} onerror={reportError} /></div>
-  <main class="startup-shell"><div class="startup-brand"><BrandMark size={40} /><strong>ReleaseHub <span>追新</span></strong></div><section class="startup-card" aria-live="polite">{#if loading}<span class="startup-icon"><Icon name="loader" class="spinning" size={30} /></span><h1>正在打开你的工作空间</h1><p>读取资源库与本机设置，请稍候。</p><div class="skeleton-lines"><span></span><span></span><span></span></div>{:else}<span class="startup-icon"><Icon name="disconnected" size={29} /></span><h1>请在桌面程序中继续</h1><p class="startup-error">{startupError || '桌面服务未连接，请重新打开应用。'}</p><button class="button secondary" onclick={() => void initialize()}><Icon name="refresh" size={16} />重新连接桌面服务</button>{#if import.meta.env.DEV && !desktopAvailable()}<div class="preview-gate"><span class="status-badge warning">仅限开发环境</span><h2>只是想看看界面？</h2><p>使用示例资源与账号查看各页面。</p><button class="button primary" onclick={() => void enterPreview()}>进入界面预览<Icon name="arrowRight" size={16} /></button></div>{/if}{/if}</section><p class="startup-footer">来自 GitHub 的变化，在这里从容掌握。</p></main>
+  <div class="startup-titlebar"><TitleBar title="ReleaseHub" searchable={false} onerror={reportError} /></div>
+  <main class="startup-shell"><div class="startup-brand"><BrandMark size={40} /><strong>ReleaseHub</strong></div><section class="startup-card" aria-live="polite">{#if loading}<span class="startup-icon"><Icon name="loader" class="spinning" size={30} /></span><h1>正在打开工作空间</h1><div class="skeleton-lines"><span></span><span></span><span></span></div>{:else}<span class="startup-icon"><Icon name="disconnected" size={29} /></span><h1>请在桌面程序中继续</h1><p class="startup-error">{startupError || '桌面服务未连接，请重新打开应用。'}</p><button class="button secondary" onclick={() => void initialize()}><Icon name="refresh" size={16} />重新连接桌面服务</button>{#if import.meta.env.DEV && !desktopAvailable()}<div class="preview-gate"><span class="status-badge warning">开发环境 · 示例数据</span><button class="button primary" onclick={() => void enterPreview()}>进入界面预览<Icon name="arrowRight" size={16} /></button></div>{/if}{/if}</section></main>
 {:else}
   <div class="app-shell"><Sidebar {page} {snapshot} {preview} {busy} onnavigate={navigate} onadd={showAdd} ondata={() => void operate('open_data_directory', {}, { refresh: false })} onreorder={(navigationOrder: WorkspacePage[]) => saveSettings({ navigationOrder })} />
     <div class="workspace"><TitleBar title={pageLabels[page]} bind:query bind:inputElement={searchInput} {busy} {refreshing} onsearch={() => { if (!['library', 'updates', 'downloads'].includes(page)) page = 'library'; }} onrefresh={() => void refreshView()} onerror={reportError} />
@@ -460,24 +460,24 @@
 {/if}
 
 {#if modal?.kind === 'add'}
-  <Modal title="添加资源" description="订阅 GitHub 项目，管理软件更新或发行附件。" onclose={closeDialog}>
+  <Modal title="添加资源" onclose={closeDialog}>
     <form class="modal-form" onsubmit={submitAdd}>
       <label for="new-repository">GitHub 项目地址 <span class="required-mark">*</span></label>
-      <div class="input-leading"><Icon name="github" size={18} /><input id="new-repository" bind:value={addRepository} data-initial-focus placeholder="作者/仓库，或粘贴 GitHub 项目链接" required maxlength="500" spellcheck="false" /></div>
-      {#if addRepository}<p class={parsedRepository ? 'field-hint success-text' : 'field-hint'}>{parsedRepository ? `将订阅 ${parsedRepository}` : '例如 Lake1059/FFmpegFreeUI；仅支持 GitHub 项目地址'}</p>{/if}
-      <fieldset class="resource-mode"><legend>怎样管理这个项目？</legend>
-        <label class:chosen={addMode === 'software'}><input type="radio" name="management-mode" bind:group={addMode} value="software" /><span><strong>软件</strong><small>推荐 Windows 安装包，记录本机版本</small></span></label>
-        <label class:chosen={addMode === 'files'}><input type="radio" name="management-mode" bind:group={addMode} value="files" /><span><strong>文件</strong><small>下载文档、模型、模组等发行附件</small></span></label>
+      <div class="input-leading"><Icon name="github" size={18} /><input id="new-repository" bind:value={addRepository} data-initial-focus placeholder="owner/repo 或 GitHub 链接" required maxlength="500" spellcheck="false" /></div>
+      {#if addRepository}<p class={parsedRepository ? 'field-hint success-text' : 'field-hint'}>{parsedRepository ? `将订阅 ${parsedRepository}` : '格式：owner/repo 或 GitHub 链接'}</p>{/if}
+      <fieldset class="resource-mode"><legend>管理方式</legend>
+        <label class:chosen={addMode === 'software'}><input type="radio" name="management-mode" bind:group={addMode} value="software" /><span><strong>软件</strong><small>识别安装包并跟踪版本</small></span></label>
+        <label class:chosen={addMode === 'files'}><input type="radio" name="management-mode" bind:group={addMode} value="files" /><span><strong>文件</strong><small>仅下载发行附件</small></span></label>
       </fieldset>
-      <div class="form-columns"><label>订阅渠道<select bind:value={addChannel}><option value="stable">正式版 · 推荐</option><option value="preview">包含预览版</option></select></label>
+      <div class="form-columns"><label>订阅渠道<select bind:value={addChannel}><option value="stable">正式版</option><option value="preview">包含预览版</option></select></label>
         {#if addMode === 'software'}<label>安装包偏好<select bind:value={addPreference}><option value="auto">自动推荐</option><option value="portable">优先免安装包</option><option value="installer">优先安装程序</option></select></label>{/if}
       </div>
       {#if addMode === 'software'}
-        <button type="button" class="text-button advanced-toggle" aria-expanded={addAdvanced} onclick={() => addAdvanced = !addAdvanced}><Icon name="chevronDown" size={15} />{addAdvanced ? '收起本机版本记录' : '已经安装过？记录本机版本（可选）'}</button>
-        {#if addAdvanced}<div class="advanced-fields"><label>已安装版本<input bind:value={addVersion} placeholder="例如 v1.2.3，不确定就留空" maxlength="120" /></label><label>安装位置<div class="input-with-button"><input bind:value={addPath} placeholder="选择已安装软件的文件夹" maxlength="1000" /><button type="button" class="button secondary" disabled={busy} onclick={() => void pickPath('add')}>浏览</button></div></label><p class="field-hint">记录后可对比本机版本与最新发行版。</p></div>{/if}
-      {:else}<p class="field-hint">从 Releases 中逐个选择附件，单个文件最多 4GB。文件下载后不会自动运行或安装。</p>{/if}
+        <button type="button" class="text-button advanced-toggle" aria-expanded={addAdvanced} onclick={() => addAdvanced = !addAdvanced}><Icon name="chevronDown" size={15} />{addAdvanced ? '收起本机版本' : '记录已安装版本'}</button>
+        {#if addAdvanced}<div class="advanced-fields"><label>已安装版本<input bind:value={addVersion} placeholder="例如 v1.2.3" maxlength="120" /></label><label>安装位置<div class="input-with-button"><input bind:value={addPath} placeholder="选择软件目录" maxlength="1000" /><button type="button" class="button secondary" disabled={busy} onclick={() => void pickPath('add')}>浏览</button></div></label></div>{/if}
+      {:else}<p class="field-hint">单文件 ≤ 4 GB，仅保存不自动安装。</p>{/if}
       {#if formError}<p class="field-error" role="alert">{formError}</p>{/if}
-      <div class="modal-footer"><span class="field-hint"><Icon name="github" size={14} />公开项目无需登录</span><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy || !parsedRepository}><Icon name={busy ? 'loader' : 'plus'} class={busy ? 'spinning' : ''} size={16} />{busy ? '正在添加' : '添加资源'}</button></div>
+      <div class="modal-footer"><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy || !parsedRepository}><Icon name={busy ? 'loader' : 'plus'} class={busy ? 'spinning' : ''} size={16} />{busy ? '正在添加' : '添加资源'}</button></div>
     </form>
   </Modal>
 {:else if modal?.kind === 'install'}
@@ -491,9 +491,9 @@
 {:else if modal?.kind === 'mark'}
   <Modal title="记录已安装版本" description={projectLabel(modal.project)} onclose={closeDialog}>
     <form class="modal-form" onsubmit={submitMark}>
-      <label for="mark-version">实际已安装版本<input id="mark-version" bind:value={markVersion} required maxlength="120" placeholder="例如 v1.2.3" data-initial-focus /></label>
+      <label for="mark-version">已安装版本<input id="mark-version" bind:value={markVersion} required maxlength="120" placeholder="例如 v1.2.3" data-initial-focus /></label>
       <details class="advanced-fields"><summary>安装位置与启动程序</summary>
-        <label for="mark-executable">启动程序 <span class="optional">可选</span><div class="input-with-button"><input id="mark-executable" value={markExecutable} readonly placeholder="选择软件的 EXE 文件" /><button type="button" class="button secondary" disabled={busy} onclick={() => void pickMarkExecutable()}>选择 EXE</button></div></label>
+        <label for="mark-executable">启动程序<div class="input-with-button"><input id="mark-executable" value={markExecutable} readonly placeholder="选择 EXE 文件" /><button type="button" class="button secondary" disabled={busy} onclick={() => void pickMarkExecutable()}>选择 EXE</button></div></label>
         <label for="mark-path">安装位置<div class="input-with-button"><input id="mark-path" bind:value={markPath} placeholder="选择软件目录" maxlength="4096" oninput={() => { markExecutable = ''; }} /><button type="button" class="button secondary" disabled={busy} onclick={() => void pickPath('mark')}>浏览</button></div></label>
       </details>
       {#if formError}<p class="field-error" role="alert">{formError}</p>{/if}
@@ -501,17 +501,16 @@
     </form>
   </Modal>
 {:else if modal?.kind === 'note'}
-  <Modal title="编辑备注" description="标题和描述都可留空。有备注时只显示备注，不显示原名称。" onclose={closeDialog}>
+  <Modal title="编辑备注" onclose={closeDialog}>
     <form class="modal-form" onsubmit={submitNote}>
-      <label for="note-name">备注标题 <span class="optional">可选</span><input id="note-name" bind:value={noteName} maxlength="80" placeholder="写一个好认的名字" data-initial-focus /></label>
-      <label for="note-description">备注描述 <span class="optional">可选</span><input id="note-description" bind:value={noteDescription} maxlength="240" placeholder="用途或一句简短说明" /></label>
-      <p class="field-hint">只填描述也可以；描述会用较小字号显示。两项都留空并保存，即可恢复原名称。</p>
+      <label for="note-name">备注标题<input id="note-name" bind:value={noteName} maxlength="80" placeholder="留空显示原名称" data-initial-focus /></label>
+      <label for="note-description">备注描述<input id="note-description" bind:value={noteDescription} maxlength="240" placeholder="用途或简短说明" /></label>
       {#if formError}<p class="field-error" role="alert">{formError}</p>{/if}
       <div class="modal-footer"><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy}>保存备注</button></div>
     </form>
   </Modal>
 {:else if modal?.kind === 'import'}
-  <Modal title="粘贴订阅清单" description="导入订阅、备注和偏好，跳过重复订阅。" wide onclose={closeDialog}><form class="modal-form" onsubmit={submitImport}><label>订阅清单<textarea bind:value={importContents} rows="10" class="mono" placeholder="在这里粘贴 ReleaseHub 导出的完整 JSON" required maxlength="1000000" spellcheck="false" data-initial-focus></textarea></label><p class="field-hint">支持 ReleaseHub 导出的 JSON 清单，最多 1 MB。</p>{#if formError}<p class="field-error" role="alert">{formError}</p>{/if}<div class="modal-footer"><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy || !importContents.trim()}><Icon name="import" size={16} />导入订阅</button></div></form></Modal>
+  <Modal title="粘贴订阅清单" wide onclose={closeDialog}><form class="modal-form" onsubmit={submitImport}><label>订阅清单<textarea bind:value={importContents} rows="10" class="mono" placeholder="粘贴 ReleaseHub 导出的 JSON（≤ 1 MB）" required maxlength="1000000" spellcheck="false" data-initial-focus></textarea></label>{#if formError}<p class="field-error" role="alert">{formError}</p>{/if}<div class="modal-footer"><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy || !importContents.trim()}><Icon name="import" size={16} />导入订阅</button></div></form></Modal>
 {/if}
 
 <div class="toast-stack" aria-live="polite" aria-atomic="false">{#each toasts as toast (toast.id)}<div class={`toast ${toast.tone}`} role={toast.tone === 'danger' ? 'alert' : 'status'}><Icon name={toast.tone === 'danger' ? 'alert' : toast.tone === 'warning' ? 'info' : toast.tone === 'success' ? 'success' : 'info'} size={19} /><p>{toast.message}</p><button class="icon-button" aria-label="关闭通知" onclick={() => toasts = toasts.filter((item) => item.id !== toast.id)}><Icon name="close" size={14} /></button></div>{/each}</div>

@@ -26,7 +26,7 @@ try {
   };
   for (const theme of ['light', 'dark']) {
    await page.goto(base); await page.getByRole('button', { name: '进入界面预览', exact: true }).click();
-   await nav('设置'); await page.getByRole('button', { name: theme === 'light' ? '浅色 明亮浅灰' : '深色 深色板岩', exact: true }).click();
+   await nav('设置'); await page.getByRole('button', { name: theme === 'light' ? '浅色' : '深色', exact: true }).click();
    await nav('资源库');
    const card = page.locator('.project-card').filter({ hasText: 'FFmpegFreeUI' });
    await card.locator('.card-identity').press('Enter'); await shot(`detail-${theme}`);

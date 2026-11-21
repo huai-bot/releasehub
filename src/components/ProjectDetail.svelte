@@ -30,7 +30,7 @@
 </script>
 
 <aside bind:this={panel} class="detail-panel" aria-label={`${presentation.label} 详情`}>
-  <div class="detail-topline"><span>{files ? '文件订阅详情' : '软件详情'}</span><button class="icon-button" aria-label="关闭资源详情" onclick={onclose}><Icon name="close" size={18} /></button></div>
+  <div class="detail-topline"><button class="icon-button" aria-label="关闭资源详情" onclick={onclose}><Icon name="close" size={18} /></button></div>
   <div class="detail-identity">
     <span class="app-avatar large" class:avatar-purple={project.repo.toLowerCase() === 'kazumi'} class:avatar-blue={project.repo.toLowerCase() === 'apkstart'}>{projectInitials(project)}</span>
     {#if presentation.title}
@@ -47,7 +47,7 @@
       </button>
     {/if}
   </div>
-  <div class="version-summary"><div><span>{files ? '管理方式' : '已记录版本'}</span><strong>{files ? '只保存文件' : project.installedVersion ?? '尚未记录'}</strong><small>{files ? '下载后查看位置与校验结果' : project.installedSource === 'managed' ? '由追新管理' : project.installedSource === 'installer' ? '已自动验证' : project.installedSource === 'manual' ? '手动确认' : '可手动记录或交给 AI 识别'}</small></div><Icon name="arrowRight" size={18} /><div><span>最新发行 <em class:preview-label={project.release?.prerelease}>{project.release?.prerelease ? '预览' : '正式'}</em></span><strong class="accent-text">{project.release?.tag ?? '暂无信息'}</strong><small>{formatDate(project.release?.publishedAt ?? null)}</small></div></div>
+  <div class="version-summary"><div><span>{files ? '管理方式' : '已记录版本'}</span><strong>{files ? '仅保存文件' : project.installedVersion ?? '尚未记录'}</strong>{#if !files && project.installedSource}<small>{project.installedSource === 'managed' ? '由追新管理' : project.installedSource === 'installer' ? '已自动验证' : '手动确认'}</small>{/if}</div><Icon name="arrowRight" size={18} /><div><span>最新发行 <em class:preview-label={project.release?.prerelease}>{project.release?.prerelease ? '预览' : '正式'}</em></span><strong class="accent-text">{project.release?.tag ?? '暂无信息'}</strong>{#if project.release?.publishedAt}<small>{formatDate(project.release.publishedAt)}</small>{/if}</div></div>
   {#if installation}
     <div class="installation-box">
       <p role="status">{installationLabel(installation)}</p>
@@ -65,10 +65,10 @@
   <div class="detail-tabs" role="tablist" aria-label="详情内容"><button role="tab" aria-selected={tab === 'notes'} class:active={tab === 'notes'} onclick={() => tab = 'notes'}>更新说明</button><button role="tab" aria-selected={tab === 'assets'} class:active={tab === 'assets'} onclick={() => tab = 'assets'}>发行文件 <span>{project.release?.assets.length ?? 0}</span></button></div>
   <div class="detail-content">
     {#if tab === 'notes'}
-      {#if project.release}<div class="release-title"><span>{project.release.name || project.release.tag}</span><button class="icon-button" title="在 GitHub 阅读完整说明" aria-label="在 GitHub 阅读完整说明" onclick={() => onopen(project.release!.url)}><Icon name="external" size={15} /></button></div><ReleaseNotes body={project.release.body} repositoryUrl={project.release.url} {onopen} />{:else}<div class="empty-state compact"><Icon name="notes" size={30} /><h3>{project.status === 'noRelease' ? '作者还没有发布发行版' : '还没有发行信息'}</h3><p>检查更新以获取作者发布的版本，或复制资料给 AI 处理源码。</p><button class="button secondary small" disabled={busy} onclick={() => oncheck([project.id])}>检查发行动态</button></div>{/if}
-      {#if project.sourceAhead}<div class="source-callout"><Icon name="code" size={17} /><div><strong>源码有尚未发行的变化</strong><p>可查看源码变化，或复制资料交给外部 Agent 编译。</p><button class="text-button" onclick={() => onopen(project.url)}>查看原项目<Icon name="external" size={13} /></button></div></div>{/if}
+      {#if project.release}<div class="release-title"><span>{project.release.name || project.release.tag}</span><button class="icon-button" title="在 GitHub 阅读完整说明" aria-label="在 GitHub 阅读完整说明" onclick={() => onopen(project.release!.url)}><Icon name="external" size={15} /></button></div><ReleaseNotes body={project.release.body} repositoryUrl={project.release.url} {onopen} />{:else}<div class="empty-state compact"><Icon name="notes" size={30} /><h3>{project.status === 'noRelease' ? '尚无发行版' : '暂无发行信息'}</h3><button class="button secondary small" disabled={busy} onclick={() => oncheck([project.id])}>检查更新</button></div>{/if}
+      {#if project.sourceAhead}<div class="source-callout"><Icon name="code" size={17} /><div><strong>源码有未发布提交</strong><button class="text-button" onclick={() => onopen(project.url)}>查看原项目<Icon name="external" size={13} /></button></div></div>{/if}
     {:else if tab === 'assets'}
-      <p class="field-hint">{files ? '可分别下载同一版本的多个附件，文件只保存，不会安装或自动打开。' : '可下载任意符合限制的附件；只有识别为适合此设备的软件包才提供安装。'} 单个文件最大 4 GB。</p>
+      <p class="field-hint">{files ? '仅保存附件，不自动安装 · 单文件 ≤ 4 GB' : '仅兼容软件包支持安装 · 单文件 ≤ 4 GB'}</p>
       <div class="asset-list">
         {#each project.release?.assets ?? [] as asset (asset.id)}
           {@const downloadable = canDownloadAsset(asset)}
@@ -77,7 +77,7 @@
             <span><strong>{asset.name}</strong><small>{formatBytes(asset.size)}</small></span>
             <div class="asset-actions"><button class="text-button" disabled={busy || !downloadable} aria-pressed={project.selectedAssetId === asset.id} aria-label={`将 ${asset.name} 选为默认下载文件`} onclick={() => onupdate(project.id, { selectedAssetId: asset.id })}>{project.selectedAssetId === asset.id ? '默认文件' : '选为默认'}</button><button class="button secondary small" disabled={busy || !downloadable} aria-label={`下载文件 ${asset.name}`} onclick={() => ondownload({ ...project, selectedAssetId: asset.id })}><Icon name="download" size={14} />下载此文件</button></div>
           </article>
-        {:else}<div class="empty-state compact"><Icon name="package" size={27} /><h3>没有可下载的发行文件</h3><p>可前往原项目查看，或复制资料交给外部 Agent 编译。</p></div>{/each}
+        {:else}<div class="empty-state compact"><Icon name="package" size={27} /><h3>暂无可下载的发行文件</h3></div>{/each}
       </div>
     {/if}
   </div>
@@ -85,6 +85,7 @@
 </aside>
 
 <style>
+  .detail-topline { justify-content: flex-end; }
   .managed-entry { display: flex; flex-direction: column; gap: 6px; margin: 0 23px 14px; }
   .detail-footer { padding: 14px 23px; border-top: 1px solid var(--border); text-align: center; }
   .installation-box { margin: 0 23px 14px; font-size: 12px; color: var(--muted); }

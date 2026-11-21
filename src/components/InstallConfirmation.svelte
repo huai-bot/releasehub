@@ -42,7 +42,7 @@
   });
 </script>
 
-<Modal title={download.kind === 'portable' ? '选择软件目录' : '打开官方安装器'} description="只补充无法自动确定的信息" {onclose}>
+<Modal title={download.kind === 'portable' ? '选择软件目录' : '打开官方安装器'} {onclose}>
   <form class="modal-form" onsubmit={(event) => { event.preventDefault(); if (ready && plan) void onconfirm(plan, plan.requiresRootSelection ? archiveRoot : plan.suggestedRoot ?? undefined); }}>
     <div class="confirm-package"><Icon name="package" size={25} /><div><strong>{download.projectName} <span>{download.tag}</span></strong><p>{download.fileName}</p><small>{formatBytes(download.totalBytes)}</small></div></div>
     <label>软件目录<div class="input-with-button"><input data-initial-focus value={target} oninput={(event) => { target = event.currentTarget.value; plan = null; }} placeholder="选择安装目录" maxlength="1000" disabled={busy || loading} /><button type="button" class="button secondary" disabled={busy || loading || preview} onclick={() => void browse()}>浏览</button></div></label>

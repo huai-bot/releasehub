@@ -46,8 +46,8 @@
 >
   <button
     class="card-identity"
-    title={`${presentation.label} · 双击${isFilesProject(project) ? '查看文件' : '打开软件'}，右键查看更多操作`}
-    aria-label={`${presentation.label}，双击${isFilesProject(project) ? '查看文件' : '打开软件'}，Enter 查看详情`}
+    aria-label={presentation.label}
+    aria-keyshortcuts="Enter"
     onkeydown={keys}
     ondblclick={open}
     oncontextmenu={(event) => {

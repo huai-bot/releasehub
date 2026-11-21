@@ -22,8 +22,8 @@
           {#if !files}<span>{project.installedVersion ?? '本机版本未记录'}</span><Icon name="arrowRight" size={15} />{:else}<span>最新发行</span>{/if}<strong>{project.release?.tag ?? '未知'}</strong>
           {#if project.release?.prerelease}<span class="preview-label">预览版</span>{/if}
         </div>
-        <p class="update-file">{asset ? `${asset.name} · ${formatBytes(asset.size)}` : '尚未选择发行附件，请先查看详情'}{#if project.release}<span> · {formatDate(project.release.publishedAt)} 发布</span>{/if}</p>
-        <p class="update-notes">{releaseSummary(project.release?.body ?? '') || '作者没有填写本次发行说明。'}</p>
+        <p class="update-file">{asset ? `${asset.name} · ${formatBytes(asset.size)}` : '未选发行文件'}{#if project.release}<span> · {formatDate(project.release.publishedAt)}</span>{/if}</p>
+        {#if releaseSummary(project.release?.body ?? '')}<p class="update-notes">{releaseSummary(project.release?.body ?? '')}</p>{/if}
         <div class="update-actions"><button class="button secondary small" onclick={() => onselect(project)}><Icon name="notes" size={14} />查看发行说明</button><button class="button primary small" disabled={busy || !asset} onclick={() => ondownload(project)}><Icon name="download" size={14} />{files ? '下载文件' : '下载更新'}</button></div>
       </div>
     </article>

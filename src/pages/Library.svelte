@@ -58,6 +58,8 @@
   }
 
   const base = $derived(projects.filter((project) => !updatesOnly || hasProjectUpdate(project)));
+  const softwareCount = $derived(base.filter((project) => !isFilesProject(project)).length);
+  const filesCount = $derived(base.filter(isFilesProject).length);
   const typed = $derived(
     base.filter((project) =>
       resourceType === 'all' ? true : isFilesProject(project) ? resourceType === 'files' : resourceType === 'software'
@@ -175,31 +177,18 @@
 />
 
 <div class="page-heading">
-  <div>
-    <h1>
-      {updatesOnly ? '可更新' : '资源库'}<span class="heading-count">{base.length}</span>
-    </h1>
-    {#if updatesOnly}
-      <p>阅读更新说明，选择需要的软件或文件并集中下载。</p>
-    {/if}
-  </div>
+  <h1>{updatesOnly ? '可更新' : '资源库'}<span class="heading-count">{base.length}</span></h1>
   {#if updatesOnly}
-    <button class="button primary" onclick={onadd}><Icon name="plus" size={17} />添加资源</button>
+    <div class="heading-actions">
+      {#if base.length}
+        <button class="button secondary" disabled={busy} onclick={() => oncheck(base.map((project) => project.id))}>
+          <Icon name="refresh" class={busy ? 'spinning' : ''} size={16} />重新检查
+        </button>
+      {/if}
+      <button class="button primary" onclick={onadd}><Icon name="plus" size={17} />添加资源</button>
+    </div>
   {/if}
 </div>
-
-{#if updatesOnly && base.length}
-  <div class="inline-callout">
-    <Icon name="shieldCheck" size={19} />
-    <div>
-      <strong>集中处理订阅更新</strong>
-      <span>软件按需安装，普通文件只保存；前往“下载”查看进度和校验结果。</span>
-    </div>
-    <button class="button small secondary" disabled={busy} onclick={() => oncheck(base.map((project) => project.id))}>
-      <Icon name="refresh" size={15} />重新检查
-    </button>
-  </div>
-{/if}
 
 <section class:surface={updatesOnly} class:library-gallery={!updatesOnly} class="library-surface">
   <div class="list-toolbar resource-toolbar">
@@ -210,23 +199,20 @@
         </button>
       {/if}
       <button class:active={resourceType === 'software'} aria-pressed={resourceType === 'software'} onclick={() => (resourceType = 'software')}>
-        软件
+        软件<span>{softwareCount}</span>
       </button>
       <button class:active={resourceType === 'files'} aria-pressed={resourceType === 'files'} onclick={() => (resourceType = 'files')}>
-        文件
+        文件<span>{filesCount}</span>
       </button>
     </div>
 
     {#if updatesOnly}
       <div class="resource-filter-actions">
-        <label class="resource-secondary-filter">
-          进一步筛选
-          <select aria-label="渠道筛选" bind:value={filter}>
-            <option value="all">全部渠道</option>
-            <option value="stable">正式版</option>
-            <option value="preview">包含预览版</option>
-          </select>
-        </label>
+        <select aria-label="渠道筛选" bind:value={filter}>
+          <option value="all">全部渠道</option>
+          <option value="stable">正式版</option>
+          <option value="preview">包含预览版</option>
+        </select>
         <button
           class="icon-button"
           aria-label="检查列表中的资源"
@@ -239,15 +225,13 @@
       </div>
     {:else}
       <div class="gallery-toolbar-right">
-        <span class="gallery-count">{visible.length} {resourceType === 'software' ? '款软件' : '项文件'}</span>
         <div class="segmented-tabs layout-switcher" role="group" aria-label="布局切换">
           <button
             class:active={layout === 'two'}
             aria-pressed={layout === 'two'}
             disabled={busy}
             onclick={() => onlayout?.('two')}
-            aria-label="切换双列视图"
-            title="双列大卡片视图"
+            aria-label="双列"
           >
             双列
           </button>
@@ -256,8 +240,7 @@
             aria-pressed={layout === 'three'}
             disabled={busy}
             onclick={() => onlayout?.('three')}
-            aria-label="切换三列视图"
-            title="三列网格视图"
+            aria-label="三列"
           >
             三列
           </button>
@@ -266,8 +249,7 @@
             aria-pressed={layout === 'list'}
             disabled={busy}
             onclick={() => onlayout?.('list')}
-            aria-label="切换列表视图"
-            title="紧凑列表视图"
+            aria-label="列表"
           >
             列表
           </button>
@@ -305,7 +287,6 @@
           />
           选择当前 {visible.length} 项
         </label>
-        <span>下载后，在“下载”中逐项确认安装</span>
       </div>
       <UpdatesQueue projects={visible} {selected} {busy} {onselect} ontoggle={toggle} {ondownload} />
     {:else}
@@ -335,13 +316,6 @@
             ? '当前没有待更新的资源'
             : `还没有${resourceType === 'files' ? '文件订阅' : '软件'}`}
       </h3>
-      <p>
-        {query
-          ? '试试资源名称或“作者/仓库”，也可以缩短关键词。'
-          : updatesOnly
-            ? '可以检查订阅，或到资源库查看详情。'
-            : '点击“添加资源”，粘贴 GitHub 项目地址即可订阅。'}
-      </p>
       {#if updatesOnly}
         <button class="button secondary small" disabled={busy} onclick={() => oncheck()}>
           <Icon name="refresh" size={15} />检查全部资源
@@ -351,13 +325,6 @@
       {/if}
     </div>
   {/if}
-
-  <div class="list-footer">
-    <span>
-      {updatesOnly ? `显示 ${visible.length} / ${base.length} 项资源` : `双击${resourceType === 'files' ? '查看文件' : '打开软件'} · 右键查看更多操作`}
-    </span>
-    <span>{updatesOnly ? '发行信息来自原项目' : 'Enter 查看详情'}</span>
-  </div>
 </section>
 
 {#if menu && menuPresentation}
@@ -380,10 +347,9 @@
     >
       <Icon name={isFilesProject(menu.project) ? 'folder' : 'play'} size={16} />
       {isFilesProject(menu.project) ? '查看文件' : '打开软件'}
-      <small>双击</small>
     </button>
     <button role="menuitem" onclick={() => perform(onselect)}>
-      <Icon name="info" size={16} />查看详情<small>Enter</small>
+      <Icon name="info" size={16} />查看详情
     </button>
     {#if !isFilesProject(menu.project) && onBackup}
       <div class="menu-divider"></div>
@@ -407,6 +373,11 @@
 {/if}
 
 <style>
+  .heading-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
   .selection-heading {
     display: flex;
     align-items: center;
@@ -441,13 +412,8 @@
   .gallery-toolbar-right {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 12px;
     margin-left: auto;
-  }
-  .gallery-count {
-    color: var(--muted);
-    font-size: 13px;
-    font-weight: 500;
   }
   .layout-switcher {
     padding: 2px;
@@ -474,15 +440,10 @@
     grid-template-columns: 1fr;
     gap: 10px;
   }
-  .library-gallery .list-footer {
-    border: 0;
-    background: none;
-    padding: 24px 0 0;
-  }
   .resource-menu {
     position: fixed;
     z-index: 80;
-    width: 238px;
+    width: 224px;
     max-width: calc(100vw - 16px);
     max-height: calc(100vh - 16px);
     overflow: auto;
@@ -526,26 +487,18 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .resource-menu small {
-    margin-left: auto;
-    font-size: 12px;
-    color: var(--muted);
-  }
   .menu-divider {
     height: 1px;
     background: var(--border-soft);
     margin: 5px 4px;
   }
   @media (max-width: 1100px) {
-    .selection-heading > span {
-      display: none;
-    }
     .library-card-grid {
       gap: 14px;
     }
     .gallery-toolbar-right {
       width: 100%;
-      justify-content: space-between;
+      justify-content: flex-end;
       margin-left: 0;
     }
   }

@@ -39,28 +39,24 @@
 </script>
 
 <aside class="sidebar">
-  <button class="brand" onclick={() => onnavigate('home')} aria-label="ReleaseHub 追新首页"><BrandMark /><span><strong>ReleaseHub</strong><small>追新 · 让更新更从容</small></span></button>
-  <div class="nav-group-label">工作空间<span title="拖动页面调整顺序，或聚焦后按 Alt + 上下方向键"><Icon name="grip" size={13} /></span></div>
-  <nav aria-label="主导航" aria-describedby="navigation-help">
+  <button class="brand" onclick={() => onnavigate('home')} aria-label="ReleaseHub 首页"><BrandMark /><strong>ReleaseHub</strong></button>
+  <nav aria-label="主导航">
     {#each pages as item (item.id)}
-      <button class:active={page === item.id} class:dragging={dragging === item.id} class:drop-target={dropTarget === item.id && dragging !== item.id} class="nav-item" aria-current={page === item.id ? 'page' : undefined} draggable={!busy && !sorting} ondragstart={(event) => startDrag(event, item.id)} ondragend={() => { dragging = null; dropTarget = null; }} ondragover={(event) => { if (dragging) { event.preventDefault(); dropTarget = item.id; } }} ondragleave={() => { if (dropTarget === item.id) dropTarget = null; }} ondrop={(event) => drop(event, item.id)} onkeydown={(event) => keyboardOrder(event, item.id)} onclick={() => { if (!dragging) onnavigate(item.id); }}>
+      <button class:active={page === item.id} class:dragging={dragging === item.id} class:drop-target={dropTarget === item.id && dragging !== item.id} class="nav-item" aria-current={page === item.id ? 'page' : undefined} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" draggable={!busy && !sorting} ondragstart={(event) => startDrag(event, item.id)} ondragend={() => { dragging = null; dropTarget = null; }} ondragover={(event) => { if (dragging) { event.preventDefault(); dropTarget = item.id; } }} ondragleave={() => { if (dropTarget === item.id) dropTarget = null; }} ondrop={(event) => drop(event, item.id)} onkeydown={(event) => keyboardOrder(event, item.id)} onclick={() => { if (!dragging) onnavigate(item.id); }}>
         <Icon name={item.icon} size={19} /><span>{item.label}</span>
         {#if item.id === 'updates' && updateCount}<span class="nav-count">{updateCount}</span>{/if}
         {#if item.id === 'downloads' && downloadCount}<span class="nav-dot" aria-label={`${downloadCount} 项进行中`}></span>{/if}
       </button>
     {/each}
   </nav>
-  <span id="navigation-help" class="sr-only">拖动页面调整顺序，也可聚焦页面后按 Alt 加上下方向键。</span><span class="sr-only" aria-live="polite">{announcement}</span>
+  <span class="sr-only" aria-live="polite">{announcement}</span>
   <button class="sidebar-add" onclick={onadd}><Icon name="plus" size={17} />添加资源</button>
   <div class="sidebar-spacer"></div>
-  <div class="sidebar-account"><Icon name="github" size={20} /><div><strong>GitHub 工作空间</strong><button class="text-button" onclick={() => onnavigate('github')}>账号与仓库<Icon name="chevronRight" size={13} /></button></div></div>
   <button class:active={page === 'settings'} class="nav-item settings-nav" aria-current={page === 'settings' ? 'page' : undefined} onclick={() => onnavigate('settings')}><Icon name="settings" size={19} /><span>设置</span></button>
   <div class="sidebar-footer"><button class="storage-button" onclick={ondata} title="打开数据目录"><span class="status-dot"></span>{preview ? '界面预览' : snapshot.runtime.portable ? '便携工作空间' : '本机工作空间'}<Icon name="chevronRight" size={13} /></button><span>v{snapshot.runtime.appVersion} <span class="footer-dot">·</span> Windows x64</span></div>
 </aside>
 
 <style>
-  .nav-group-label { display: flex; align-items: center; justify-content: space-between; }
-  .nav-group-label > span { display: flex; color: var(--muted); }
   .nav-item.dragging { opacity: .45; }
   .nav-item.drop-target { box-shadow: inset 0 2px 0 var(--accent); background: var(--accent-soft); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }

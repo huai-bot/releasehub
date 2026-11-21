@@ -393,12 +393,10 @@ code, .mono, kbd { font-family: "Cascadia Code", Consolas, "Microsoft YaHei", mo
 .task-details dd .icon-button { width: 22px; height: 20px; margin-left: 5px; }
 .settings-layout { display: flex; flex-direction: column; gap: 18px; max-width: 980px; }
 .settings-section { padding: 20px; margin-bottom: 12px; border-radius: 14px; border: 1px solid var(--border-strong); }
-.settings-heading { display: flex; align-items: flex-start; gap: 11px; margin-bottom: 19px; color: var(--accent); }
-.settings-heading > svg { margin-top: 2px; }
+.settings-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .settings-heading > div { flex: 1; }
 .settings-heading h2 { font-size: 16px; font-weight: 650; }
-.settings-heading p { font-size: 10.5px; color: var(--muted); margin-top: 3px; }
-.settings-heading > .status-badge { margin-top: 2px; }
+.settings-heading p { font-size: 12px; color: var(--muted); margin-top: 3px; }
 .theme-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; max-width: 630px; }
 .theme-option { padding: 0; text-align: left; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface-soft); }
 .theme-option.chosen { border-color: var(--accent); outline: 1px solid var(--accent); outline-offset: 0; }
@@ -417,9 +415,8 @@ code, .mono, kbd { font-family: "Cascadia Code", Consolas, "Microsoft YaHei", mo
 dialog::backdrop { background: #00000040; }
 :root[data-theme="dark"] dialog::backdrop { background: #00000080; }
 .theme-check { position: absolute; right: 6px; bottom: 6px; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; color: var(--accent-ink); background: var(--accent); border-radius: 50%; }
-.theme-option > span { display: flex; align-items: center; gap: 7px; padding: 10px 11px 1px; color: var(--subtle); }
-.theme-option strong { font-size: 11px; font-weight: 550; }
-.theme-option > small { display: block; padding: 0 11px 10px; color: var(--muted); font-size: 9px; }
+.theme-option > span { display: flex; align-items: center; gap: 7px; padding: 10px 11px; color: var(--subtle); }
+.theme-option strong { font-size: 12px; font-weight: 550; }
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 15px 0; border-bottom: 1px solid var(--border); }
 .setting-row.last { border: 0; padding-bottom: 0; }
 .setting-row strong, .setting-row label { font-size: 13px; font-weight: 550; color: var(--subtle); }
@@ -521,10 +518,7 @@ dialog.wide { width: 650px; }
 .startup-card h1 { font-size: 21px; margin-bottom: 11px; }
 .startup-card > p { font-size: 12px; color: var(--muted); line-height: 1.9; margin-bottom: 21px; }
 .startup-card .startup-error { color: var(--subtle); }
-.preview-gate { border-top: 1px solid var(--border); padding-top: 23px; margin-top: 25px; }
-.preview-gate h2 { font-size: 14px; margin-top: 10px; }
-.preview-gate p { font-size: 10.5px; color: var(--muted); line-height: 1.9; margin: 8px 0 16px; }
-.startup-footer { font-size: 10px; color: var(--muted); margin-top: 24px; }
+.preview-gate { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 22px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
 .skeleton-lines { display: flex; flex-direction: column; gap: 9px; margin-top: 26px; }
 .skeleton-lines span { height: 8px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 3px; }
 .skeleton-lines span:last-child { width: 70%; }
@@ -699,11 +693,9 @@ body::after { width: 75vw; height: 80vh; left: 28vw; top: 31vh; border: 72px sol
 .detail-panel, dialog, .toast { background: var(--glass-panel); border-color: var(--glass-border); backdrop-filter: var(--glass-filter); }
 .toast.danger { border-color: var(--danger); }
 .material-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.material-option { display: flex; align-items: center; gap: 12px; padding: 14px; text-align: left; border: 1px solid var(--border); border-radius: 12px; background: var(--glass-control); }
-.material-option > span:nth-child(2) { flex: 1; min-width: 0; }
-.material-option strong { display: block; font-size: 13px; font-weight: 600; }
-.material-option small { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); line-height: 1.6; }
-.material-option > svg { color: var(--accent); }
+.material-option { display: flex; align-items: center; gap: 12px; padding: 14px; text-align: left; border: 1px solid var(--border); border-radius: 12px; background: var(--glass-control); color: var(--heading); }
+.material-option > strong { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; }
+.material-option > svg { color: var(--accent); flex-shrink: 0; }
 .material-option:hover:not(:disabled) { border-color: var(--accent); }
 .material-option.chosen { border-color: var(--accent); outline: 1px solid var(--accent); outline-offset: 0; }
 .material-option:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }

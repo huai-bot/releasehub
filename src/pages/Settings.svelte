@@ -17,10 +17,10 @@
     ongithub: () => void; ondata: () => void; onexport: () => void; onimport: () => void; ontextimport: () => void;
     oncopyexport: () => void; oncopy: (text: string) => void; onopen: (url: string) => void;
   } = $props();
-  const themes: { id: Theme; title: string; icon: 'sun' | 'moon' | 'monitor'; description: string }[] = [
-    { id: 'light', title: '浅色', icon: 'sun', description: '明亮浅灰' },
-    { id: 'dark', title: '深色', icon: 'moon', description: '深色板岩' },
-    { id: 'system', title: '跟随系统', icon: 'monitor', description: '与 Windows 一致' },
+  const themes: { id: Theme; title: string; icon: 'sun' | 'moon' | 'monitor' }[] = [
+    { id: 'light', title: '浅色', icon: 'sun' },
+    { id: 'dark', title: '深色', icon: 'moon' },
+    { id: 'system', title: '跟随系统', icon: 'monitor' },
   ];
   const palettes: { id: ColorScheme; title: string; color: string; soft: string }[] = [
     { id: 'blue', title: '经典蓝', color: '#1d4ed8', soft: '#e8effd' },
@@ -51,61 +51,73 @@
   }
 </script>
 
-<div class="page-heading"><div><h1>设置</h1><p>调整外观、启动页面、网络和更新习惯。</p></div><span class="quiet-label"><Icon name="settings" size={16} />偏好更改后自动保存</span></div>
+<div class="page-heading"><h1>设置</h1></div>
 <div class="settings-layout">
-  <section class="surface settings-section" aria-labelledby="appearance-title"><div class="settings-heading"><Icon name="sun" size={19} /><div><h2 id="appearance-title">外观</h2><p>窗口与工作空间使用统一主题</p></div></div><div class="theme-options">{#each themes as theme}<button class="theme-option" class:chosen={settings.theme === theme.id} aria-pressed={settings.theme === theme.id} disabled={busy} onclick={() => onsave({ theme: theme.id })}><div class={`theme-preview ${theme.id}`}><span class="preview-sidebar"></span><span class="preview-content"><i></i><i></i><i></i></span>{#if settings.theme === theme.id}<span class="theme-check"><Icon name="check" size={12} /></span>{/if}</div><span><Icon name={theme.icon} size={15} /><strong>{theme.title}</strong></span><small>{theme.description}</small></button>{/each}</div></section>
+  <section class="surface settings-section appearance-section" aria-labelledby="appearance-title">
+    <div class="settings-heading"><h2 id="appearance-title">外观</h2></div>
+    <div class="theme-options">{#each themes as theme}<button class="theme-option" class:chosen={settings.theme === theme.id} aria-pressed={settings.theme === theme.id} disabled={busy} onclick={() => onsave({ theme: theme.id })}><div class={`theme-preview ${theme.id}`}><span class="preview-sidebar"></span><span class="preview-content"><i></i><i></i><i></i></span>{#if settings.theme === theme.id}<span class="theme-check"><Icon name="check" size={12} /></span>{/if}</div><span><Icon name={theme.icon} size={15} /><strong>{theme.title}</strong></span></button>{/each}</div>
 
-  <section class="surface settings-section material-section" aria-labelledby="material-title">
-    <div class="settings-heading"><Icon name="monitor" size={19} /><div><h2 id="material-title">玻璃材质</h2><p>让侧栏、工作区和浮层呈现统一的玻璃质感</p></div></div>
-    <div class="material-options" role="group" aria-label="玻璃材质">
-      <button class="material-option" class:chosen={(settings.material ?? 'acrylic') === 'acrylic'} aria-pressed={(settings.material ?? 'acrylic') === 'acrylic'} disabled={busy} onclick={() => onsave({ material: 'acrylic' })}>
-        <span class="material-sample acrylic" aria-hidden="true"><i></i><i></i></span>
-        <span><strong>亚克力</strong><small>通透的磨砂玻璃，背景色彩与层次更鲜明</small></span>
-        {#if (settings.material ?? 'acrylic') === 'acrylic'}<Icon name="check" size={17} />{/if}
-      </button>
-      <button class="material-option" class:chosen={settings.material === 'mica'} aria-pressed={settings.material === 'mica'} disabled={busy} onclick={() => onsave({ material: 'mica' })}>
-        <span class="material-sample mica" aria-hidden="true"><i></i><i></i></span>
-        <span><strong>云母</strong><small>柔和的微透底色，层次更安静，适合长时间阅读</small></span>
-        {#if settings.material === 'mica'}<Icon name="check" size={17} />{/if}
-      </button>
+    <div class="appearance-group">
+      <h3 class="appearance-subheading">配色方案</h3>
+      <div class="palette-options">{#each palettes as palette}<button class="palette-option" class:chosen={(settings.colorScheme ?? 'blue') === palette.id} aria-pressed={(settings.colorScheme ?? 'blue') === palette.id} disabled={busy} onclick={() => onsave({ colorScheme: palette.id })} style={`--palette-color:${palette.color};--palette-soft:${palette.soft}`}><span class="palette-swatch" aria-hidden="true"><i></i><i></i><i></i></span><strong>{palette.title}</strong>{#if (settings.colorScheme ?? 'blue') === palette.id}<Icon name="check" size={15} />{/if}</button>{/each}</div>
     </div>
-    <div class="setting-row last"><div><strong>背景模糊</strong><p>柔化玻璃后方的色彩；关闭后使用更实的底色，文字依然清晰。系统要求减少透明效果时会自动停用。</p></div><Toggle checked={settings.blur ?? true} label="背景模糊" disabled={busy} onchange={() => onsave({ blur: !(settings.blur ?? true) })} /></div>
+
+    <div class="appearance-group">
+      <h3 class="appearance-subheading">玻璃材质</h3>
+      <div class="material-options" role="group" aria-label="玻璃材质">
+        <button class="material-option" class:chosen={(settings.material ?? 'acrylic') === 'acrylic'} aria-pressed={(settings.material ?? 'acrylic') === 'acrylic'} disabled={busy} onclick={() => onsave({ material: 'acrylic' })}>
+          <span class="material-sample acrylic" aria-hidden="true"><i></i><i></i></span>
+          <strong>亚克力</strong>
+          {#if (settings.material ?? 'acrylic') === 'acrylic'}<Icon name="check" size={17} />{/if}
+        </button>
+        <button class="material-option" class:chosen={settings.material === 'mica'} aria-pressed={settings.material === 'mica'} disabled={busy} onclick={() => onsave({ material: 'mica' })}>
+          <span class="material-sample mica" aria-hidden="true"><i></i><i></i></span>
+          <strong>云母</strong>
+          {#if settings.material === 'mica'}<Icon name="check" size={17} />{/if}
+        </button>
+      </div>
+      <div class="setting-row last"><strong>背景模糊</strong><Toggle checked={settings.blur ?? true} label="背景模糊" disabled={busy} onchange={() => onsave({ blur: !(settings.blur ?? true) })} /></div>
+    </div>
   </section>
 
-  <section class="surface settings-section palette-section" aria-labelledby="palette-title">
-    <div class="settings-heading"><Icon name="sun" size={19} /><div><h2 id="palette-title">配色方案</h2><p>搭配任意明暗模式，品牌图标保持经典蓝色</p></div></div>
-    <div class="palette-options">{#each palettes as palette}<button class="palette-option" class:chosen={(settings.colorScheme ?? 'blue') === palette.id} aria-pressed={(settings.colorScheme ?? 'blue') === palette.id} disabled={busy} onclick={() => onsave({ colorScheme: palette.id })} style={`--palette-color:${palette.color};--palette-soft:${palette.soft}`}><span class="palette-swatch" aria-hidden="true"><i></i><i></i><i></i></span><strong>{palette.title}</strong>{#if (settings.colorScheme ?? 'blue') === palette.id}<Icon name="check" size={15} />{/if}</button>{/each}</div>
-  </section>
-
-  <section class="surface settings-section" aria-labelledby="startup-title"><div class="settings-heading"><Icon name="home" size={19} /><div><h2 id="startup-title">启动与导航</h2><p>打开追新后，直接进入常用页面</p></div></div>
-    <div class="setting-row"><div><label for="startup-page">默认打开页面</label><p>下次启动时生效</p></div><select id="startup-page" value={settings.startupPage} disabled={busy} onchange={(event) => onsave({ startupPage: event.currentTarget.value as WorkspacePage })}>{#each workspacePages as page}<option value={page.id}>{page.label}</option>{/each}</select></div>
-    <div class="setting-row"><div><label for="startup-github-tab">GitHub 默认栏目</label><p>进入 GitHub 页面时打开的栏目</p></div><select id="startup-github-tab" value={settings.startupGithubTab} disabled={busy} onchange={(event) => onsave({ startupGithubTab: event.currentTarget.value as GithubTab })}>{#each githubTabs as tab}<option value={tab.id}>{tab.label}</option>{/each}</select></div>
-    <div class="setting-row last"><div><strong>工作空间顺序</strong><p>拖动左侧页面即可调整，也可选中后按 Alt + 上下方向键</p></div><button class="button secondary small" disabled={busy || settings.navigationOrder.join() === defaultNavigationOrder.join()} onclick={() => onsave({ navigationOrder: [...defaultNavigationOrder] })}><Icon name="retry" size={14} />恢复默认顺序</button></div>
+  <section class="surface settings-section" aria-labelledby="startup-title"><div class="settings-heading"><h2 id="startup-title">启动与导航</h2></div>
+    <div class="setting-row"><label for="startup-page">默认打开页面</label><select id="startup-page" value={settings.startupPage} disabled={busy} onchange={(event) => onsave({ startupPage: event.currentTarget.value as WorkspacePage })}>{#each workspacePages as page}<option value={page.id}>{page.label}</option>{/each}</select></div>
+    <div class="setting-row"><label for="startup-github-tab">GitHub 默认栏目</label><select id="startup-github-tab" value={settings.startupGithubTab} disabled={busy} onchange={(event) => onsave({ startupGithubTab: event.currentTarget.value as GithubTab })}>{#each githubTabs as tab}<option value={tab.id}>{tab.label}</option>{/each}</select></div>
+    <div class="setting-row last"><strong>工作空间顺序</strong><button class="button secondary small" disabled={busy || settings.navigationOrder.join() === defaultNavigationOrder.join()} onclick={() => onsave({ navigationOrder: [...defaultNavigationOrder] })}><Icon name="retry" size={14} />恢复默认顺序</button></div>
   </section>
 
   <ProxySettings settings={settings.proxy} passwordConfigured={runtime.proxyPasswordConfigured} {busy} {preview} onsave={onproxy} ontest={onproxytest} />
 
-  <section class="surface settings-section" aria-labelledby="updates-title"><div class="settings-heading"><Icon name="refresh" size={19} /><div><h2 id="updates-title">更新与下载</h2><p>设置检查频率、下载方式与通知</p></div></div>
-    <div class="setting-row"><div><label for="check-interval">自动检查间隔</label><p>运行期间按此间隔检查已订阅资源</p></div><select id="check-interval" value={settings.checkIntervalMinutes} disabled={busy} onchange={(event) => onsave({ checkIntervalMinutes: Number(event.currentTarget.value) })}>{#if ![0, 15, 30, 60, 180, 360, 1440].includes(settings.checkIntervalMinutes)}<option value={settings.checkIntervalMinutes}>每 {settings.checkIntervalMinutes} 分钟</option>{/if}<option value="0">仅手动检查</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每 1 小时</option><option value="180">每 3 小时</option><option value="360">每 6 小时</option><option value="1440">每天</option></select></div>
-    <div class="setting-row"><div><strong>桌面通知</strong><p>发现新发行版时提醒我</p></div><Toggle checked={settings.notifications} label="桌面通知" disabled={busy} onchange={() => onsave({ notifications: !settings.notifications })} /></div>
-    <div class="setting-row"><div><strong>自动下载选定文件</strong><p>发现更新后下载匹配的文件，有多个选择时等待手动选择</p></div><Toggle checked={settings.autoDownload} label="自动下载选定文件" disabled={busy} onchange={() => onsave({ autoDownload: !settings.autoDownload })} /></div>
-    <div class="setting-row"><div><label for="download-limit">同时下载数量</label><p>限制并行任务，给其他工作留些带宽</p></div><select id="download-limit" value={settings.maxConcurrentDownloads} disabled={busy} onchange={(event) => onsave({ maxConcurrentDownloads: Number(event.currentTarget.value) })}>{#each [1, 2, 3, 4] as count}<option value={count}>{count} 个任务</option>{/each}</select></div>
-    <div class="setting-row"><div><label for="download-connections">单文件连接数</label><p>大文件分段下载；不支持分段时自动使用单连接</p></div><select id="download-connections" value={settings.downloadConnections ?? 4} disabled={busy} onchange={(event) => onsave({ downloadConnections: Number(event.currentTarget.value) })}>{#each [1, 2, 3, 4, 5, 6, 7, 8] as count}<option value={count}>{count === 1 ? '1 个连接 · 单连接' : `${count} 个连接${count === 4 ? ' · 推荐' : ''}`}</option>{/each}</select></div>
-    <div class="setting-row last"><div><strong>关闭窗口时收进托盘</strong><p>在后台继续留意更新，可从托盘退出</p></div><Toggle checked={settings.closeToTray} label="关闭窗口时收进托盘" disabled={busy} onchange={() => onsave({ closeToTray: !settings.closeToTray })} /></div>
+  <section class="surface settings-section" aria-labelledby="updates-title"><div class="settings-heading"><h2 id="updates-title">更新与下载</h2></div>
+    <div class="setting-row"><label for="check-interval">自动检查间隔</label><select id="check-interval" value={settings.checkIntervalMinutes} disabled={busy} onchange={(event) => onsave({ checkIntervalMinutes: Number(event.currentTarget.value) })}>{#if ![0, 15, 30, 60, 180, 360, 1440].includes(settings.checkIntervalMinutes)}<option value={settings.checkIntervalMinutes}>每 {settings.checkIntervalMinutes} 分钟</option>{/if}<option value="0">仅手动检查</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每 1 小时</option><option value="180">每 3 小时</option><option value="360">每 6 小时</option><option value="1440">每天</option></select></div>
+    <div class="setting-row"><strong>桌面通知</strong><Toggle checked={settings.notifications} label="桌面通知" disabled={busy} onchange={() => onsave({ notifications: !settings.notifications })} /></div>
+    <div class="setting-row"><strong>自动下载选定文件</strong><Toggle checked={settings.autoDownload} label="自动下载选定文件" disabled={busy} onchange={() => onsave({ autoDownload: !settings.autoDownload })} /></div>
+    <div class="setting-row"><label for="download-limit">同时下载数量</label><select id="download-limit" value={settings.maxConcurrentDownloads} disabled={busy} onchange={(event) => onsave({ maxConcurrentDownloads: Number(event.currentTarget.value) })}>{#each [1, 2, 3, 4] as count}<option value={count}>{count} 个任务</option>{/each}</select></div>
+    <div class="setting-row"><label for="download-connections">单文件连接数</label><select id="download-connections" value={settings.downloadConnections ?? 4} disabled={busy} onchange={(event) => onsave({ downloadConnections: Number(event.currentTarget.value) })}>{#each [1, 2, 3, 4, 5, 6, 7, 8] as count}<option value={count}>{count} 个连接</option>{/each}</select></div>
+    <div class="setting-row last"><strong>关闭窗口时收进托盘</strong><Toggle checked={settings.closeToTray} label="关闭窗口时收进托盘" disabled={busy} onchange={() => onsave({ closeToTray: !settings.closeToTray })} /></div>
   </section>
 
   <ExternalDownloadSettings {settings} {busy} {preview} {onsave} />
 
   <section class="surface settings-section" aria-labelledby="cache-title">
-    <div class="settings-heading"><Icon name="drive" size={19} /><div><h2 id="cache-title">页面缓存</h2><p>先显示已保存的内容，再在后台检查新变化</p></div></div>
-    <div class="setting-row last"><div><strong>{cache ? `${formatBytes(cache.bytes)} · ${cache.entries} 条记录` : '本机页面缓存'}</strong><p>最多 100MB，保留 30 天；不会随便携资料迁移</p></div><button class="button secondary small" disabled={busy || cacheBusy} onclick={() => void clearCache()}><Icon name="trash" size={15} />{cacheBusy ? '正在清理' : '清理页面缓存'}</button></div>
+    <div class="settings-heading"><h2 id="cache-title">页面缓存</h2><span class="quiet-label">≤ 100 MB · 30 天 · 仅本机</span></div>
+    <div class="setting-row last"><strong>{cache ? `${formatBytes(cache.bytes)} · ${cache.entries} 条记录` : '本机页面缓存'}</strong><button class="button secondary small" disabled={busy || cacheBusy} onclick={() => void clearCache()}><Icon name="trash" size={15} />{cacheBusy ? '正在清理' : '清理页面缓存'}</button></div>
     {#if cacheMessage}<p class:field-error={cacheError} class:field-hint={!cacheError} role={cacheError ? 'alert' : 'status'}>{cacheMessage}</p>{/if}
   </section>
 
-  <section class="surface settings-section" aria-labelledby="github-title"><div class="settings-heading"><Icon name="github" size={19} /><div><h2 id="github-title">GitHub 账号</h2><p>浏览仓库，整理 Stars 分类，查看关注与首页动态</p></div></div><div class="settings-bottom-line"><span class="field-hint">通过 GitHub 官方授权连接账号</span><button class="button secondary small" onclick={ongithub}>管理 GitHub 账号<Icon name="arrowRight" size={15} /></button></div></section>
+  <section class="surface settings-section" aria-labelledby="github-title">
+    <div class="setting-row last"><h2 id="github-title" class="inline-section-title">GitHub 账号</h2><button class="button secondary small" onclick={ongithub}>管理 GitHub 账号<Icon name="arrowRight" size={15} /></button></div>
+  </section>
 
   <AiConnection {settings} {runtime} {busy} {preview} {onsave} {onintegration} {oncopy} />
 
-  <section class="surface settings-section" aria-labelledby="data-title"><div class="settings-heading"><Icon name="drive" size={19} /><div><h2 id="data-title">数据与便携</h2><p>{runtime.portable ? '当前使用便携模式，数据跟随应用目录' : '当前使用安装模式，数据保存在本机应用目录'}</p></div><span class="status-badge neutral">{runtime.portable ? '便携模式' : '安装模式'}</span></div><div class="data-location"><Icon name="folder" size={18} /><code>{runtime.dataDir}</code><button class="button secondary small" disabled={busy} onclick={ondata}>打开目录</button></div><p class="setting-description">导出内容包括订阅、项目备注和使用偏好。完整迁移历史记录与受管软件时，退出追新后复制整个便携文件夹；换电脑后重新连接账号。</p><div class="data-actions"><button class="button secondary small" disabled={busy} onclick={onexport}><Icon name="export" size={15} />导出订阅与备注</button><button class="button secondary small" disabled={busy} onclick={onimport}><Icon name="import" size={15} />导入资料</button><button class="text-button" disabled={busy} onclick={ontextimport}>粘贴清单</button><button class="text-button" disabled={busy} onclick={oncopyexport}>复制清单</button></div></section>
-  <section class="about-section"><BrandMark size={30} /><div><strong>ReleaseHub <span>追新</span></strong><p>v{runtime.appVersion} · MIT 开源 · Windows x64</p></div><button class="text-button" onclick={() => onopen('https://github.com/huai-bot/releasehub')}>项目主页<Icon name="external" size={14} /></button></section>
+  <section class="surface settings-section" aria-labelledby="data-title"><div class="settings-heading"><h2 id="data-title">数据与便携</h2><span class="status-badge neutral">{runtime.portable ? '便携模式' : '安装模式'}</span></div><div class="data-location"><Icon name="folder" size={18} /><code>{runtime.dataDir}</code><button class="button secondary small" disabled={busy} onclick={ondata}>打开目录</button></div><div class="data-actions"><button class="button secondary small" disabled={busy} onclick={onexport}><Icon name="export" size={15} />导出订阅与备注</button><button class="button secondary small" disabled={busy} onclick={onimport}><Icon name="import" size={15} />导入资料</button><button class="text-button" disabled={busy} onclick={ontextimport}>粘贴清单</button><button class="text-button" disabled={busy} onclick={oncopyexport}>复制清单</button></div><p class="field-hint data-note">仅迁移订阅、备注与偏好；账号凭据不迁移，换机后需重新连接。</p></section>
+  <section class="about-section"><BrandMark size={30} /><div><strong>ReleaseHub</strong><p>v{runtime.appVersion} · MIT · Windows x64</p></div><button class="text-button" onclick={() => onopen('https://github.com/huai-bot/releasehub')}>项目主页<Icon name="external" size={14} /></button></section>
 </div>
+
+<style>
+  .appearance-group { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--border); }
+  .appearance-subheading { font-size: 13px; font-weight: 600; color: var(--subtle); margin-bottom: 12px; }
+  .inline-section-title { font-size: 15px; font-weight: 650; }
+  .data-note { margin-top: 12px; }
+</style>

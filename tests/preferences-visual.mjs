@@ -61,7 +61,7 @@ try {
     await page.locator('#proxy-url').fill('http://127.0.0.1:7890');
     await page.locator('section[aria-labelledby="proxy-title"]').scrollIntoViewIfNeeded();
     await check('proxy-light');
-    await page.getByRole('button', { name: '深色 深色板岩', exact: true }).click();
+    await page.getByRole('button', { name: '深色', exact: true }).click();
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
     await page.locator('#main-content').evaluate(element => element.scrollTop = 0);
     await check('settings-dark');
@@ -92,7 +92,7 @@ try {
     await page.getByRole('combobox', { name: '首页动态示例状态', exact: true }).selectOption('login');
     await check('feed-login-dark');
     await nav('设置');
-    await page.getByRole('button', { name: '浅色 明亮浅灰', exact: true }).click();
+    await page.getByRole('button', { name: '浅色', exact: true }).click();
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
     await page.getByLabel('默认打开页面', { exact: true }).selectOption('github');
     await page.getByLabel('GitHub 默认栏目', { exact: true }).selectOption('feed');

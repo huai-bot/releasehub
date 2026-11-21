@@ -423,7 +423,7 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
       }
       target.querySelector<HTMLDetailsElement>('.connection-detail')!.open = true;
       await click('复制查询命令'); expect(oncopy).toHaveBeenLastCalledWith(`${config.cliCommand} list --json`);
-      expect(target.textContent).toContain('纯云端连接无法直接访问这台电脑');
+      expect(target.textContent).toContain('仅本机');
       expect(target.querySelector('input[type="password"]')).toBeNull(); expect(target.textContent).not.toContain('重新生成密钥');
     });
 

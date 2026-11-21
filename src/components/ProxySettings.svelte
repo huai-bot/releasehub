@@ -45,21 +45,19 @@
 </script>
 
 <section class="surface settings-section" aria-labelledby="proxy-title">
-  <div class="settings-heading"><Icon name="connected" size={19} /><div><h2 id="proxy-title">网络代理</h2><p>用于 GitHub 连接、检查更新和下载</p></div></div>
+  <div class="settings-heading"><h2 id="proxy-title">网络代理</h2></div>
   <form onsubmit={save}>
-    <div class="setting-row"><div><label for="proxy-mode">连接方式</label><p>更改后应用于新请求；正在下载的文件可取消后重新下载</p></div><select id="proxy-mode" bind:value={mode} disabled={pending}><option value="system">跟随系统</option><option value="manual">手动设置</option><option value="direct">不使用代理</option></select></div>
+    <div class="setting-row"><label for="proxy-mode">连接方式</label><select id="proxy-mode" bind:value={mode} disabled={pending}><option value="system">跟随系统</option><option value="manual">手动设置</option><option value="direct">不使用代理</option></select></div>
     {#if mode === 'manual'}
       <div class="proxy-fields">
         <label for="proxy-url">代理地址<input id="proxy-url" bind:value={url} placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" spellcheck="false" required maxlength="1000" disabled={pending} /></label>
-        <div class="form-columns"><label>账号 <span class="optional">可选</span><input bind:value={username} autocomplete="off" maxlength="200" disabled={pending} placeholder="代理服务的账号" /></label><label>密码 <span class="optional">可选</span><input type="password" bind:value={password} autocomplete="new-password" maxlength="1024" disabled={pending || clearPassword} placeholder={passwordConfigured ? '已保存；留空沿用' : '代理服务的密码'} /></label></div>
+        <div class="form-columns"><label>账号<input bind:value={username} autocomplete="off" maxlength="200" disabled={pending} placeholder="代理账号" /></label><label>密码<input type="password" bind:value={password} autocomplete="new-password" maxlength="1024" disabled={pending || clearPassword} placeholder={passwordConfigured ? '已保存，留空沿用' : '代理密码'} /></label></div>
         {#if passwordConfigured}<label class="password-clear"><input type="checkbox" bind:checked={clearPassword} disabled={pending} />清除已保存的代理密码</label>{/if}
-        <p class="field-hint">支持 HTTP 与 SOCKS5。账号和密码填写在单独的输入框中。</p>
       </div>
-    {:else if mode === 'system'}<p class="setting-description proxy-description">读取 Windows 的手动代理设置或当前启动环境的代理地址。使用自动配置脚本时，请在这里填写对应的本机代理端口。</p>
-    {:else}<p class="setting-description proxy-description">GitHub 请求和文件下载直接连接网络。</p>{/if}
+    {/if}
     {#if error}<p class="field-error" role="alert">{error}</p>{/if}
     {#if result}<div class="proxy-feedback" role="status"><div class:success-text={result.ok} class:danger-text={!result.ok} class="proxy-result"><Icon name={result.ok ? 'success' : 'alert'} size={16} /><span>{result.message}{result.ok ? ` · ${result.latencyMs} ms` : ''}</span></div>{#if result.warning}<p class="proxy-warning">{result.warning}{#if retryTime}<span>预计 {retryTime} 恢复。</span>{/if}</p>{/if}</div>{/if}
-    <div class="settings-bottom-line"><span class="field-hint">{preview ? '预览中的设置仅用于展示' : '本机 AI 连接始终直连'}</span><div class="proxy-actions"><button type="button" class="button secondary small" disabled={pending || preview} onclick={() => void test()}><Icon name={testing ? 'loader' : 'connected'} class={testing ? 'spinning' : ''} size={15} />{testing ? '正在测试' : '测试连接'}</button><button type="submit" class="button primary small" disabled={pending || !dirty}>{saving ? '正在保存' : '保存代理设置'}</button></div></div>
+    <div class="settings-bottom-line"><span class="field-hint">{preview ? '界面预览' : '本机 AI 连接始终直连'}</span><div class="proxy-actions"><button type="button" class="button secondary small" disabled={pending || preview} onclick={() => void test()}><Icon name={testing ? 'loader' : 'connected'} class={testing ? 'spinning' : ''} size={15} />{testing ? '正在测试' : '测试连接'}</button><button type="submit" class="button primary small" disabled={pending || !dirty}>{saving ? '正在保存' : '保存代理设置'}</button></div></div>
   </form>
 </section>
 
@@ -67,7 +65,6 @@
   .proxy-fields { display: flex; flex-direction: column; gap: 12px; padding: 16px 0; }
   .proxy-fields label { display: flex; flex-direction: column; gap: 6px; color: var(--subtle); }
   .proxy-fields .password-clear { flex-direction: row; align-items: center; font-size: 12px; }
-  .proxy-description { margin: 12px 0; }
   .proxy-actions { display: flex; gap: 8px; }
   .proxy-feedback { margin: 12px 0; }
   .proxy-result { display: flex; gap: 8px; align-items: center; overflow-wrap: anywhere; }

@@ -72,13 +72,13 @@ describe('startup and desktop navigation', () => {
     const nav = (label: string) => [...target.querySelectorAll<HTMLButtonElement>('nav button')].find(item => item.querySelector('span')?.textContent === label)!;
     const active = () => target.querySelector<HTMLElement>('#main-content:not([hidden])')!;
     expect(active().querySelectorAll('.project-card')).toHaveLength(snapshot.projects.filter(project => project.managementMode !== 'files').length);
-    [...active().querySelectorAll<HTMLButtonElement>('[aria-label="资源类型筛选"] button')].find(item => item.textContent === '文件')!.click(); await settle();
+    [...active().querySelectorAll<HTMLButtonElement>('[aria-label="资源类型筛选"] button')].find(item => item.textContent?.trim().startsWith('文件'))!.click(); await settle();
     expect(active().querySelectorAll('.project-card')).toHaveLength(1);
     expect(active().querySelector('.project-card')?.getAttribute('aria-label')).toBe('文件资料（界面示例）');
     const search = target.querySelector<HTMLInputElement>('.titlebar input')!;
     search.value = 'manual'; search.dispatchEvent(new Event('input', { bubbles: true })); await settle();
     nav('下载').click(); await settle(); nav('资源库').click(); await settle();
-    expect(active().querySelector('[aria-label="资源类型筛选"] [aria-pressed="true"]')?.textContent).toBe('文件');
+    expect(active().querySelector('[aria-label="资源类型筛选"] [aria-pressed="true"]')?.textContent?.trim()).toMatch(/^文件/);
     expect(search.value).toBe('manual');
     expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'snapshot')).toHaveLength(1);
   });
@@ -223,14 +223,14 @@ describe('startup and desktop navigation', () => {
       throw new Error(`Unexpected action ${action}`);
     });
     let instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
-    for (const [label, layout] of [['切换双列视图', 'two'], ['切换三列视图', 'three'], ['切换列表视图', 'list']] as const) {
+    for (const [label, layout] of [['双列', 'two'], ['三列', 'three'], ['列表', 'list']] as const) {
       button(label).click(); await settle();
       expect(mocks.dispatch).toHaveBeenCalledWith('save_settings', { settings: { libraryLayout: layout } });
       expect(target.querySelector('#main-content .library-card-grid')?.classList.contains(`layout-${layout}`)).toBe(true);
       expect(button(label).getAttribute('aria-pressed')).toBe('true');
     }
     await cleanup(); instance = mount(App, { target }); await settle();
-    expect(button('切换列表视图').getAttribute('aria-pressed')).toBe('true');
+    expect(button('列表').getAttribute('aria-pressed')).toBe('true');
   });
 
   it('shows description-only notes without the original title and restores it after clearing', async () => {

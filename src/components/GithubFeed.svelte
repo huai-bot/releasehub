@@ -84,7 +84,7 @@
   <header class="feed-toolbar">
     <div class="feed-title">
       <h2>首页动态</h2>
-      <p>{#if initialLoading}正在读取连接状态…{:else if saved}@{page?.account} · 已保存的历史内容，网页登录待验证{:else if connected}@{page?.account} · 网站已登录{:else}连接 GitHub 官网，读取你的动态{/if}</p>
+      {#if initialLoading || saved || connected}<p>{#if initialLoading}正在读取连接状态…{:else if saved}@{page?.account} · 已保存的历史内容，网页登录待验证{:else}@{page?.account} · 网站已登录{/if}</p>{/if}
     </div>
     <div class="feed-actions">
       {#if connected || saved}
@@ -101,25 +101,24 @@
     <div class="feed-preview"><p><strong>首页动态示例</strong> · 以下内容为演示，不是真实账号动态。</p><label>示例状态<select aria-label="首页动态示例状态" bind:value={previewState} onchange={changePreview}><option value="connected">已连接</option><option value="login">未登录</option><option value="loading">读取中</option><option value="empty">空动态</option><option value="error">读取失败</option></select></label></div>
   {/if}
   {#if disconnectArmed}
-    <div class="feed-confirm" role="group" aria-label="确认退出网页登录"><p>清除追新保存的网页登录和动态缓存。浏览器和 GitHub 授权连接不受影响。</p><div><button class="button secondary small" onclick={() => disconnectArmed = false}>取消</button><button class="button secondary small" onclick={() => void action('feed_disconnect')}>确认退出</button></div></div>
+    <div class="feed-confirm" role="group" aria-label="确认退出网页登录"><p>清除本机网页登录与动态缓存，不影响 GitHub 授权连接。</p><div><button class="button secondary small" onclick={() => disconnectArmed = false}>取消</button><button class="button secondary small" onclick={() => void action('feed_disconnect')}>确认退出</button></div></div>
   {/if}
   {#if error}
     <div class="feed-error" role="alert"><Icon name="alert" size={17} /><p>{error}</p><button class="button secondary small" disabled={preview || Boolean(pending)} onclick={() => connected || saved ? void action('feed_refresh') : connect()}>重试</button></div>
   {/if}
 
   {#if saved}
-    <p class="feed-history" role="status">已显示上次保存的内容。{busy ? '正在后台验证网页登录并更新…' : error ? '本次未能更新，保留历史内容。' : '网页登录尚未验证，可点击刷新重试。'}</p>
+    <p class="feed-history" role="status">{busy ? '已显示历史内容，正在后台验证网页登录并更新…' : error ? '更新失败，保留历史内容。' : '已显示历史内容，网页会话待验证。'}</p>
   {/if}
   <div class="feed-content" aria-busy={initialLoading || busy}>
     {#if !connected && !saved && !initialLoading && !page?.items.length}
       <div class="feed-empty">
         <Icon name="activity" size={27} />
-        <h3>{page?.loading ? '在官网窗口完成登录' : '把官网动态带回这里'}</h3>
-        <p>首次使用需要再登录一次 GitHub 网站。完成后，动态会自动显示在这里，官网窗口随即隐藏。</p>
-        <p class="feed-local-note">此网页登录会保存在这台电脑，下次打开可继续使用。</p>
+        <h3>{page?.loading ? '在官网窗口完成登录' : '登录 GitHub 官网查看动态'}</h3>
+        <p class="feed-local-note">网页会话仅保存在本机</p>
       </div>
     {:else if initialLoading || (page?.loading && !page.items.length && !saved)}
-      <div class="feed-loading" role="status"><Icon name="loader" class="spinning" size={20} /><div><h3>正在读取官网动态</h3><p>等待 GitHub 页面加载，保留原页面顺序。</p></div></div>
+      <div class="feed-loading" role="status"><Icon name="loader" class="spinning" size={20} /><h3>正在读取官网动态…</h3></div>
     {:else if page?.items.length}
       <ol class="feed-list">
         {#each visibleItems as item (item.id)}
@@ -139,15 +138,15 @@
         {/each}
       </ol>
     {:else if saved}
-      <div class="feed-empty"><Icon name="activity" size={27} /><h3>上次保存时没有新动态</h3><p>历史内容不代表当前官网状态，验证后会显示最新结果。</p></div>
+      <div class="feed-empty"><Icon name="activity" size={27} /><h3>上次保存时无新动态</h3></div>
     {:else if !error}
-      <div class="feed-empty"><Icon name="activity" size={27} /><h3>官网暂时没有新动态</h3><p>这里显示 GitHub 实际加载的内容，稍后可以再刷新。</p><button class="button secondary small" disabled={preview || busy} onclick={() => void action('feed_refresh')}>刷新动态</button></div>
+      <div class="feed-empty"><Icon name="activity" size={27} /><h3>暂无新动态</h3><button class="button secondary small" disabled={preview || busy} onclick={() => void action('feed_refresh')}>刷新动态</button></div>
     {/if}
     {#if (connected || saved) && page && (page.items.length || page.lastUpdated)}
-      <footer class="feed-footer"><span>{page.loading ? '正在从官网读取…' : `${saved ? '历史记录' : '已读取'} ${page.items.length} 条`}{#if page.lastUpdated} · {saved ? '保存于' : '更新于'} {formatDate(page.lastUpdated, true)}{/if}</span>{#if compact}<span>主页摘要 · 最多 3 条</span>{:else if saved}<span>验证完成后可加载更多</span>{:else if page.hasMore}<button class="button secondary small" disabled={preview || busy} onclick={() => void action('feed_more')}><Icon name={busy ? 'loader' : 'chevronDown'} class={busy ? 'spinning' : ''} size={14} />{pending === 'feed_more' || page.loading ? '正在加载' : '加载更多'}</button>{:else}<span>{page.items.length >= 160 ? '已达到本次读取上限，可刷新重新读取' : '已到官网当前内容末尾'}</span>{/if}</footer>
+      <footer class="feed-footer"><span>{page.loading ? '正在读取…' : `${saved ? '历史记录' : '已读取'} ${page.items.length} 条`}{#if page.lastUpdated} · {formatDate(page.lastUpdated, true)}{/if}</span>{#if compact}<button class="text-button" onclick={() => openLink(page?.sourceUrl || 'https://github.com/dashboard-feed')}>{sourceLabel}<Icon name="external" size={12} /></button>{:else if saved}<span>验证完成后可加载更多</span>{:else if page.hasMore}<button class="button secondary small" disabled={preview || busy} onclick={() => void action('feed_more')}><Icon name={busy ? 'loader' : 'chevronDown'} class={busy ? 'spinning' : ''} size={14} />{pending === 'feed_more' || page.loading ? '正在加载' : '加载更多'}</button>{:else}<span>{page.items.length >= 160 ? '已达本次读取上限' : '已到末尾'}</span>{/if}</footer>
     {/if}
   </div>
-  <p class="feed-source"><Icon name="github" size={14} /><span>来源：{sourceLabel} · 按网页顺序展示</span><button class="text-button" onclick={() => openLink(page?.sourceUrl || 'https://github.com/dashboard-feed')}>打开来源<Icon name="external" size={12} /></button></p>
+  {#if !compact}<p class="feed-source"><button class="text-button" onclick={() => openLink(page?.sourceUrl || 'https://github.com/dashboard-feed')}><Icon name="github" size={13} />{sourceLabel}<Icon name="external" size={12} /></button></p>{/if}
 </section>
 
 <style>
@@ -182,8 +181,7 @@
   .feed-empty p { max-width: 58ch; font-size: 12px; }
   .feed-empty .feed-local-note { font-size: 11px; }
   .feed-loading { min-height: 170px; display: flex; justify-content: center; align-items: center; gap: 14px; padding: 25px; color: var(--muted); }
-  .feed-loading h3 { font-size: 14px; margin-bottom: 5px; }
-  .feed-loading p { font-size: 12px; }
+  .feed-loading h3 { font-size: 14px; }
   .feed-footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--border); background: var(--surface-soft); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
   .feed-source { display: flex; align-items: center; gap: 7px 10px; flex-wrap: wrap; color: var(--muted); font-size: 11px; margin-top: 10px; }
   .feed-source .text-button { margin-left: auto; font-size: 11px; }

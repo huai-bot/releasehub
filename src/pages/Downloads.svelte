@@ -17,7 +17,7 @@
   const visible = $derived(retained.filter(item => `${item.projectName} ${item.fileName}`.toLowerCase().includes(query.trim().toLowerCase()) && (filter === 'all' || (filter === 'active' ? isDownloadRunning(item) : filter === 'ready' ? ['completed', 'installed'].includes(item.status) : ['failed', 'cancelled'].includes(item.status)))).slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
 </script>
 
-<div class="page-heading"><div><h1>下载<span class="heading-count">{retained.length}</span></h1><p>查看进度，继续安装或定位文件。</p></div></div>
+<div class="page-heading"><h1>下载<span class="heading-count">{retained.length}</span></h1></div>
 <section class="surface downloads-surface">
   <div class="list-toolbar"><div class="segmented-tabs" aria-label="下载状态筛选"><button class:active={filter === 'all'} onclick={() => filter = 'all'}>全部</button><button class:active={filter === 'active'} onclick={() => filter = 'active'}>进行中 <span>{active}</span></button><button class:active={filter === 'ready'} onclick={() => filter = 'ready'}>已完成 <span>{ready}</span></button><button class:active={filter === 'issues'} onclick={() => filter = 'issues'}>失败 / 已取消</button></div></div>
   {#each visible as download (download.id)}
@@ -30,7 +30,7 @@
       {#if installation}<p class="installation-status" role="status">{installationLabel(installation)}</p>{/if}
       {#if running}<div class="download-progress"><progress aria-label={`${download.projectName} 下载进度`} max="100" value={download.totalBytes > 0 ? downloadPercent(download) : undefined}></progress><div><span>{download.status === 'installing' ? '正在安装…' : download.status === 'queued' ? '等待下载' : `${formatBytes(download.receivedBytes)} / ${download.totalBytes > 0 ? formatBytes(download.totalBytes) : '总大小未知'}`}</span><strong>{download.totalBytes > 0 && download.status === 'downloading' ? `${downloadPercent(download)}%` : ''}</strong></div></div>{/if}
       {#if download.error}<div class="download-error" role="alert"><Icon name="alert" size={15} /><p>{download.error}</p></div>{/if}
-      <div class="download-bottom"><details class="download-details"><summary>详情 / 更多</summary><div class="download-disclosure">
+      <div class="download-bottom"><details class="download-details"><summary>详情</summary><div class="download-disclosure">
         <p>{assetKindLabel(download.kind, installable, download.fileName)} · {formatDate(download.createdAt, true)}</p>
         {#if installation}
           <p>{installation.message}</p>

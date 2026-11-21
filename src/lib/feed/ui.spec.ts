@@ -31,7 +31,7 @@ afterEach(async () => { await cleanup?.(); target.remove(); vi.clearAllTimers();
 describe('homepage feed UI (synthetic fixtures only)', () => {
   it('connects the independent website session without requiring gh login', async () => {
     dispatchMock.mockImplementation(async (action: string) => action === 'feed_connect' ? { ...previewFeed('login'), loading: true } : previewFeed('login'));
-    show(); await settle(); expect(target.textContent).toContain('首次使用需要再登录一次');
+    show(); await settle(); expect(target.textContent).toContain('登录 GitHub 官网查看动态');
     await click('官网登录'); expect(dispatchMock).toHaveBeenCalledWith('feed_connect', {});
     expect(target.textContent).toContain('在官网窗口完成登录');
     expect(dispatchMock.mock.calls.some(([action]) => action === 'github_login')).toBe(false);
@@ -151,7 +151,7 @@ describe('homepage feed UI (synthetic fixtures only)', () => {
     const onLogin = vi.fn();
     const instance = createClassComponent({ component: GithubFeed, target, props: { preview: false, compact: true, active: true, onLogin, onopen, onadd, onnotice } });
     cleanup = async () => { instance.$destroy(); }; await settle();
-    expect(target.querySelectorAll('.feed-row')).toHaveLength(3); expect(target.textContent).toContain('主页摘要');
+    expect(target.querySelectorAll('.feed-row')).toHaveLength(3);
     expect([...target.querySelectorAll('button')].some((node) => node.textContent?.trim() === '退出网页')).toBe(false);
     feedState.clear(); dispatchMock.mockResolvedValue(previewFeed('login')); await feedState.refreshStatus(); await settle();
     // Cache clear starts status immediately; explicitly publish an anonymous action fixture.
