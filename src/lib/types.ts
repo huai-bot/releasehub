@@ -382,6 +382,8 @@ export interface GithubFeedItem {
 }
 export interface GithubFeedPage {
   cached?: boolean;
+  /** A cookie store from an earlier website login exists; validate silently, never trust as connected. */
+  remembered?: boolean;
   connected: boolean;
   loading: boolean;
   account: string | null;

@@ -44,7 +44,9 @@ export function createFeedState(send: FeedDispatch = dispatch) {
         const page = await send('feed_status', {});
         if (epoch !== generation || request !== sequence) return;
         accept(page);
-        if (page.cached && !page.loading && !validated.has(page.sessionRevision)) {
+        // Saved cards or a remembered website login are validated once per
+        // session revision in the background; neither is shown as connected.
+        if ((page.cached || page.remembered) && !page.connected && !page.loading && !validated.has(page.sessionRevision)) {
           validated.add(page.sessionRevision); validate = true;
         }
       } catch (error) {

@@ -20,7 +20,6 @@
   const initialLoading = $derived(preview ? previewPage === null : $feedState.initialLoading);
   const transportError = $derived(preview ? '' : $feedState.transportError);
   let previewState = $state<FeedPreviewState>('connected');
-  let disconnectArmed = $state(false);
   let adding = $state(new Set<string>());
   let added = $state(new Set<string>());
   let expanded = $state(new Set<string>());
@@ -31,16 +30,16 @@
   const saved = $derived(Boolean(page?.cached));
   const error = $derived(transportError || page?.error || '');
   const busy = $derived(Boolean(pending) || Boolean(page?.loading));
+  const restoring = $derived(Boolean(page?.remembered && !connected && !saved && (busy || initialLoading)));
   const sourceLabel = $derived(page?.sourceUrl && safeGithubUrl(page.sourceUrl) && new URL(page.sourceUrl).pathname === '/' ? 'GitHub 官网首页' : '官网 Dashboard feed');
   const visibleItems = $derived(compact ? page?.items.slice(0, 3) ?? [] : page?.items ?? []);
   const accountIdentity = $derived(`${page?.account ?? ''}:${page?.sessionRevision ?? 0}`);
   $effect(() => {
     accountIdentity;
-    adding = new Set(); added = new Set(); expanded = new Set(); disconnectArmed = false;
+    adding = new Set(); added = new Set(); expanded = new Set();
   });
   async function action(name: FeedAction) {
     if (preview || destroyed) return;
-    disconnectArmed = false;
     const next = await feedState.action(name);
     if (!destroyed && name === 'feed_disconnect' && next && !next.error) onnotice('已退出本机 GitHub 网页会话。', 'success');
   }
@@ -90,7 +89,7 @@
       {#if connected || saved}
         <button class="button secondary small" disabled={preview || Boolean(pending)} onclick={() => void action('feed_connect')}><Icon name="eye" size={14} />官网窗口</button>
         <button class="button secondary small" disabled={preview || busy} onclick={() => void action('feed_refresh')}><Icon name="refresh" size={14} />刷新</button>
-        {#if !compact}<button class="text-button feed-disconnect" disabled={preview || Boolean(pending)} onclick={() => disconnectArmed = !disconnectArmed}>退出网页</button>{/if}
+        {#if !compact}<button class="text-button feed-disconnect" disabled={preview || Boolean(pending)} onclick={() => void action('feed_disconnect')}>退出网页</button>{/if}
       {:else}
         <button class="button primary" disabled={preview || Boolean(pending) || initialLoading} onclick={connect}><Icon name={pending === 'feed_connect' ? 'loader' : 'github'} class={pending === 'feed_connect' ? 'spinning' : ''} size={16} />{pending === 'feed_connect' ? '正在打开' : page?.loading ? '继续网页登录' : onLogin ? '连接 GitHub' : '官网登录'}</button>
       {/if}
@@ -100,9 +99,6 @@
   {#if preview}
     <div class="feed-preview"><p><strong>首页动态示例</strong> · 以下内容为演示，不是真实账号动态。</p><label>示例状态<select aria-label="首页动态示例状态" bind:value={previewState} onchange={changePreview}><option value="connected">已连接</option><option value="login">未登录</option><option value="loading">读取中</option><option value="empty">空动态</option><option value="error">读取失败</option></select></label></div>
   {/if}
-  {#if disconnectArmed}
-    <div class="feed-confirm" role="group" aria-label="确认退出网页登录"><p>清除本机网页登录与动态缓存，不影响 GitHub 授权连接。</p><div><button class="button secondary small" onclick={() => disconnectArmed = false}>取消</button><button class="button secondary small" onclick={() => void action('feed_disconnect')}>确认退出</button></div></div>
-  {/if}
   {#if error}
     <div class="feed-error" role="alert"><Icon name="alert" size={17} /><p>{error}</p><button class="button secondary small" disabled={preview || Boolean(pending)} onclick={() => connected || saved ? void action('feed_refresh') : connect()}>重试</button></div>
   {/if}
@@ -111,7 +107,9 @@
     <p class="feed-history" role="status">{busy ? '已显示历史内容，正在后台验证网页登录并更新…' : error ? '更新失败，保留历史内容。' : '已显示历史内容，网页会话待验证。'}</p>
   {/if}
   <div class="feed-content" aria-busy={initialLoading || busy}>
-    {#if !connected && !saved && !initialLoading && !page?.items.length}
+    {#if restoring}
+      <div class="feed-loading" role="status"><Icon name="loader" class="spinning" size={20} /><h3>正在恢复官网登录…</h3></div>
+    {:else if !connected && !saved && !initialLoading && !page?.items.length}
       <div class="feed-empty">
         <Icon name="activity" size={27} />
         <h3>{page?.loading ? '在官网窗口完成登录' : '登录 GitHub 官网查看动态'}</h3>
@@ -185,12 +183,10 @@
   .feed-footer { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--border); background: var(--surface-soft); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
   .feed-source { display: flex; align-items: center; gap: 7px 10px; flex-wrap: wrap; color: var(--muted); font-size: 11px; margin-top: 10px; }
   .feed-source .text-button { margin-left: auto; font-size: 11px; }
-  .feed-preview, .feed-confirm { margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 13px; font-size: 11px; border: 1px solid var(--border); border-radius: 6px; }
+  .feed-preview { margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; padding: 10px 13px; font-size: 11px; border: 1px solid var(--border); border-radius: 6px; }
   .feed-preview { background: var(--warning-bg); color: var(--warning); }
   .feed-preview label { display: flex; align-items: center; gap: 8px; }
   .feed-preview select { padding: 4px 7px; font-size: 11px; }
-  .feed-confirm { color: var(--subtle); background: var(--surface-soft); }
-  .feed-confirm > div { display: flex; gap: 8px; }
   .feed-error { display: flex; align-items: flex-start; gap: 9px; padding: 12px 14px; margin-bottom: 12px; background: var(--danger-bg); color: var(--danger); border-radius: 6px; font-size: 12px; }
   .feed-error > :global(svg) { margin-top: 2px; }
   .feed-error p { flex: 1; overflow-wrap: anywhere; }

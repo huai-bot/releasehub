@@ -22,6 +22,7 @@
   import Connections from './pages/Connections.svelte';
   import { isSubscribed } from './lib/github';
   import SettingsPage from './pages/Settings.svelte';
+  import { formatInterval } from './lib/motion';
 
   type DialogState = { kind: 'add' } | { kind: 'install'; download: DownloadRecord; plan?: InstallPreview } | { kind: 'managed'; projectId: string } | { kind: 'mark'; project: Project } | { kind: 'note'; project: Project } | { kind: 'import' } | { kind: 'standaloneBackup'; project: Project } | { kind: 'settings'; project: Project };
   interface Toast { id: number; message: string; tone: Tone }
@@ -49,8 +50,10 @@
   let startupPageApplied = false;
   let githubVisited = $state(true);
   let visitedLocal = $state(new Set<Page>());
+  let startupDone = $state(false);
   $effect(() => {
-    if (['library', 'updates', 'downloads'].includes(page) && !visitedLocal.has(page)) visitedLocal = new Set([...visitedLocal, page]);
+    // Only real visits keep a page mounted: never the default page shown before startup.
+    if (startupDone && ['home', 'library', 'updates', 'downloads'].includes(page) && !visitedLocal.has(page)) visitedLocal = new Set([...visitedLocal, page]);
   });
   $effect(() => { if (page === 'github') githubVisited = true; });
   let refreshRequested = false;
@@ -58,7 +61,26 @@
   let unlisten: (() => void) | undefined;
   let toastId = 0;
   const toastTimers = new Set<ReturnType<typeof setTimeout>>();
-  const busy = $derived(pending.size > 0);
+  // Last known snapshot, painted instantly at launch while the live one loads.
+  // Holds no credentials; actions stay disabled until the live state arrives.
+  const SNAPSHOT_CACHE = 'releasehub.snapshot.v1';
+  let stale = $state(false);
+  let persistTimer: ReturnType<typeof setTimeout> | undefined;
+  function persistSnapshot() {
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      if (!snapshot || preview || destroyed) return;
+      try { globalThis.localStorage?.setItem(SNAPSHOT_CACHE, JSON.stringify({ version: 1, savedAt: Date.now(), snapshot })); } catch { /* storage full or unavailable: skip */ }
+    }, 800);
+  }
+  function cachedSnapshot(): Snapshot | null {
+    try {
+      const value = JSON.parse(globalThis.localStorage?.getItem(SNAPSHOT_CACHE) ?? 'null');
+      const cached = value?.version === 1 ? value.snapshot : null;
+      return cached?.settings && cached.runtime && Array.isArray(cached.projects) && Array.isArray(cached.downloads) ? { ...cached, buildTasks: cached.buildTasks ?? [], repositoryNotes: cached.repositoryNotes ?? [] } : null;
+    } catch { return null; }
+  }
+  const busy = $derived(pending.size > 0 || stale);
   const selectedProject = $derived(snapshot?.projects.find((project) => project.id === selectedId) ?? null);
   const managedProjectId = $derived(modal?.kind === 'managed' ? modal.projectId : null);
   const managedProject = $derived(snapshot?.projects.find((project) => project.id === managedProjectId) ?? null);
@@ -88,9 +110,10 @@
     const theme = snapshot?.settings.theme ?? 'system';
     const resolved = theme === 'system' ? systemDark ? 'dark' : 'light' : theme;
     document.documentElement.dataset.theme = resolved;
-    document.documentElement.dataset.colorScheme = snapshot?.settings.colorScheme ?? 'blue';
-    document.documentElement.dataset.material = snapshot?.settings.material ?? 'acrylic';
-    document.documentElement.dataset.blur = String(snapshot?.settings.blur ?? true);
+    // 0.6 uses one soft-UI material and the cobalt accent for every theme.
+    document.documentElement.dataset.colorScheme = 'blue';
+    document.documentElement.dataset.material = 'soft';
+    document.documentElement.dataset.blur = 'false';
     document.documentElement.style.colorScheme = resolved;
     if (desktopAvailable()) void getCurrentWindow().setTheme(resolved).catch(() => {});
   });
@@ -116,7 +139,7 @@
         refreshRequested = false;
         const atRequestStart = snapshot;
         const next = await dispatch('snapshot', {});
-        if (!destroyed && !preview) snapshot = mergeSnapshotDownloads(snapshot, next, atRequestStart);
+        if (!destroyed && !preview) { snapshot = stale ? next : mergeSnapshotDownloads(snapshot, next, atRequestStart); stale = false; persistSnapshot(); }
       }
     })();
     try { await refreshPromise; } finally { refreshPromise = null; refreshing = false; }
@@ -144,9 +167,14 @@
       startupError = '请打开 ReleaseHub 桌面版使用，或进入界面预览。';
       loading = false; return;
     }
+    if (!snapshot) {
+      const cached = cachedSnapshot();
+      if (cached) { snapshot = cached; stale = true; loading = false; page = cached.settings.startupPage; startupPageApplied = true; startupDone = true; }
+    }
     try {
       await refreshSnapshot();
       if (snapshot && !startupPageApplied) { page = snapshot.settings.startupPage; startupPageApplied = true; }
+      startupDone = true;
       if (!unlisten && !destroyed) {
         try {
           const release = await watchChanges(
@@ -162,7 +190,10 @@
           if (destroyed) release(); else unlisten = release;
         } catch { notify('实时状态通知暂不可用，仍可手动刷新；进行中的任务会定期同步。', 'warning'); }
       }
-    } catch (error) { startupError = readableError(error); }
+    } catch (error) {
+      startupError = readableError(error);
+      if (stale) operationError = `暂时无法读取最新本机状态：${startupError}。当前显示上次保存的内容，请点右上角刷新。`;
+    }
     finally { loading = false; }
   }
 
@@ -171,17 +202,19 @@
     systemDark = media.matches;
     const updateSystem = (event: MediaQueryListEvent) => { systemDark = event.matches; };
     media.addEventListener('change', updateSystem);
+    const clearCached = () => { try { globalThis.localStorage?.removeItem(SNAPSHOT_CACHE); } catch { /* ignore */ } };
+    window.addEventListener('releasehub:cache-cleared', clearCached);
     void initialize();
     const poll = setInterval(() => {
       if (!unlisten && !preview && snapshot && !document.hidden && (snapshot.runtime.agent.enabled || (snapshot.installations ?? []).some(item => ['waiting', 'detecting', 'rebootRequired'].includes(item.status)) || snapshot.downloads.some((item) => ['queued', 'downloading', 'installing'].includes(item.status)) || snapshot.buildTasks.some((item) => ['claimed', 'running'].includes(item.status)))) void refreshSnapshot().catch(reportError);
     }, 5_000);
-    return () => { destroyed = true; unlisten?.(); clearInterval(poll); toastTimers.forEach(clearTimeout); media.removeEventListener('change', updateSystem); };
+    return () => { destroyed = true; window.removeEventListener('releasehub:cache-cleared', clearCached); clearTimeout(persistTimer); unlisten?.(); clearInterval(poll); toastTimers.forEach(clearTimeout); media.removeEventListener('change', updateSystem); };
   });
 
   async function enterPreview() {
     if (!import.meta.env.DEV || desktopAvailable()) return;
     const { createPreviewSnapshot } = await import('./lib/preview');
-    snapshot = createPreviewSnapshot(); preview = true; startupError = ''; operationError = '';
+    snapshot = createPreviewSnapshot(); preview = true; startupError = ''; operationError = ''; startupDone = true;
   }
   function exitPreview() { modal = null; selectedId = null; snapshot = null; preview = false; page = 'home'; query = ''; startupError = '界面预览已退出。真实操作请使用 ReleaseHub 桌面版。'; }
   const pageState = new Map<Page, { query: string; selectedId: string | null; scrollTop: number }>();
@@ -332,6 +365,10 @@
     if (preview && snapshot) { snapshot = { ...snapshot, settings: { ...snapshot.settings, ...changes } }; notify('预览设置已更新。', 'neutral'); return true; }
     return await operate('save_settings', { settings: changes }, { success: '设置已保存。' }) !== undefined;
   }
+  async function saveInterval(minutes: number): Promise<boolean> {
+    if (preview && snapshot) { snapshot = { ...snapshot, settings: { ...snapshot.settings, checkIntervalMinutes: minutes } }; return true; }
+    return await operate('save_settings', { settings: { checkIntervalMinutes: minutes } }, { key: 'save-interval', success: minutes ? `已改为每 ${formatInterval(minutes)} 自动检查。` : '已关闭自动检查，仍可随时手动检查。' }) !== undefined;
+  }
   async function saveProxy(proxy: ProxySettings, password?: string): Promise<boolean> {
     if (preview && snapshot) { snapshot = { ...snapshot, settings: { ...snapshot.settings, proxy } }; notify('预览设置已更新。', 'neutral'); return true; }
     return await operate('save_proxy', { proxy, ...(password === undefined ? {} : { password }) }, { success: '代理设置已保存，新请求将使用新设置。' }) !== undefined;
@@ -444,11 +481,11 @@
     <div class="workspace"><TitleBar title={pageLabels[page]} bind:query bind:inputElement={searchInput} {busy} {refreshing} onsearch={() => { if (!['library', 'updates', 'downloads'].includes(page)) page = 'library'; }} onrefresh={() => void refreshView()} onerror={reportError} />
       {#if preview}<div class="preview-banner"><Icon name="monitor" size={15} /><strong>界面预览</strong><span>示例版本、账号与状态</span><button onclick={exitPreview}>退出预览<Icon name="close" size={13} /></button></div>{/if}
       {#if operationError}<div class="operation-error" role="alert"><Icon name="alert" size={17} /><span>{operationError}</span><button class="icon-button" aria-label="收起错误提示" onclick={() => operationError = ''}><Icon name="close" size={16} /></button></div>{/if}
-      <div class="workspace-content" class:with-details={showingDetails}><main class="page-content" id={!['github', 'library', 'updates', 'downloads'].includes(page) ? 'main-content' : undefined} hidden={['github', 'library', 'updates', 'downloads'].includes(page)}>
-        {#if page === 'home'}<Home {snapshot} {busy} {selectedId} {preview} active={page === 'home'} oninstall={showInstall} onopen={(url) => void openUrl(url)} onGithubAdd={addGithubRepository} onnotice={notify} onGithubLogin={() => void navigate('github')} onpage={navigate} onselect={chooseProject} onadd={showAdd} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} />
-        {:else if page === 'agent'}<Connections settings={snapshot.settings} runtime={snapshot.runtime} {busy} {preview} onsave={(changes) => void saveSettings(changes)} onintegration={getIntegration} oncopy={(text) => void copy(text)} />
+      <div class="workspace-content" class:with-details={showingDetails}>{#if visitedLocal.has('home') || page === 'home'}<main class="page-content" id={page === 'home' ? 'main-content' : undefined} hidden={page !== 'home'}><Home {snapshot} {busy} {selectedId} {preview} active={page === 'home'} oninstall={showInstall} onopen={(url) => void openUrl(url)} onGithubAdd={addGithubRepository} onnotice={notify} onGithubLogin={() => void navigate('github')} onpage={navigate} onselect={chooseProject} onadd={showAdd} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} oninterval={saveInterval} /></main>{/if}
+      {#if page === 'agent' || page === 'settings'}<main class="page-content" id="main-content">
+        {#if page === 'agent'}<Connections settings={snapshot.settings} runtime={snapshot.runtime} {busy} {preview} onsave={(changes) => void saveSettings(changes)} onintegration={getIntegration} oncopy={(text) => void copy(text)} />
         {:else if page === 'settings'}<SettingsPage settings={snapshot.settings} runtime={snapshot.runtime} {busy} {preview} onsave={saveSettings} onproxy={saveProxy} onproxytest={(proxy, password) => dispatch('test_proxy', { proxy, ...(password === undefined ? {} : { password }) })} onintegration={getIntegration} ongithub={() => navigate('github')} ondata={() => void operate('open_data_directory', {}, { refresh: false })} onexport={() => void exportFile()} onimport={() => void importFile()} ontextimport={() => { importContents = ''; openDialog({ kind: 'import' }); }} oncopyexport={() => void copyExport()} oncopy={(text) => void copy(text)} onopen={(url) => void openUrl(url)} />{/if}
-      </main>
+      </main>{/if}
       {#each ['library', 'updates'] as localPage}
          {#if visitedLocal.has(localPage as Page) || page === localPage}<main class="page-content" id={page === localPage ? 'main-content' : undefined} hidden={page !== localPage}><Library projects={snapshot.projects} notes={snapshot.repositoryNotes} layout={snapshot.settings.libraryLayout ?? 'three'} onlayout={(libraryLayout) => void saveSettings({ libraryLayout })} onnote={showNote} updatesOnly={localPage === 'updates'} active={page === localPage} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} onOpen={(project) => void runProject(project)} onFiles={showProjectFiles} onBackup={showProjectBackup} onRepository={(project) => void openUrl(`https://github.com/${project.owner}/${project.repo}`)} /></main>{/if}
        {/each}

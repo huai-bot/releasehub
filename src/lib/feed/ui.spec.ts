@@ -45,11 +45,11 @@ describe('homepage feed UI (synthetic fixtures only)', () => {
     await click('加入软件库'); expect(dispatchMock).toHaveBeenCalledWith('github_repository', { repository: 'tauri-apps/tauri' });
     expect(onadd).toHaveBeenCalledTimes(1); expect(button('已加入').disabled).toBe(true);
   });
-  it('clears old account rows immediately on confirmed disconnect and ignores a stale poll', async () => {
+  it('clears old account rows immediately on one-click disconnect and ignores a stale poll', async () => {
     const late = deferred<GithubFeedPage>(); const logout = deferred<GithubFeedPage>(); let polls = 0;
     dispatchMock.mockImplementation(async (action: string) => action === 'feed_disconnect' ? logout.promise : ++polls === 1 ? live() : late.promise);
     show(); await settle(); await vi.advanceTimersByTimeAsync(5000); await settle();
-    await click('退出网页'); expect(target.textContent).toContain('确认退出'); await click('确认退出');
+    await click('退出网页'); expect(target.textContent).not.toContain('确认退出');
     expect(target.querySelectorAll('.feed-row')).toHaveLength(0);
     late.resolve(live()); await settle(); expect(target.querySelectorAll('.feed-row')).toHaveLength(0);
     logout.resolve({ ...previewFeed('login'), sessionRevision: 2 }); await settle(); expect(target.textContent).not.toContain('@real-account');

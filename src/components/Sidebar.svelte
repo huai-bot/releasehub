@@ -46,13 +46,14 @@
         <Icon name={item.icon} size={19} /><span>{item.label}</span>
         {#if item.id === 'updates' && updateCount}<span class="nav-count">{updateCount}</span>{/if}
         {#if item.id === 'downloads' && downloadCount}<span class="nav-dot" aria-label={`${downloadCount} 项进行中`}></span>{/if}
+        <i class="nav-led" aria-hidden="true"></i>
       </button>
     {/each}
   </nav>
   <span class="sr-only" aria-live="polite">{announcement}</span>
   <button class="sidebar-add" onclick={onadd}><Icon name="plus" size={17} />添加资源</button>
   <div class="sidebar-spacer"></div>
-  <button class:active={page === 'settings'} class="nav-item settings-nav" aria-current={page === 'settings' ? 'page' : undefined} onclick={() => onnavigate('settings')}><Icon name="settings" size={19} /><span>设置</span></button>
+  <button class:active={page === 'settings'} class="nav-item settings-nav" aria-current={page === 'settings' ? 'page' : undefined} onclick={() => onnavigate('settings')}><Icon name="settings" size={19} /><span>设置</span><i class="nav-led" aria-hidden="true"></i></button>
   <div class="sidebar-footer"><button class="storage-button" onclick={ondata} title="打开数据目录"><span class="status-dot"></span>{preview ? '界面预览' : snapshot.runtime.portable ? '便携工作空间' : '本机工作空间'}<Icon name="chevronRight" size={13} /></button><span>v{snapshot.runtime.appVersion} <span class="footer-dot">·</span> Windows x64</span></div>
 </aside>
 

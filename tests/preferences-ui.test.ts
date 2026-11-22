@@ -83,8 +83,8 @@ describe('startup and desktop navigation', () => {
     expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'snapshot')).toHaveLength(1);
   });
 
-  it('saves independent color scheme and clears only page cache', async () => {
-    let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'home';
+  it('uses one soft-UI material with the cobalt accent and clears only page cache', async () => {
+    let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'home'; snapshot.settings.colorScheme = 'teal'; snapshot.settings.material = 'mica';
     mocks.dispatch.mockImplementation(async (action: string, payload: { settings?: Partial<Settings> }) => {
       if (action === 'snapshot') return snapshot;
       if (action === 'save_settings') { snapshot = { ...snapshot, settings: { ...snapshot.settings, ...payload.settings } }; return snapshot.settings; }
@@ -93,11 +93,11 @@ describe('startup and desktop navigation', () => {
       throw new Error(`Unexpected action ${action}`);
     });
     const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    expect(document.documentElement.dataset.colorScheme).toBe('blue');
+    expect(document.documentElement.dataset.material).toBe('soft');
+    expect(document.documentElement.dataset.blur).toBe('false');
     button('设置').click(); await settle();
-    button('青绿').click(); await settle();
-    expect(mocks.dispatch).toHaveBeenCalledWith('save_settings', { settings: { colorScheme: 'teal' } });
-    expect(document.documentElement.dataset.colorScheme).toBe('teal');
-    expect(snapshot.settings.theme).toBe('system');
+    expect(target.querySelector('.palette-option, .material-option')).toBeNull();
     button('清理页面缓存').click(); await settle();
     expect(mocks.dispatch).toHaveBeenCalledWith('github_cache_clear', {});
     expect(target.textContent).toContain('下载文件和订阅保持不变');
@@ -127,22 +127,27 @@ describe('startup and desktop navigation', () => {
     details.click(); await settle(); expect(target.querySelector('.detail-panel')).not.toBeNull();
   });
 
-  it('persists material and blur choices and applies them to the whole app', async () => {
-    let snapshot = createPreviewSnapshot();
+  it('adjusts the automatic check interval from the home knob and switch', async () => {
+    let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'home'; snapshot.settings.checkIntervalMinutes = 60;
     mocks.dispatch.mockImplementation(async (action: string, payload: { settings?: Partial<Settings> }) => {
       if (action === 'snapshot') return snapshot;
       if (action === 'save_settings') { snapshot = { ...snapshot, settings: { ...snapshot.settings, ...payload.settings } }; return snapshot.settings; }
-      if (action === 'github_cache_stats') return { bytes: 0, entries: 0 };
       throw new Error(`Unexpected action ${action}`);
     });
     const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
-    button('设置').click(); await settle();
-    expect(document.documentElement.dataset.material).toBe('acrylic');
-    [...target.querySelectorAll<HTMLButtonElement>('.material-option')].find(item => item.textContent?.includes('云母'))!.click(); await settle();
-    expect(document.documentElement.dataset.material).toBe('mica');
-    button('背景模糊').click(); await settle();
-    expect(document.documentElement.dataset.blur).toBe('false');
-    expect(snapshot.settings.material).toBe('mica'); expect(snapshot.settings.blur).toBe(false);
+    const knob = target.querySelector<HTMLElement>('[role="slider"][aria-label="自动检查间隔"]')!;
+    expect(knob.getAttribute('aria-valuenow')).toBe('60');
+    knob.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); await settle();
+    expect(knob.getAttribute('aria-valuenow')).toBe('120');
+    expect(target.querySelector('.target-line')?.textContent).toContain('2 小时');
+    await new Promise((resolve) => setTimeout(resolve, 500)); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('save_settings', { settings: { checkIntervalMinutes: 120 } });
+    target.querySelector<HTMLButtonElement>('[role="switch"][aria-label="自动检查"]')!.click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('save_settings', { settings: { checkIntervalMinutes: 0 } });
+    expect(target.querySelector('.cadence')?.classList.contains('off')).toBe(true);
+    target.querySelector<HTMLButtonElement>('[role="switch"][aria-label="自动检查"]')!.click(); await settle();
+    const saves = mocks.dispatch.mock.calls.filter((call: unknown[]) => call[0] === 'save_settings').map((call: unknown[]) => call[1]);
+    expect(saves).toEqual([{ settings: { checkIntervalMinutes: 120 } }, { settings: { checkIntervalMinutes: 0 } }, { settings: { checkIntervalMinutes: 120 } }]);
   });
 
   it('keeps every workspace page once and persists keyboard and drag ordering', async () => {

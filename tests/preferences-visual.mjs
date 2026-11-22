@@ -73,12 +73,7 @@ try {
       await check(`library-${layout}-dark`);
     }
     await nav('设置');
-    for (const [label, scheme] of [['青绿', 'teal'], ['柔紫', 'violet'], ['暖琥珀', 'amber']]) {
-      await page.getByRole('button', { name: label, exact: true }).click();
-      await page.waitForFunction(value => document.documentElement.dataset.colorScheme === value, scheme);
-      await check(`settings-${scheme}-dark`);
-    }
-    await page.getByRole('button', { name: '经典蓝', exact: true }).click();
+    await check('settings-soft-dark');
     await nav('AI 连接');
     await page.getByRole('button', { name: '查看配置示例', exact: true }).click();
     await page.locator('#mcp-client-config').waitFor();

@@ -83,30 +83,21 @@
 </article>
 
 <style>
+  /* Soft-UI card: raised, same colour as the page; hover lifts, press sinks 2px. */
   .project-card {
     min-width: 0;
     position: relative;
-    border: 1px solid var(--glass-border, var(--border));
-    border-radius: 18px;
-    background: var(--glass-card, var(--surface));
-    box-shadow: var(--glass-shadow);
-    transition: background 0.18s cubic-bezier(0.16, 1, 0.3, 1),
-                border-color 0.18s cubic-bezier(0.16, 1, 0.3, 1),
-                transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
-                box-shadow 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+    border: 0;
+    border-radius: var(--r-card, 24px);
+    background: var(--neu-bg, var(--surface));
+    box-shadow: var(--raise);
+    transition: transform 220ms var(--spring), box-shadow 180ms ease;
   }
-  .project-card:hover {
-    background: var(--glass-card-hover, var(--surface-soft));
-    border-color: var(--glass-border-focus, var(--accent-soft));
-    transform: translateY(-1.5px);
-    box-shadow: 0 8px 24px -4px rgba(20, 34, 56, 0.08), 0 2px 6px -1px rgba(20, 34, 56, 0.04);
-  }
+  .project-card:hover { transform: translateY(-2px); box-shadow: var(--raise-hover); }
+  .project-card:active { transform: translateY(2px); box-shadow: var(--inset); transition-duration: 120ms; }
   .project-card.focused,
-  .project-card:focus-within {
-    border-color: var(--accent);
-    background: var(--glass-card-selected, var(--surface-soft));
-    box-shadow: 0 0 0 2px var(--accent-soft), var(--glass-shadow);
-  }
+  .project-card:focus-within { box-shadow: var(--inset); transform: translateY(2px); }
+  .project-card.focused::after { content: ""; position: absolute; top: 14px; right: 14px; width: 8px; height: 8px; border-radius: 50%; background: var(--cobalt); box-shadow: var(--cobalt-glow); }
   .card-identity {
     width: 100%;
     min-height: 184px;
@@ -125,13 +116,13 @@
     height: 68px;
     display: grid;
     place-items: center;
-    border-radius: 16px;
-    background: var(--accent-soft);
-    color: var(--accent);
+    border-radius: 18px;
+    background: var(--neu-bg);
+    color: var(--subtle);
     font-size: 24px;
     font-weight: 650;
     overflow: hidden;
-    box-shadow: 0 4px 14px -2px rgba(20, 34, 56, 0.08);
+    box-shadow: var(--raise-sm);
     flex-shrink: 0;
   }
   .card-avatar img {

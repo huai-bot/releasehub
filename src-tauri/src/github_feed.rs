@@ -39,6 +39,9 @@ pub struct GithubFeedPage {
     pub connected: bool,
     /// Saved cards are historical data, never proof of a live website login.
     pub cached: bool,
+    /// A cookie store from an earlier website login exists on this machine.
+    /// The UI validates it silently at launch; it is not a verified session.
+    pub remembered: bool,
     pub loading: bool,
     pub account: Option<String>,
     pub items: Vec<GithubFeedItem>,
@@ -51,7 +54,7 @@ pub struct GithubFeedPage {
 }
 impl Default for GithubFeedPage {
     fn default() -> Self {
-        Self { connected: false, cached: false, loading: false, account: None, items: Vec::new(), has_more: false,
+        Self { connected: false, cached: false, remembered: false, loading: false, account: None, items: Vec::new(), has_more: false,
             last_updated: None, error: None, source_url: SOURCE.into(), request_id: Uuid::new_v4().to_string(), session_revision: 0 }
     }
 }
@@ -120,6 +123,7 @@ impl GitHubFeedService {
         // treats remembered account metadata as a verified website session.
         if let (Ok(root), Ok(mut state)) = (service.profile_root(), service.state.lock()) {
             if let Some(record) = read_profile(&root) {
+                state.page.remembered = has_cookie_store(&root, &record);
                 if let Some(cache) = read_feed_cache(&root, &record) {
                     state.page.cached = true;
                     state.page.account = Some(cache.account);
@@ -370,7 +374,10 @@ impl GitHubFeedService {
         let root = self.machine_local_root.join("github-feed-webview");
         if fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.file_type().is_symlink()) { return Err("网页登录目录不能是链接。".into()); }
         fs::create_dir_all(&root).map_err(|_| "无法建立本机网页登录目录。")?;
-        root.canonicalize().map_err(|_| "无法定位本机网页登录目录。".into())
+        // canonicalize() yields a verbatim `\\?\C:\...` path on Windows. WebView2
+        // accepts it as --user-data-dir but then keeps cookies in memory only,
+        // which made every restart lose the website login. Pass a plain path.
+        root.canonicalize().map(plain_path).map_err(|_| "无法定位本机网页登录目录。".into())
     }
 
     fn rotate_profile(&self, fingerprint: &str) -> Result<ProfileRecord, String> {
@@ -429,6 +436,7 @@ impl GitHubFeedService {
         match payload.status.as_str() {
             "login" => {
                 clear_account(&mut state, None);
+                state.page.remembered = false;
                 let cleanup_error = self.profile_root().and_then(|root| clear_feed_cache(&root)).err();
                 state.page.loading = false; state.started = None;
                 state.page.error = cleanup_error.or_else(|| payload.error.map(|error| plain_text(&error, 400)))
@@ -445,6 +453,7 @@ impl GitHubFeedService {
                 state.page.error = None;
                 state.page.last_updated = Some(Utc::now().to_rfc3339()); state.started = None;
                 state.page.cached = false;
+                state.page.remembered = true;
                 // Persist only the sanitized, accepted snapshot while still
                 // holding the same lock used by clear/account invalidation.
                 if let Err(error) = self.profile_root().and_then(|root| write_feed_cache(&root, &state.page)) { state.page.error = Some(error); }
@@ -499,6 +508,22 @@ fn clear_account(state: &mut FeedState, account: Option<String>) {
     state.append = false;
 }
 fn source_url() -> Url { Url::parse(SOURCE).expect("constant GitHub URL") }
+/// Strip the Windows verbatim prefix (`\\?\C:\x` -> `C:\x`, `\\?\UNC\h\s` -> `\\h\s`).
+/// Other paths are returned unchanged. Only used for paths we just canonicalized.
+fn plain_path(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy().into_owned();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") { return PathBuf::from(format!(r"\\{rest}")); }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        if rest.as_bytes().get(1) == Some(&b':') { return PathBuf::from(rest); }
+    }
+    path
+}
+/// A persisted cookie store means a remembered website login worth validating
+/// silently at launch. It is never treated as a verified session by itself.
+fn has_cookie_store(root: &Path, record: &ProfileRecord) -> bool {
+    let cookies = root.join(format!("profile-{}", record.id)).join("EBWebView").join("Default").join("Network").join("Cookies");
+    fs::symlink_metadata(&cookies).is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0)
+}
 fn is_github_url(url: &Url) -> bool { url.scheme() == "https" && url.host_str() == Some("github.com") && url.port().is_none() && url.username().is_empty() && url.password().is_none() }
 fn is_feed_url(url: &Url) -> bool { is_github_url(url) && matches!(url.path(), "/" | "/dashboard" | "/dashboard-feed") }
 fn is_login_url(url: &Url) -> bool { matches!(url.path().split('/').nth(1), Some("login" | "logout" | "session" | "sessions")) }
@@ -603,8 +628,8 @@ async fn remove_retired_profiles(root: &Path) -> Result<(), String> {
             let metadata = fs::symlink_metadata(&path).map_err(|_| "无法检查本机会话目录。")?;
             // Never follow a directory junction/symlink or remove outside our root.
             if !metadata.is_dir() || metadata.file_type().is_symlink() || path.parent() != Some(root) { continue; }
-            let canonical = path.canonicalize().map_err(|_| "无法确认本机会话目录。")?;
-            if canonical.parent() != Some(root) { continue; }
+            let canonical = path.canonicalize().map(plain_path).map_err(|_| "无法确认本机会话目录。")?;
+            if canonical.parent() != Some(plain_path(root.to_path_buf()).as_path()) { continue; }
             if fs::remove_dir_all(&canonical).is_err() { locked = true; }
         }
         if !locked { return Ok(()); }
@@ -716,6 +741,29 @@ mod tests {
         assert_eq!(restored.snapshot().unwrap()["account"], "saved-user");
         service.reset_session(None).unwrap(); service.rotate_profile("").unwrap();
         assert_ne!(service.profile("proxy-b").unwrap(), original); assert!(!root.join(CACHE_FILE).exists());
+    }
+    #[test]
+    fn webview_profile_paths_are_never_verbatim() {
+        assert_eq!(plain_path(PathBuf::from(r"\\?\C:\Users\a\b")), PathBuf::from(r"C:\Users\a\b"));
+        assert_eq!(plain_path(PathBuf::from(r"\\?\UNC\host\share\x")), PathBuf::from(r"\\host\share\x"));
+        assert_eq!(plain_path(PathBuf::from(r"C:\plain")), PathBuf::from(r"C:\plain"));
+        let temp = tempfile::tempdir().unwrap();
+        let service = GitHubFeedService::new(temp.path().to_path_buf(), Arc::new(ProxyState::new(ProxySettings::default(), None).unwrap()));
+        let root = service.profile_root().unwrap();
+        assert!(!root.to_string_lossy().starts_with(r"\\?\"));
+        assert!(!service.profile("proxy").unwrap().to_string_lossy().starts_with(r"\\?\"));
+    }
+    #[test]
+    fn remembered_cookie_store_is_reported_but_not_verified() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = GitHubFeedService::new(temp.path().to_path_buf(), Arc::new(ProxyState::new(ProxySettings::default(), None).unwrap()));
+        let profile = first.profile("proxy").unwrap();
+        let network = profile.join("EBWebView").join("Default").join("Network");
+        fs::create_dir_all(&network).unwrap(); fs::write(network.join("Cookies"), b"fixture").unwrap();
+        let restarted = GitHubFeedService::new(temp.path().to_path_buf(), Arc::new(ProxyState::new(ProxySettings::default(), None).unwrap()));
+        let snapshot = restarted.snapshot().unwrap();
+        assert_eq!(snapshot["remembered"], true); assert_eq!(snapshot["connected"], false); assert_eq!(snapshot["cached"], false);
+        restarted.reset_session(None).unwrap(); assert_eq!(restarted.snapshot().unwrap()["remembered"], false);
     }
     #[tokio::test]
     async fn cleanup_only_removes_retired_uuid_profiles() {

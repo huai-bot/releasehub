@@ -1,0 +1,217 @@
+/* ReleaseHub 0.6 · Neumorphism / soft UI layer.
+ * One warm surface: cards, keys and the page share #F2E8E0 and are shaped only by
+ * light (top-left) and shade (bottom-right). Depth is reserved for interactive
+ * elements; prose, lists and tables stay flat. Cobalt marks pressed / on / current /
+ * key data only; vermilion is a sparing alert. Loaded after app.css. */
+:root {
+  --neu-bg: #F2E8E0;
+  --neu-light: #FFFFFF;
+  --neu-dark: #D6C8BD;
+  --raise: -6px -6px 14px var(--neu-light), 6px 6px 14px var(--neu-dark);
+  --raise-hover: -8px -8px 18px var(--neu-light), 8px 8px 18px var(--neu-dark);
+  --raise-sm: -3px -3px 8px var(--neu-light), 3px 3px 8px var(--neu-dark);
+  --inset: inset 4px 4px 10px var(--neu-dark), inset -4px -4px 10px var(--neu-light);
+  --inset-sm: inset 2px 2px 5px var(--neu-dark), inset -2px -2px 5px var(--neu-light);
+  --cobalt: #2F4BD0;
+  --cobalt-glow: 0 0 6px rgba(47, 75, 208, .75), 0 0 14px rgba(47, 75, 208, .35);
+  --vermilion: #E2552D;
+  --spring: cubic-bezier(.34, 1.56, .64, 1);
+  --spring-soft: cubic-bezier(.3, 1.32, .6, 1);
+  --r-card: 24px;
+  --r-key: 16px;
+  --font-ui: "Bahnschrift", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-num: "Bahnschrift", "Cascadia Mono", Consolas, monospace;
+
+  --bg: var(--neu-bg); --surface: var(--neu-bg); --surface-soft: var(--neu-bg); --sidebar: var(--neu-bg); --hero: var(--neu-bg);
+  --text: #23201D; --heading: #23201D; --muted: #6E655E; --subtle: #4A433D;
+  --border: rgba(110, 101, 94, .16); --border-strong: rgba(110, 101, 94, .28);
+  --accent: var(--cobalt); --accent-hover: #2440B8; --accent-ink: #FFFFFF;
+  --accent-soft: rgba(47, 75, 208, .09); --mint: rgba(47, 75, 208, .18);
+  --danger: #B8401C; --danger-bg: rgba(226, 85, 45, .10);
+  --warning: #B8401C; --warning-bg: rgba(226, 85, 45, .08);
+  --success: var(--cobalt); --success-bg: rgba(47, 75, 208, .07);
+  --focus: var(--cobalt); --shadow: var(--raise);
+
+  --glass-workspace: var(--neu-bg); --glass-sidebar: var(--neu-bg); --glass-card: var(--neu-bg);
+  --glass-card-hover: var(--neu-bg); --glass-card-selected: var(--neu-bg); --glass-panel: var(--neu-bg);
+  --glass-control: var(--neu-bg); --glass-border: transparent; --glass-highlight: transparent;
+  --glass-shadow: none; --glass-filter: none; --glass-wallpaper-opacity: 0; --glass-ring: transparent;
+  font-family: var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: var(--neu-bg);
+}
+:root[data-theme="dark"] {
+  --neu-bg: #24211E; --neu-light: #312D29; --neu-dark: #171513;
+  --cobalt: #7D93FF; --cobalt-glow: 0 0 6px rgba(125, 147, 255, .8), 0 0 16px rgba(125, 147, 255, .35);
+  --vermilion: #FF7A52;
+  --bg: var(--neu-bg); --surface: var(--neu-bg); --surface-soft: var(--neu-bg); --sidebar: var(--neu-bg); --hero: var(--neu-bg);
+  --text: #EDE5DD; --heading: #F6EFE8; --muted: #A89E95; --subtle: #CFC5BC;
+  --border: rgba(207, 197, 188, .12); --border-strong: rgba(207, 197, 188, .22);
+  --accent: var(--cobalt); --accent-hover: #A3B3FF; --accent-ink: #10142B;
+  --accent-soft: rgba(125, 147, 255, .12); --mint: rgba(125, 147, 255, .22);
+  --danger: #FF8C66; --danger-bg: rgba(255, 122, 82, .12); --warning: #FF8C66; --warning-bg: rgba(255, 122, 82, .10);
+  --success: var(--cobalt); --success-bg: rgba(125, 147, 255, .10); --focus: var(--cobalt);
+  --glass-workspace: var(--neu-bg); --glass-sidebar: var(--neu-bg); --glass-card: var(--neu-bg); --glass-card-hover: var(--neu-bg);
+  --glass-card-selected: var(--neu-bg); --glass-panel: var(--neu-bg); --glass-control: var(--neu-bg);
+  --glass-border: transparent; --glass-highlight: transparent; --glass-shadow: none; --glass-ring: transparent;
+  background: var(--neu-bg);
+}
+html body { background: var(--neu-bg); font-family: var(--font-ui); color: var(--text); }
+html body::before, html body::after { display: none; }
+::selection { background: var(--mint); }
+h1, h2, h3 { letter-spacing: -.01em; }
+.mono, code, kbd, time, .version-pill, .nav-count, .subtle-count { font-variant-numeric: tabular-nums; }
+
+/* ---- Shell: one continuous surface, no panels drawn by borders ---- */
+html .app-shell { background: var(--neu-bg); }
+html .sidebar, html .workspace, html .topbar { background: var(--neu-bg); border: 0; box-shadow: none; }
+html .workspace::before, html .sidebar::before { display: none; }
+html .workspace { margin: 0; border-radius: 0; }
+html .topbar { border-bottom: 0; height: 60px; flex-basis: 60px; }
+html .sidebar { padding: 22px 18px 18px; width: 236px; flex-basis: 236px; }
+html .brand { margin-bottom: 26px; }
+html .brand-mark { border-radius: 50%; box-shadow: var(--raise-sm); }
+
+/* ---- Keycap navigation ---- */
+html .sidebar nav { gap: 12px; }
+html .nav-item, html .settings-nav {
+  position: relative; min-height: 46px; padding: 10px 16px 10px 14px; border-radius: var(--r-key);
+  background: var(--neu-bg); color: var(--subtle); font-weight: 550; box-shadow: var(--raise-sm);
+  transition: transform 220ms var(--spring), box-shadow 180ms ease, color 160ms ease;
+}
+html .nav-item:hover:not(.active), html .nav-item:hover { background: var(--neu-bg); color: var(--heading); transform: translateY(-1px); box-shadow: var(--raise); }
+html .nav-item:active, html .nav-item.active, html .nav-item.active:hover {
+  background: var(--neu-bg); color: var(--cobalt); font-weight: 650; box-shadow: var(--inset); transform: translateY(2px);
+}
+html .nav-item:active { transition-duration: 120ms; }
+.nav-led { position: absolute; right: 14px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%;
+  background: var(--neu-dark); box-shadow: var(--inset-sm); transition: background 200ms ease, box-shadow 240ms var(--spring); }
+html .nav-item.active .nav-led { background: var(--cobalt); box-shadow: var(--cobalt-glow); }
+html .nav-item .nav-count { margin-left: auto; margin-right: 18px; border-radius: 9px; background: var(--neu-bg); box-shadow: var(--inset-sm); color: var(--heading); }
+html .nav-item.active .nav-count { background: var(--neu-bg); color: var(--cobalt); }
+html .nav-item .nav-dot { margin-right: 18px; background: var(--vermilion); }
+html .nav-item.drop-target { box-shadow: var(--inset); }
+html .sidebar-add { border: 0; border-radius: var(--r-key); min-height: 44px; background: var(--neu-bg); box-shadow: var(--raise-sm); color: var(--heading); font-weight: 600;
+  transition: transform 220ms var(--spring), box-shadow 180ms ease, color 160ms; }
+html .sidebar-add:hover { background: var(--neu-bg); color: var(--heading); box-shadow: var(--raise); transform: translateY(-1px); }
+html .sidebar-add:active { box-shadow: var(--inset); transform: translateY(2px); color: var(--cobalt); transition-duration: 120ms; }
+html .sidebar-footer { border-top: 0; }
+html .status-dot { background: var(--cobalt); box-shadow: var(--cobalt-glow); }
+
+/* ---- Buttons: raised keys; press = inset + sink 2px; release springs back ---- */
+html .button, html .button.secondary, html .button.primary, html .button.danger {
+  border: 0; border-radius: var(--r-key); background: var(--neu-bg); color: var(--heading); box-shadow: var(--raise-sm);
+  transition: transform 220ms var(--spring), box-shadow 180ms ease, color 160ms ease;
+}
+html .button.primary { font-weight: 700; box-shadow: var(--raise); }
+html .button.danger { color: var(--danger); }
+html .button:hover:not(:disabled), html .button.secondary:hover:not(:disabled), html .button.primary:hover:not(:disabled) {
+  background: var(--neu-bg); color: var(--heading); border: 0; transform: translateY(-1px); box-shadow: var(--raise-hover);
+}
+html .button:active:not(:disabled), html .button[aria-pressed="true"] { transform: translateY(2px); box-shadow: var(--inset); color: var(--cobalt); transition-duration: 120ms; }
+html .button:disabled { opacity: .5; box-shadow: var(--raise-sm); transform: none; }
+html .button.small { border-radius: 14px; }
+html .icon-button { border-radius: 50%; background: var(--neu-bg); color: var(--subtle); box-shadow: var(--raise-sm); transition: transform 220ms var(--spring), box-shadow 180ms, color 160ms; }
+html .icon-button:hover:not(:disabled) { background: var(--neu-bg); color: var(--heading); transform: translateY(-1px); box-shadow: var(--raise); }
+html .icon-button:active:not(:disabled), html .icon-button.accent-button { box-shadow: var(--inset-sm); transform: translateY(1px); color: var(--cobalt); background: var(--neu-bg); }
+html .window-controls { border-left: 0; }
+html .window-controls button { box-shadow: none; border-radius: 0; }
+html .text-button { color: var(--subtle); font-weight: 600; }
+html .text-button:hover:not(:disabled) { color: var(--heading); }
+html .text-button:active:not(:disabled) { color: var(--cobalt); }
+a, html .plain-link { color: var(--heading); }
+html .plain-link:hover { color: var(--cobalt); }
+
+/* ---- Inputs live in recessed wells ---- */
+html input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), html select, html textarea {
+  border: 0; border-radius: 14px; background: var(--neu-bg); box-shadow: var(--inset-sm); color: var(--text);
+}
+html input:not([type="checkbox"]):focus, html select:focus, html textarea:focus { box-shadow: var(--inset), 0 0 0 2px rgba(47, 75, 208, .35); }
+html input[type="checkbox"], html input[type="radio"] { accent-color: var(--cobalt); }
+html .global-search, html .input-leading { border: 0; border-radius: 18px; background: var(--neu-bg); box-shadow: var(--inset-sm); height: 38px; }
+html .global-search:focus-within, html .input-leading:focus-within { background: var(--neu-bg); box-shadow: var(--inset); }
+html .global-search input, html .input-leading input { box-shadow: none; background: transparent; }
+html .global-search kbd { border: 0; background: var(--neu-bg); box-shadow: var(--raise-sm); border-radius: 6px; }
+
+/* ---- Cards: same colour as the page, shaped only by shadow; content stays flat ---- */
+html .surface, html .download-card, html .build-task-card, html .startup-card, html .settings-section, html .quiet-card,
+html .stat-grid, html .overview-hero, html .home-first-resource, html .feed-content, html .agent-connection-card {
+  background: var(--neu-bg); border: 0; border-radius: var(--r-card); box-shadow: var(--raise);
+}
+html .surface .surface, html .settings-section .surface { box-shadow: none; }
+html .section-heading { background: transparent; }
+html .detail-panel { background: var(--neu-bg); border: 0; box-shadow: -10px 0 26px var(--neu-dark); }
+html dialog { background: var(--neu-bg); border: 0; border-radius: var(--r-card); box-shadow: var(--raise), 0 30px 60px rgba(35, 32, 29, .18); }
+html dialog::backdrop { background: rgba(35, 32, 29, .28); }
+html .modal-header, html .modal-footer { border-color: var(--border); }
+html .toast { background: var(--neu-bg); border: 0; border-radius: 18px; box-shadow: var(--raise), 0 18px 40px rgba(35, 32, 29, .14); }
+html .toast.danger { box-shadow: var(--raise), inset 4px 0 0 var(--vermilion); }
+html .table-heading { background: transparent; }
+html .operation-error, html .field-error, html .feed-error { border: 0; border-radius: 14px; background: var(--danger-bg); color: var(--danger); }
+html .field-error { box-shadow: inset 3px 0 0 var(--vermilion); }
+
+/* Badges are information, not controls: flat. */
+html .status-badge { border: 0; border-radius: 10px; background: transparent; padding-left: 0; padding-right: 0; font-weight: 600; }
+html .status-badge.neutral { color: var(--muted); background: transparent; border: 0; }
+html .status-badge.accent, html .status-badge.success { color: var(--cobalt); background: transparent; }
+html .status-badge.warning, html .status-badge.danger { color: var(--danger); background: transparent; }
+html .status-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .9; }
+html .status-badge.neutral::before { background: var(--neu-dark); box-shadow: var(--inset-sm); }
+
+/* ---- Segmented controls & tab strips: a recessed tray of keys ---- */
+html .segmented-tabs, html body .github-tabs, html body .detail-tabs { gap: 6px; padding: 5px; border: 0; border-radius: 20px; background: var(--neu-bg); box-shadow: var(--inset-sm); width: fit-content; max-width: 100%; }
+html .segmented-tabs button, html body .github-tabs button, html body .detail-tabs button {
+  border: 0; border-radius: 15px; background: var(--neu-bg); color: var(--subtle);
+  transition: transform 220ms var(--spring), box-shadow 180ms ease, color 160ms;
+}
+html .segmented-tabs button:hover, html body .github-tabs button:hover, html body .detail-tabs button:hover { background: var(--neu-bg); color: var(--heading); box-shadow: var(--raise-sm); }
+html .segmented-tabs button.active, html body .github-tabs button.active, html body .detail-tabs button.active,
+html .segmented-tabs button:active, html body .github-tabs button:active {
+  background: var(--neu-bg); color: var(--cobalt); font-weight: 650; box-shadow: var(--raise-sm); transform: translateY(0);
+}
+html .segmented-tabs button.active::after, html body .github-tabs button.active::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--cobalt); box-shadow: var(--cobalt-glow); margin-left: 2px; }
+
+/* Choice tiles in settings & forms */
+html .theme-option, html .palette-option, html .material-option, html .resource-mode label {
+  border: 0; border-radius: 18px; background: var(--neu-bg); box-shadow: var(--raise-sm); outline: none;
+  transition: transform 220ms var(--spring), box-shadow 180ms ease;
+}
+html .theme-option:hover, html .resource-mode label:hover { transform: translateY(-1px); box-shadow: var(--raise); }
+html .theme-option.chosen, html .resource-mode label.chosen { box-shadow: var(--inset); transform: translateY(2px); outline: none; background: var(--neu-bg); }
+html .theme-option.chosen strong, html .resource-mode label.chosen strong { color: var(--cobalt); }
+html .theme-preview { --sample-surface: #F2E8E0; --sample-sidebar: #E9DDD2; --sample-line: #D6C8BD; --sample-accent: #2F4BD0; border: 0; border-radius: 12px; box-shadow: var(--inset-sm); }
+html .theme-preview.dark { --sample-surface: #24211E; --sample-sidebar: #1C1917; --sample-line: #3A3531; --sample-accent: #7D93FF; }
+html .theme-preview.system { background: linear-gradient(90deg, #F2E8E0 50%, #24211E 50%); }
+html .theme-preview.system .preview-content i { background: linear-gradient(90deg, #D6C8BD 35%, #3A3531 35%); }
+html .theme-preview.system .preview-content i:first-child { background: linear-gradient(90deg, #2F4BD0 60%, #7D93FF 60%); }
+html .preview-sidebar { border-right: 0; }
+html .theme-check { background: var(--cobalt); box-shadow: var(--cobalt-glow); }
+
+/* Rows inside cards are flat text with hairlines */
+html .setting-row, html .home-update-row, html .home-pending-row, html .home-section-empty { border-color: var(--border); }
+
+/* ---- Progress & scrollbars ---- */
+html progress { appearance: none; border: 0; height: 8px; border-radius: 6px; background: var(--neu-bg); box-shadow: var(--inset-sm); overflow: hidden; }
+html progress::-webkit-progress-bar { background: transparent; }
+html progress::-webkit-progress-value { background: var(--cobalt); border-radius: 6px; box-shadow: var(--cobalt-glow); }
+::-webkit-scrollbar-thumb { background: var(--neu-dark); border: 2px solid var(--neu-bg); border-radius: 8px; }
+:focus-visible { outline: 2px solid var(--cobalt); outline-offset: 3px; }
+
+/* ---- Shared soft-UI primitives (LED, wells) ---- */
+.neu-led { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--neu-dark); box-shadow: var(--inset-sm); flex: 0 0 9px;
+  transition: background 220ms ease, box-shadow 260ms var(--spring); }
+.neu-led.on { background: var(--cobalt); box-shadow: var(--cobalt-glow); }
+.neu-led.alert { background: var(--vermilion); box-shadow: 0 0 6px rgba(226, 85, 45, .7); }
+.neu-well { background: var(--neu-bg); border-radius: 16px; box-shadow: var(--inset); }
+.neu-module { position: relative; background: var(--neu-bg); border-radius: var(--r-card); box-shadow: var(--raise); padding: 20px 22px; }
+.neu-module-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.neu-module-header h2 { font-size: 15px; }
+.neu-module-header p { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.neu-module-header .neu-module-switch { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.key-data { color: var(--cobalt); font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+
+@media (forced-colors: active) {
+  html .nav-item, html .button, html .surface, html .icon-button, .neu-module { box-shadow: none; border: 1px solid ButtonText; }
+  html .nav-item.active { outline: 2px solid Highlight; }
+}

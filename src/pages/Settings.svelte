@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { dispatch } from '../lib/bridge';
   import { formatBytes, readableError } from '../lib/ui';
-  import type { AgentIntegration, ColorScheme, GithubCacheStats, GithubTab, ProxySettings as ProxyConfig, ProxyTestResult, RuntimeInfo, Settings, Theme, WorkspacePage } from '../lib/types';
+  import type { AgentIntegration, GithubCacheStats, GithubTab, ProxySettings as ProxyConfig, ProxyTestResult, RuntimeInfo, Settings, Theme, WorkspacePage } from '../lib/types';
   import { defaultNavigationOrder, githubTabs, workspacePages } from '../lib/navigation';
   import Icon from '../components/Icon.svelte';
   import BrandMark from '../components/BrandMark.svelte';
@@ -21,12 +21,6 @@
     { id: 'light', title: '浅色', icon: 'sun' },
     { id: 'dark', title: '深色', icon: 'moon' },
     { id: 'system', title: '跟随系统', icon: 'monitor' },
-  ];
-  const palettes: { id: ColorScheme; title: string; color: string; soft: string }[] = [
-    { id: 'blue', title: '经典蓝', color: '#1d4ed8', soft: '#e8effd' },
-    { id: 'teal', title: '青绿', color: '#0f766e', soft: '#e4f3ef' },
-    { id: 'violet', title: '柔紫', color: '#6d42bb', soft: '#f1eafb' },
-    { id: 'amber', title: '暖琥珀', color: '#965d0b', soft: '#fcf1dc' },
   ];
   let cache = $state<GithubCacheStats | null>(null);
   let cacheBusy = $state(false);
@@ -57,27 +51,7 @@
     <div class="settings-heading"><h2 id="appearance-title">外观</h2></div>
     <div class="theme-options">{#each themes as theme}<button class="theme-option" class:chosen={settings.theme === theme.id} aria-pressed={settings.theme === theme.id} disabled={busy} onclick={() => onsave({ theme: theme.id })}><div class={`theme-preview ${theme.id}`}><span class="preview-sidebar"></span><span class="preview-content"><i></i><i></i><i></i></span>{#if settings.theme === theme.id}<span class="theme-check"><Icon name="check" size={12} /></span>{/if}</div><span><Icon name={theme.icon} size={15} /><strong>{theme.title}</strong></span></button>{/each}</div>
 
-    <div class="appearance-group">
-      <h3 class="appearance-subheading">配色方案</h3>
-      <div class="palette-options">{#each palettes as palette}<button class="palette-option" class:chosen={(settings.colorScheme ?? 'blue') === palette.id} aria-pressed={(settings.colorScheme ?? 'blue') === palette.id} disabled={busy} onclick={() => onsave({ colorScheme: palette.id })} style={`--palette-color:${palette.color};--palette-soft:${palette.soft}`}><span class="palette-swatch" aria-hidden="true"><i></i><i></i><i></i></span><strong>{palette.title}</strong>{#if (settings.colorScheme ?? 'blue') === palette.id}<Icon name="check" size={15} />{/if}</button>{/each}</div>
-    </div>
-
-    <div class="appearance-group">
-      <h3 class="appearance-subheading">玻璃材质</h3>
-      <div class="material-options" role="group" aria-label="玻璃材质">
-        <button class="material-option" class:chosen={(settings.material ?? 'acrylic') === 'acrylic'} aria-pressed={(settings.material ?? 'acrylic') === 'acrylic'} disabled={busy} onclick={() => onsave({ material: 'acrylic' })}>
-          <span class="material-sample acrylic" aria-hidden="true"><i></i><i></i></span>
-          <strong>亚克力</strong>
-          {#if (settings.material ?? 'acrylic') === 'acrylic'}<Icon name="check" size={17} />{/if}
-        </button>
-        <button class="material-option" class:chosen={settings.material === 'mica'} aria-pressed={settings.material === 'mica'} disabled={busy} onclick={() => onsave({ material: 'mica' })}>
-          <span class="material-sample mica" aria-hidden="true"><i></i><i></i></span>
-          <strong>云母</strong>
-          {#if settings.material === 'mica'}<Icon name="check" size={17} />{/if}
-        </button>
-      </div>
-      <div class="setting-row last"><strong>背景模糊</strong><Toggle checked={settings.blur ?? true} label="背景模糊" disabled={busy} onchange={() => onsave({ blur: !(settings.blur ?? true) })} /></div>
-    </div>
+    <p class="field-hint appearance-note">0.6 采用暖米白新拟物界面，强调色统一为钴蓝。</p>
   </section>
 
   <section class="surface settings-section" aria-labelledby="startup-title"><div class="settings-heading"><h2 id="startup-title">启动与导航</h2></div>
@@ -120,4 +94,5 @@
   .appearance-subheading { font-size: 13px; font-weight: 600; color: var(--subtle); margin-bottom: 12px; }
   .inline-section-title { font-size: 15px; font-weight: 650; }
   .data-note { margin-top: 12px; }
+  .appearance-note { margin-top: 16px; }
 </style>
