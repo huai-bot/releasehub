@@ -6,7 +6,7 @@
   import { desktopAvailable, dispatch, watchChanges, type Action, type Actions } from './lib/bridge';
   import { applyDownloadProgress, mergeSnapshotDownloads } from './lib/download-state';
   import type { AddProjectInput, AgentIntegration, AssetPreference, BackupRecord, Channel, DownloadRecord, GithubRepository, InstallPreview, ManagedVersion, ManagementMode, Project, ProjectChanges, ProxySettings, RepositoryNote, Settings, Snapshot, WorkspacePage } from './lib/types';
-  import { canActivateManagedVersion, formatBytes, parseRepository, projectPresentation, readableError, safeGithubUrl, type Page, type Tone } from './lib/ui';
+  import { canActivateManagedVersion, formatBytes, githubLinkTarget, parseRepository, projectPresentation, readableError, trackedAsset, type Page, type Tone } from './lib/ui';
   import ManagedVersions from './components/ManagedVersions.svelte';
   import InstallConfirmation from './components/InstallConfirmation.svelte';
   import Icon from './components/Icon.svelte';
@@ -19,6 +19,7 @@
   import Library from './pages/Library.svelte';
   import Downloads from './pages/Downloads.svelte';
   import Github from './pages/Github.svelte';
+  import GithubReader from './components/GithubReader.svelte';
   import Connections from './pages/Connections.svelte';
   import { isSubscribed } from './lib/github';
   import SettingsPage from './pages/Settings.svelte';
@@ -45,6 +46,8 @@
   let managedError = $state('');
   let managedRequestId = 0;
   let searchInput = $state<HTMLInputElement>();
+  let githubWorkspace = $state<Github>();
+  let readerUrl = $state<string | null>(null);
   let systemDark = $state(false);
   let destroyed = false;
   let startupPageApplied = false;
@@ -404,7 +407,30 @@
     if (project && snapshot && !snapshot.projects.some((item) => item.id === project.id)) snapshot = { ...snapshot, projects: [...snapshot.projects, project] };
     return project !== undefined;
   }
-  async function openUrl(url: string) { const safe = safeGithubUrl(url); if (!safe) { notify('只支持在系统浏览器打开安全的 HTTPS GitHub 链接，请到项目原文查看其他地址。', 'warning'); return; } await operate('open_url', { url: safe }, { refresh: false }); }
+  async function openUrl(url: string, original = false) {
+    const target = githubLinkTarget(url);
+    if (!target) { notify('这个链接不是受支持的 GitHub 地址。', 'warning'); return; }
+    if (target.kind === 'browser') { await operate('open_url', { url: target.url }, { refresh: false }); return; }
+    if (target.kind === 'asset') {
+      const download = trackedAsset(snapshot?.projects ?? [], target.url);
+      if (download) { await downloadProject({ ...download.project, selectedAssetId: download.asset.id }); return; }
+      readerUrl = target.releaseUrl; return;
+    }
+    if (target.kind === 'repository' && target.repository && !original) {
+      const origin = page;
+      const anchor = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const panelTop = document.querySelector<HTMLElement>('.detail-panel')?.scrollTop;
+      await navigate('github'); await tick();
+      if (page === 'github' && githubWorkspace) await githubWorkspace.openRepositoryLink(target.repository, async () => {
+        await navigate(origin); await tick();
+        const panel = document.querySelector<HTMLElement>('.detail-panel');
+        if (panel && panelTop !== undefined) panel.scrollTop = panelTop;
+        if (anchor?.isConnected) anchor.focus({ preventScroll: true });
+      });
+      return;
+    }
+    readerUrl = target.url;
+  }
   async function copy(text: string) { try { await navigator.clipboard.writeText(text); notify('已复制到剪贴板。'); } catch { notify('剪贴板不可用，请选择文本后按 Ctrl+C 复制。', 'warning'); } }
   async function exportFile() { const result = await operate('export_library_file', {}, { refresh: false }); if (result) notify(`订阅与备注已导出到 ${result.path}。`); }
   async function importFile() { const result = await operate('import_library_file', {}); if (result) notify(`已导入 ${result.imported} 项订阅、${result.notesImported} 条备注，跳过 ${result.skipped} 项重复订阅。`); }
@@ -484,7 +510,7 @@
     if (result) { importContents = ''; modal = null; notify(`已导入 ${result.imported} 项订阅、${result.notesImported} 条备注，跳过 ${result.skipped} 项重复订阅。`); }
   }
   async function removeProject(project: Project) { const result = await operate('remove_project', { id: project.id }, { success: '已取消订阅，下载文件和已安装软件保持不变。' }); if (result !== undefined) { modal = null; if (selectedId === project.id) selectedId = null; } }
-  async function hotkeys(event: KeyboardEvent) { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && snapshot && !modal && !document.querySelector('dialog[open]')) { event.preventDefault(); const githubSearch = page === 'github' ? document.querySelector<HTMLInputElement>('#github-search') : null; if (githubSearch) { githubSearch.focus(); return; } if (!['library', 'updates', 'downloads'].includes(page)) navigate('library'); await tick(); searchInput?.focus(); } if (event.key === 'Escape' && !modal) selectedId = null; }
+  async function hotkeys(event: KeyboardEvent) { if (readerUrl) return; if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && snapshot && !modal && !document.querySelector('dialog[open]')) { event.preventDefault(); const githubSearch = page === 'github' ? document.querySelector<HTMLInputElement>('#github-search') : null; if (githubSearch) { githubSearch.focus(); return; } if (!['library', 'updates', 'downloads'].includes(page)) navigate('library'); await tick(); searchInput?.focus(); } if (event.key === 'Escape' && !modal) selectedId = null; }
 </script>
 
 <svelte:window onkeydown={hotkeys} />
@@ -507,11 +533,13 @@
          {#if visitedLocal.has(localPage as Page) || page === localPage}<main class="page-content" id={page === localPage ? 'main-content' : undefined} hidden={page !== localPage}><Library projects={snapshot.projects} readTags={snapshot.readUpdateTags} onMarkRead={markUpdatesRead} onToggleUpdates={toggleUpdates} notes={snapshot.repositoryNotes} layout={snapshot.settings.libraryLayout ?? 'three'} onlayout={(libraryLayout) => void saveSettings({ libraryLayout })} onnote={showNote} updatesOnly={localPage === 'updates'} active={page === localPage} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} onOpen={(project) => void runProject(project)} onFiles={showProjectFiles} onBackup={showProjectBackup} onRepository={(project) => void openUrl(`https://github.com/${project.owner}/${project.repo}`)} /></main>{/if}
        {/each}
        {#if visitedLocal.has('downloads') || page === 'downloads'}<main class="page-content" id={page === 'downloads' ? 'main-content' : undefined} hidden={page !== 'downloads'}><Downloads installations={snapshot.installations ?? []} onVerify={(id) => void verifyInstallation(id)} onConfirmInstallation={(id) => void confirmInstallation(id)} downloads={snapshot.downloads} {query} {busy} onexternalretry={(download) => showExternalDownload([], download)} onexternalimport={(download) => void importExternalDownload(download)} onretry={(id) => void operate('retry_download', { id }, { success: '已重新加入下载队列。' })} oncancel={(id) => void operate('cancel_download', { id }, { success: '已请求取消下载。' })} oninstall={showInstall} onDelete={(download) => void directDeleteDownload(download)} onfolder={(id) => void operate('open_download', { id }, { refresh: false })} onmark={markDownloaded} onproject={openProject} oncopy={(text) => void copy(text)} onversions={showManagedVersions} /></main>{/if}
-       {#if githubVisited || page === 'github'}<main class="page-content github-workspace" id={page === 'github' ? 'main-content' : undefined} hidden={page !== 'github'}><Github projects={snapshot.projects} repositoryNotes={snapshot.repositoryNotes} {preview} preload active={page === 'github'} initialTab={snapshot.settings.startupGithubTab} onadd={addGithubRepository} onopen={(url) => void openUrl(url)} oncopy={(text) => void copy(text)} onnotice={notify} onnotes={(notes) => { if (snapshot) snapshot = { ...snapshot, repositoryNotes: notes }; }} /></main>{/if}
+       {#if githubVisited || page === 'github'}<main class="page-content github-workspace" id={page === 'github' ? 'main-content' : undefined} hidden={page !== 'github'}><Github bind:this={githubWorkspace} projects={snapshot.projects} repositoryNotes={snapshot.repositoryNotes} {preview} preload active={page === 'github'} initialTab={snapshot.settings.startupGithubTab} onadd={addGithubRepository} onopen={(url) => void openUrl(url)} onoriginal={(url) => void openUrl(url,true)} oncopy={(text) => void copy(text)} onnotice={notify} onnotes={(notes) => { if (snapshot) snapshot = { ...snapshot, repositoryNotes: notes }; }} /></main>{/if}
       {#if showingDetails && selectedProject}<button class="detail-backdrop" aria-label="关闭资源详情" onclick={() => selectedId = null}></button>{#key `${selectedProject.id}:${detailRevision}`}<ProjectDetail installations={snapshot.installations ?? []} onVerify={(id) => void verifyInstallation(id)} onConfirmInstallation={(id) => void confirmInstallation(id)} project={selectedProject} readTag={snapshot.readUpdateTags?.[selectedProject.id]} note={noteFor(selectedProject)} onnote={showNote} {busy} {preview} onexternal={(project) => showExternalDownload([project])} onrun={(project) => void runProject(project)} onexecutable={(project) => void chooseExecutable(project)} onrestore={(backup) => void directApplyBackup(backup, 'restore')} ondeletebackup={(backup) => void directApplyBackup(backup, 'delete')} onclose={() => selectedId = null} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onupdate={(id, changes) => void updateProject(id, changes)} onmark={showMark} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => void removeProject(project)} onopen={(url) => void openUrl(url)} onSettings={(project) => openDialog({ kind: 'settings', project })} />{/key}{/if}</div>
     </div>
   </div>
 {/if}
+
+{#if readerUrl && snapshot}<GithubReader url={readerUrl} projects={snapshot.projects} {preview} ondownload={project => void downloadProject(project)} onclose={() => readerUrl = null} />{/if}
 
 {#if modal?.kind === 'add'}
   <Modal title="添加资源" onclose={closeDialog}>

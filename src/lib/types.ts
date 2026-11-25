@@ -324,6 +324,8 @@ export interface GithubRepository {
   stars: number;
   forks: number;
   openIssues: number;
+  hasIssues?: boolean;
+  hasDiscussions?: boolean;
   updatedAt: string;
   defaultBranch: string;
   homepage: string | null;

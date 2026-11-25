@@ -155,6 +155,30 @@ export function readableError(error: unknown): string {
   return message.replace(/(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+/g, '〔已隐藏的凭据〕').slice(0, 800);
 }
 
+export function githubLinkTarget(value: string): { kind: 'repository'; url: string; repository: string } | { kind: 'reader' | 'browser'; url: string } | { kind: 'asset'; url: string; releaseUrl: string } | null {
+  const safe = safeGithubUrl(value);
+  if (!safe) return null;
+  const url = new URL(safe);
+  const [owner, repo, section] = url.pathname.split('/').filter(Boolean);
+  if (['login','logout','session','sessions','settings','signup','account','password_reset'].includes(owner) || (owner === 'orgs' && section === 'sso')) return { kind: 'browser', url: safe };
+  const attachment = /^\/(\w[\w.-]*\/[\w.-]+)\/releases\/download\/([^/]+)\/[^/]+$/.exec(url.pathname);
+  if (attachment) return { kind: 'asset', url: safe, releaseUrl: `https://github.com/${attachment[1]}/releases/tag/${attachment[2]}` };
+  const reserved = ['orgs','users','topics','collections','marketplace','sponsors','features','enterprise','organizations','site','contact','search','stars','events','notifications','explore','apps','about','new','dashboard','trending','discussions','pulls','issues','codespaces','copilot','security'];
+  const name = owner && repo && !section && !url.hash && !url.search && !reserved.includes(owner) ? parseRepository(`${owner}/${repo}`) : null;
+  return name ? { kind: 'repository', repository: name, url: safe } : { kind: 'reader', url: safe };
+}
+
+export function trackedAsset(projects: Project[], link: string) {
+  const safe = safeGithubUrl(link);
+  if (!safe) return null;
+  const url = new URL(safe); url.search = ''; url.hash = '';
+  for (const project of projects) {
+    const asset = project.release?.assets.find(item => item.url === url.href && canDownloadAsset(item));
+    if (asset) return { project, asset };
+  }
+  return null;
+}
+
 export function isDownloadRunning(download: Pick<DownloadRecord, 'status'>): boolean {
   return ['queued', 'downloading', 'installing'].includes(download.status);
 }

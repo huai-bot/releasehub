@@ -23,7 +23,7 @@ export function sanitizeReleaseNotes(markdown: string, repositoryUrl: string): s
       // A context-menu or middle click must not bypass the host's URL validation.
       link.setAttribute('href', '#');
       link.setAttribute('data-external-url', safe);
-      link.setAttribute('title', `在系统浏览器打开：${safe}`);
+      link.setAttribute('title', safe);
     } else {
       link.removeAttribute('href');
       link.setAttribute('title', '此链接不在支持范围内，可到 GitHub 查看原文');

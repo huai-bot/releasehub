@@ -6,6 +6,7 @@ mod github;
 mod github_oauth;
 mod github_cache;
 mod github_feed;
+mod reader;
 pub mod proxy;
 mod secrets;
 

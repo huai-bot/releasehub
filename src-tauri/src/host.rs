@@ -199,8 +199,8 @@ fn managed_directory_from_versions(versions: &Value, download_id: &str, data_dir
 }
 
 #[tauri::command]
-async fn dispatch(window: tauri::WebviewWindow, app: tauri::AppHandle, state: tauri::State<'_, Arc<HostState>>, action: String, payload: Option<Value>) -> Result<Value, String> {
-    if window.label() != "main" { return Err("此窗口没有工作空间操作权限。".into()); }
+async fn dispatch(webview: tauri::Webview, app: tauri::AppHandle, state: tauri::State<'_, Arc<HostState>>, action: String, payload: Option<Value>) -> Result<Value, String> {
+    if webview.label() != "main" || webview.window().label() != "main" { return Err("此窗口没有工作空间操作权限。".into()); }
     let host = state.inner().clone();
     let payload = payload.unwrap_or_else(|| json!({}));
     match action.as_str() {
@@ -332,6 +332,8 @@ async fn dispatch(window: tauri::WebviewWindow, app: tauri::AppHandle, state: ta
             let contents = tokio::fs::read_to_string(path).await.map_err(|_| "文件不是有效的 UTF-8 软件列表。")?;
             host.core.handle("import_library", json!({"contents": contents})).await
         }
+        "reader_open" => host.feed.open_reader(&app, payload).await,
+        "reader_resize" | "reader_close" | "reader_external" => crate::reader::control(&app, &action, payload),
         "open_url" => {
             let url = safe_browser_url(object_string(&payload, "url")?)?;
             app.opener().open_url(url, None::<&str>).map_err(|_| "无法打开系统浏览器。")?;
@@ -410,7 +412,7 @@ async fn scheduled_checks(app: tauri::AppHandle, host: Arc<HostState>) {
 }
 
 fn show_main(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();

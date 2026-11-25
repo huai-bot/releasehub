@@ -173,6 +173,8 @@ Homepage feed uses a separate GitHub website window and a machine-local profile 
 
 The remote website capability permits only `feed_receive`, with a per-window token plus request/session validation. It has no host dispatch or filesystem permission. Host `dispatch` additionally rejects any window label except `main`. Refresh and pagination only operate on the recognized official page controls. Implementation and desktop-login steps are documented in `src/lib/feed/INTEGRATION.md`.
 
+GitHub repository permalinks open the existing repository detail; returning restores the source view. Official content pages render on demand in a separate WebView2 child of the main window. Its controls belong to the trusted local UI. Only the **main webview** has the desktop capability; the child has no Tauri commands or feed receiver. It shares the GitHub website profile and proxy, not API credentials. Logout and proxy changes close it. Native navigation and pop-ups admit GitHub content only, and native downloads are cancelled. A clicked release asset can enter the existing validated download flow only by matching a known project and asset ID. Device authorization stays in the system browser.
+
 ## External-AI and legacy Agent interfaces
 
 Off by default. Bind only 127.0.0.1, default port 47831, adjustable in Settings. Require a locally generated bearer credential on every request. Reject Origin headers and invalid Host, do not enable CORS, bound request bodies and traffic, and compare credentials in constant time. Credentials live in Windows keyring under a portable instance ID. No credentials accompany portable exports/releases; a new computer reconnects explicitly.

@@ -13,10 +13,11 @@
   import GithubFeed from '../components/GithubFeed.svelte';
   import type { GithubPreviewScenario } from '../lib/github-preview';
 
-  let { projects, repositoryNotes, preview, active = true, preload = false, initialTab = 'explore', onadd, onopen, oncopy, onnotice, onnotes }: {
+  let { projects, repositoryNotes, preview, active = true, preload = false, initialTab = 'explore', onadd, onopen, onoriginal, oncopy, onnotice, onnotes }: {
     projects: Project[]; repositoryNotes?: RepositoryNote[]; preview: boolean; active?: boolean; preload?: boolean; initialTab?: Tab;
     onadd: (repository: GithubRepository) => Promise<boolean>;
     onopen: (url: string) => void; oncopy: (text: string) => void; onnotice: (message: string, tone?: Tone) => void;
+    onoriginal?: (url: string) => void;
     onnotes?: (notes: RepositoryNote[]) => void;
   } = $props();
   type Tab = GithubRepositoryTab | 'activity' | 'feed';
@@ -55,6 +56,7 @@
   let previewScenario = $state<GithubPreviewScenario>('connected');
   let detailRegion = $state<HTMLDivElement>();
   let previousFocus: HTMLElement | null = null;
+  let linkBack = $state<(() => Promise<void>) | null>(null);
   let destroyed = false;
   let sessionRevision = 0;
   let statusRequest = 0;
@@ -213,12 +215,13 @@
     }
     const changedAccount = previousAccount !== githubCacheIdentity(next);
     const changedRevision = status?.sessionRevision !== undefined && next.sessionRevision !== undefined && status.sessionRevision !== next.sessionRevision;
+    const linkedRepository = active && linkBack ? selectedName : null;
     status = next;
     const changedCacheSession = cache.setSession(githubCacheIdentity(next), next.sessionRevision);
     // Initial account detection must not erase a search typed while it was loading.
     if (changedAccount) clearAccountContent(previousAccount !== 'anonymous');
     else if (changedRevision) { sessionRevision += 1; listRequest += 1; detailRequest += 1; catalogRequest += 1; assignmentRequest += 1; contentLoading = false; detailLoading = false; }
-    if (changedAccount || changedRevision || changedCacheSession) { void loadContent(); if (tab === 'starred') void loadLists(); }
+    if (changedAccount || changedRevision || changedCacheSession) { void loadContent(); if (tab === 'starred') void loadLists(); if (linkedRepository) void selectRepository(linkedRepository,false); }
     void preloadContent();
   }
   async function refreshStatus(showLoading = false) {
@@ -333,6 +336,7 @@
   function resetDetail() { detailRequest += 1; selectedName = null; detail = null; detailError = ''; detailLoading = false; detailUpdatedAt = null; }
   function changeTab(next: Tab) {
     if (tab === next) return;
+    linkBack = null;
     saveView();
     tab = next; page = 1; searchText = next === 'explore' ? 'windows' : ''; searchQuery = 'windows'; listFilter = 'all';
     restoreView(tabViews.get(next) ?? viewKey());
@@ -379,7 +383,26 @@
     } catch (error) { if (current() && !(error instanceof GithubCacheSuperseded)) detailError = readableError(error); }
     finally { if (current()) { detailLoading = false; saveView(); } }
   }
+  export async function openRepositoryLink(name: string, returnToSource: () => Promise<void>) {
+    const previousTab = tab, previousName = selectedName, previousTop = detailRegion?.scrollTop ?? 0;
+    const anchor = captureAnchor(), previousKey = viewKey(), revision = sessionRevision;
+    const earlierReturn = linkBack;
+    if (tab === 'feed') changeTab('explore');
+    linkBack = earlierReturn ?? (async () => {
+      if (revision === sessionRevision) {
+        if (tab !== previousTab) changeTab(previousTab);
+        else if (previousTab !== 'feed') {
+          if (previousName) void selectRepository(previousName, false); else resetDetail();
+          await restoreAnchor(anchor, previousKey);
+          if (detailRegion) detailRegion.scrollTop = previousTop;
+        }
+      } else resetDetail();
+      await returnToSource();
+    });
+    await selectRepository(name);
+  }
   async function closeDetail() {
+    if (linkBack) { const back = linkBack; linkBack = null; await back(); return; }
     const anchor = captureAnchor(); const key = viewKey();
     resetDetail(); await restoreAnchor(anchor, key);
     if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
@@ -650,7 +673,7 @@
   }
   $effect(() => {
     if (active) untrack(scheduleLoginPoll);
-    else { stopLoginPoll(); untrack(saveView); }
+    else { linkBack = null; stopLoginPoll(); untrack(saveView); }
   });
   onMount(() => {
     if (!preview) { feedConsumer = feedState.acquire(active); if (preload) void feedState.preload(); }
@@ -753,7 +776,7 @@
     {#if tab === 'starred' && stars}<div class="github-pagination stars-pagination"><span>已加载 {starPage} 批 · {stars.items.length} / {stars.totalCount} 个{!hasMore ? ' · 已全部加载' : ''}</span><button class="button secondary small" disabled={!hasMore || contentLoading || assignmentBusy} onclick={() => void loadContent(true)}><Icon name={contentLoading ? 'loader' : 'plus'} class={contentLoading ? 'spinning' : ''} size={14} />{contentLoading ? '正在加载' : hasMore ? '继续加载 Stars' : '已全部加载'}</button></div>
     {:else if (tab === 'explore' || connected) && (repositories || activity)}<div class="github-pagination"><span>第 {displayPage} 页</span><div><button class="button secondary small" disabled={contentLoading || page <= 1} onclick={() => goPage(page - 1)}>上一页</button><button class="button secondary small" disabled={contentLoading || !hasMore || showingPrevious} onclick={() => goPage(page + 1)}>下一页</button></div></div>{/if}
   </div>
-  {#if selectedName}<div class="detail-region" bind:this={detailRegion} tabindex="-1">{#if detail && (detailLoading || detailError)}<div class="github-cache-status" role="status">{#if detailLoading}<span>正在更新详情…</span>{/if}{#if detailError}<p class="field-error">更新未完成，已保留原详情：{detailError}</p>{/if}</div>{/if}<GithubDetail name={selectedName} {detail} note={findRepositoryNote(notes, selectedName)} loading={detailLoading && !detail} error={detail ? '' : detailError} connected={verified} {preview} pending={pendingRepositories.has(selectedName)} subscribed={isSubscribed(selectedName, projects)} adding={addingRepositories.has(selectedName)} onclose={() => void closeDetail()} onretry={() => { if (selectedName) void selectRepository(selectedName, false, true); }} onstar={(repository) => void setStar(repository)} onedit={editRepository} onnote={editNote} onlists={(repository) => void openAssignment([repository.fullName], 'replace')} onadd={(repository) => void addRepository(repository)} {onopen} /></div>{/if}
+  {#if selectedName}<div class="detail-region" bind:this={detailRegion} tabindex="-1">{#if detail && (detailLoading || detailError)}<div class="github-cache-status" role="status">{#if detailLoading}<span>正在更新详情…</span>{/if}{#if detailError}<p class="field-error">更新未完成，已保留原详情：{detailError}</p>{/if}</div>{/if}<GithubDetail name={selectedName} {detail} note={findRepositoryNote(notes, selectedName)} loading={detailLoading && !detail} error={detail ? '' : detailError} connected={verified} {preview} pending={pendingRepositories.has(selectedName)} subscribed={isSubscribed(selectedName, projects)} adding={addingRepositories.has(selectedName)} backLabel={linkBack ? '返回' : '返回列表'} onclose={() => void closeDetail()} onretry={() => { if (selectedName) void selectRepository(selectedName, false, true); }} onstar={(repository) => void setStar(repository)} onedit={editRepository} onnote={editNote} onlists={(repository) => void openAssignment([repository.fullName], 'replace')} onadd={(repository) => void addRepository(repository)} {onopen} {onoriginal} /></div>{/if}
 </div>
 </div>
 {/if}

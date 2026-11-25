@@ -51,6 +51,10 @@ export interface Actions {
   export_library_file: { payload: Record<string, never>; result: { path: string } | null };
   import_library_file: { payload: Record<string, never>; result: { imported: number; skipped: number; notesImported: number } | null };
   open_url: { payload: { url: string }; result: null };
+  reader_open: { payload: { id: string; url: string; bounds: ReaderBounds }; result: null };
+  reader_resize: { payload: { id: string; bounds: ReaderBounds }; result: null };
+  reader_close: { payload: { id: string }; result: null };
+  reader_external: { payload: { id: string }; result: null };
   open_download: { payload: { id: string }; result: null };
   open_data_directory: { payload: Record<string, never>; result: null };
   open_managed_version: { payload: { projectId: string; downloadId: string }; result: null };
@@ -89,6 +93,11 @@ export interface Actions {
 }
 
 export type Action = keyof Actions;
+export type ReaderBounds = { x: number; y: number; width: number; height: number };
+export type ReaderEvent = { id: string; phase: 'loading' | 'ready' | 'title' | 'blocked' | 'download' | 'closed'; value: string };
+export function watchReader(callback: (event: ReaderEvent) => void) {
+  return listen<ReaderEvent>('releasehub:reader', event => callback(event.payload), { target: { kind: 'Webview', label: 'main' } });
+}
 export const desktopAvailable = (): boolean => isTauri();
 
 export async function dispatch<A extends Action>(action: A, payload: Actions[A]['payload']): Promise<Actions[A]['result']> {

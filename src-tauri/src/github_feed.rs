@@ -178,10 +178,26 @@ impl GitHubFeedService {
         self.snapshot()
     }
 
+    pub(crate) async fn open_reader(&self, app: &AppHandle, input: Value) -> Result<Value,String> {
+        let _operation = self.operation.lock().await;
+        let settings = self.proxy.settings()?;
+        if settings.mode == "manual" && !settings.username.is_empty() { return Err("网页暂不支持带账号密码的代理，可在浏览器打开。".into()); }
+        let proxy = if settings.mode == "manual" { Some(self.website_proxy()?) } else { None };
+        crate::reader::open(app, input, self.profile(&proxy_fingerprint(&settings))?, &settings.mode, proxy)
+    }
+
+    fn website_proxy(&self) -> Result<Url,String> {
+        let mut url = self.proxy.webview_proxy_url()?.ok_or("手动代理地址不存在。")?;
+        if url.scheme() == "socks5h" { url.set_scheme("socks5").map_err(|_| "代理格式无效。")?; }
+        if !matches!(url.scheme(), "http" | "socks5") { return Err("网页登录的手动代理只支持 HTTP 或 SOCKS5，请选择系统代理或调整地址。".into()); }
+        Ok(url)
+    }
+
     /// The host calls this after saving proxy credentials/settings. WebView2's
     /// proxy is a startup setting; merely changing the HTTP client is not enough.
     pub async fn restart_for_proxy_change(&self, app: &AppHandle) -> Result<(), String> {
         let _operation = self.operation.lock().await;
+        crate::reader::close_active(app)?;
         self.invalidate_network(Some("代理已更新，网页登录仍保存在本机。刷新动态后使用新代理验证。".into()))?;
         if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
             window.destroy().map_err(|_| "请关闭 GitHub 网页窗口，再重新连接以应用代理。")?;
@@ -306,12 +322,7 @@ impl GitHubFeedService {
         // custom args replace (not append to) the generated proxy arguments.
         builder = match settings.mode.as_str() {
             "direct" => builder.additional_browser_args("--no-proxy-server"),
-            "manual" => {
-                let mut url = self.proxy.webview_proxy_url()?.ok_or("手动代理地址不存在。")?;
-                if url.scheme() == "socks5h" { url.set_scheme("socks5").map_err(|_| "代理格式无效。")?; }
-                if !matches!(url.scheme(), "http" | "socks5") { return Err("网页登录的手动代理只支持 HTTP 或 SOCKS5，请选择系统代理或调整地址。".into()); }
-                builder.proxy_url(url)
-            }
+            "manual" => builder.proxy_url(self.website_proxy()?),
             _ => builder, // Native Windows settings/PAC, not another tool's cookies.
         };
         let window = builder.build().map_err(|_| "无法创建 GitHub 官网窗口。请检查 WebView2 和代理设置后重试。")?;
@@ -352,6 +363,7 @@ impl GitHubFeedService {
     }
 
     async fn disconnect(&self, app: &AppHandle) -> Result<(), String> {
+        crate::reader::close_active(app)?;
         self.reset_session(None)?;
         // Rotate the pointer BEFORE asynchronous WebView2 cleanup. Even if its
         // process briefly locks old files, a new connection cannot revive them.

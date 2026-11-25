@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "ReleaseHub local workspace and native window controls.",
-  "windows": ["main"],
+  "webviews": ["main"],
   "permissions": [
     "core:default", "allow-host-dispatch",
     "core:window:allow-minimize", "core:window:allow-toggle-maximize",

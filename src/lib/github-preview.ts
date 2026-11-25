@@ -18,7 +18,7 @@ function repository(id: number, fullName: string, description: string, extra: Pa
   return {
     id, name: fullName.split('/')[1], owner: fullName.split('/')[0], fullName, description,
     url: `https://github.com/${fullName}`, private: false, archived: false, fork: false,
-    language: 'TypeScript', stars: 128, forks: 12, openIssues: 5, updatedAt: exampleDate,
+    language: 'TypeScript', stars: 128, forks: 12, openIssues: 5, hasIssues: true, hasDiscussions: true, updatedAt: exampleDate,
     defaultBranch: 'main', homepage: null, topics: ['windows', 'desktop'], canAdmin: false, starred: null, ...extra,
   };
 }

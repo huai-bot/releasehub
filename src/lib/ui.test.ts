@@ -1,10 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { assetKindLabel, canActivateManagedVersion, canDownloadAsset, canInstallAsset, canInstallDownload, downloadPercent, formatBytes, getDownloadStatus, getProjectStatus, hasProjectUpdate, isFilesProject, matchesProject, needsProjectAttention, parseRepository, projectPresentation, readableError, safeGithubUrl } from './ui';
 import { createPreviewManagedVersions, createPreviewSnapshot } from './preview';
+import { githubLinkTarget, trackedAsset } from './ui';
 import { applyDownloadProgress, isDownloadRecord, mergeSnapshotDownloads } from './download-state';
 import type { DownloadRecord, FileStatus, Project, ReleaseAsset } from './types';
 
 describe('GitHub input and host-bound links', () => {
+  it('routes repositories, reading pages and authorization separately', () => {
+    const origin = 'https://github.com';
+    expect(githubLinkTarget(`${origin}/owner/tool/`)).toMatchObject({ kind:'repository', repository:'owner/tool' });
+    for (const path of ['/owner/tool/issues/12#comment-1','/owner/tool/discussions','/owner/tool/releases','/topics/windows','/stars/me/lists/tools','/owner/tool#readme']) expect(githubLinkTarget(origin+path)?.kind).toBe('reader');
+    for (const path of ['/login/device','/settings/profile','/orgs/demo/sso']) expect(githubLinkTarget(origin+path)?.kind).toBe('browser');
+    expect(githubLinkTarget('https://example.org/owner/tool')).toBeNull();
+    const projects = createPreviewSnapshot().projects;
+    const file = projects[0].release!.assets[0];
+    expect(githubLinkTarget(file.url)).toMatchObject({ kind:'asset', releaseUrl:file.url.replace(/\/download\/(.+)\/[^/]+$/, '/tag/$1') });
+    expect(trackedAsset(projects,file.url+'?download=1')?.asset.id).toBe(file.id);
+    expect(trackedAsset(projects,file.url+'.other')).toBeNull();
+  });
   it('accepts a repository name and normalizes supported project links', () => {
     expect(parseRepository(' Lake1059/FFmpegFreeUI ')).toBe('Lake1059/FFmpegFreeUI');
     expect(parseRepository('https://github.com/Predidit/Kazumi.git')).toBe('Predidit/Kazumi');

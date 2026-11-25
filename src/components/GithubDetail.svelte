@@ -3,7 +3,8 @@
   import { formatDate, safeGithubUrl } from '../lib/ui';
   import Icon from './Icon.svelte';
   import ReleaseNotes from './ReleaseNotes.svelte';
-  let { name, detail, note, loading, error, connected, preview, pending, subscribed, adding, onclose, onretry, onstar, onedit, onnote, onlists, onadd, onopen }: {
+  let { name, detail, note, loading, error, connected, preview, pending, subscribed, adding, backLabel = '返回列表', onclose, onretry, onstar, onedit, onnote, onlists, onadd, onopen, onoriginal }: {
+    backLabel?: string; onoriginal?: (url: string) => void;
     name: string; detail: GithubRepositoryDetail | null; note?: RepositoryNote; loading: boolean; error: string;
     connected: boolean; preview: boolean; pending: boolean; subscribed: boolean; adding: boolean;
     onclose: () => void; onretry: () => void; onstar: (repository: GithubRepository) => void;
@@ -14,11 +15,11 @@
 </script>
 
 <aside class="surface github-detail" aria-label={`${name} 仓库详情`} aria-busy={loading}>
-  <div class="repo-detail-top"><button class="text-button" onclick={onclose}><Icon name="chevronRight" class="back-arrow" size={15} />返回列表</button><button class="icon-button" aria-label="刷新仓库详情" disabled={loading || pending} onclick={onretry}><Icon name="refresh" size={16} /></button></div>
+  <div class="repo-detail-top"><button class="text-button" onclick={onclose}><Icon name="chevronRight" class="back-arrow" size={15} />{backLabel}</button><button class="icon-button" aria-label="刷新仓库详情" disabled={loading || pending} onclick={onretry}><Icon name="refresh" size={16} /></button></div>
   {#if loading}
     <div class="detail-body" role="status"><p class="muted">正在读取 {name}…</p><div class="skeleton-lines"><span></span><span></span><span></span></div></div>
   {:else if error}
-    <div class="empty-state"><Icon name="alert" size={26} /><h3>仓库详情暂时没有读到</h3><p class="break-word" role="alert">{error}</p><button class="button secondary" onclick={onretry}>重新读取</button></div>
+    <div class="empty-state"><Icon name="alert" size={26} /><h3>仓库详情暂时没有读到</h3><p class="break-word" role="alert">{error}</p><button class="button secondary" onclick={onretry}>重新读取</button>{#if onoriginal}<button class="text-button" onclick={() => onoriginal?.(`https://github.com/${name}`)}>查看原页</button>{/if}</div>
   {:else if repository}
     <div class="detail-body">
       <div class="repo-heading"><Icon name="readme" size={21} /><h2>{note?.name || repository.fullName}</h2></div>
@@ -37,7 +38,12 @@
         {#if repository.canAdmin && connected}<button class="button secondary" disabled={pending} onclick={() => onedit(repository)}><Icon name="edit" size={15} />修改说明与主页</button>{/if}
       </div>
       {#if repository.private || (connected && repository.starred === null)}<p class="field-hint">{repository.private ? '私有仓库暂不加入软件库。' : ''}{#if connected && repository.starred === null} Star 状态未读到，请刷新详情后再操作。{/if}</p>{/if}
-      <button class="text-button original-link" onclick={() => onopen(repository.url)}>在 GitHub 查看原页<Icon name="external" size={14} /></button>
+      <div class="repo-pages">
+        <button class="text-button" onclick={() => onopen(`${repository.url}/releases`)}>发行版</button>
+        {#if repository.hasIssues}<button class="text-button" onclick={() => onopen(`${repository.url}/issues`)}>问题</button>{/if}
+        {#if repository.hasDiscussions}<button class="text-button" onclick={() => onopen(`${repository.url}/discussions`)}>讨论</button>{/if}
+        <button class="text-button" onclick={() => (onoriginal ?? onopen)(repository.url)}>查看原页<Icon name="chevronRight" size={14} /></button>
+      </div>
       <div class="readme-heading"><Icon name="notes" size={16} /><h3>README</h3></div>
       {#if detail?.readme.trim()}<ReleaseNotes body={detail.readme} repositoryUrl={`${repository.url}/blob/${encodeURIComponent(repository.defaultBranch)}/README.md`} {onopen} />{:else}<p class="empty-readme">暂无 README</p>{/if}
     </div>
@@ -63,7 +69,7 @@
   .repo-topics { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
   .repo-topics span { padding: 1px 7px; border-radius: 4px; background: var(--surface-soft); border: 1px solid var(--border); color: var(--subtle); font-size: 11px; overflow-wrap: anywhere; }
   .repo-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 17px 0 8px; }
-  .original-link { margin-top: 10px; }
+  .repo-pages { display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:10px; }
   .readme-heading { display: flex; align-items: center; gap: 7px; margin: 24px 0 13px; padding-bottom: 10px; border-bottom: 1px solid var(--border); color: var(--muted); }
   .readme-heading h3 { font-size: 12px; font-weight: 600; }
   .empty-readme { color: var(--muted); font-size: 12px; }

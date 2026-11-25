@@ -1568,6 +1568,8 @@ fn project_repository(value: &Value, starred: Option<bool>) -> Result<Value, Str
         "stars": count(&value["stargazers_count"]),
         "forks": count(&value["forks_count"]),
         "openIssues": count(&value["open_issues_count"]),
+        "hasIssues": value["has_issues"].as_bool().unwrap_or(false),
+        "hasDiscussions": value["has_discussions"].as_bool().unwrap_or(false),
         "updatedAt": text(&value["updated_at"], 64),
         "defaultBranch": text(&value["default_branch"], 255),
         "homepage": value["homepage"].as_str().and_then(safe_https),
@@ -1745,7 +1747,7 @@ mod tests {
             "owner": { "login": "untrusted-owner" }, "description": "示例说明",
             "html_url": "https://untrusted.example/redirect", "private": false,
             "archived": false, "fork": false, "language": "Rust", "stargazers_count": 12,
-            "forks_count": 3, "open_issues_count": 2, "updated_at": "2026-01-01T00:00:00Z",
+            "forks_count": 3, "open_issues_count": 2, "has_issues": true, "has_discussions": false, "updated_at": "2026-01-01T00:00:00Z",
             "default_branch": "main", "homepage": "https://example.com/", "topics": ["desktop"],
             "permissions": { "admin": true }, "unexpected_secret": "not-a-credential",
         })
@@ -1755,7 +1757,9 @@ mod tests {
     #[test]
     fn repository_projection_has_exact_contract_and_no_raw_fields() {
         let projected = project_repository(&sample_repo(), Some(true)).unwrap();
-        assert_eq!(projected.as_object().unwrap().len(), 19);
+        assert_eq!(projected.as_object().unwrap().len(), 21);
+        assert_eq!(projected["hasIssues"], true);
+        assert_eq!(projected["hasDiscussions"], false);
         assert_eq!(projected["name"], "Hello-World");
         assert_eq!(projected["owner"], "octocat");
         assert_eq!(projected["url"], "https://github.com/octocat/Hello-World");
