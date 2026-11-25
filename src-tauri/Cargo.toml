@@ -1,7 +1,7 @@
 [package]
 name = "releasehub"
 default-run = "releasehub"
-version = "0.6.4"
+version = "0.6.5"
 description = "A portable-first GitHub release center"
 authors = ["huai-bot"]
 license = "MIT"

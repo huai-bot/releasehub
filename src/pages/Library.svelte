@@ -397,10 +397,10 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 13px 20px;
+    padding: 12px 24px 6px;
     color: var(--muted);
     font-size: 12px;
-    border-top: 1px solid var(--border);
+    border-top: 0;
   }
   .selection-heading label {
     display: flex;
@@ -430,15 +430,12 @@
     margin-left: auto;
   }
   .layout-switcher {
-    padding: 2px;
-    background: var(--surface-soft);
-    border-radius: 9px;
-    border: 1px solid var(--border-soft);
+    padding: 5px;
   }
   .layout-switcher button {
-    padding: 5px 12px;
+    padding: 6px 12px;
     font-size: 12px;
-    border-radius: 7px;
+    border-radius: 15px;
   }
   .library-card-grid {
     display: grid;
@@ -462,11 +459,11 @@
     max-height: calc(100vh - 16px);
     overflow: auto;
     padding: 8px;
-    border-radius: 14px;
-    border: 1px solid var(--glass-border, var(--border));
+    border-radius: 18px;
+    border: 1px solid var(--hairline, var(--glass-border, var(--border)));
     background: var(--glass-panel, var(--surface));
     backdrop-filter: var(--glass-filter, none);
-    box-shadow: 0 16px 48px rgba(14, 32, 57, 0.2);
+    box-shadow: var(--raise, 0 16px 48px rgba(14, 32, 57, 0.2)), 0 18px 40px rgba(35, 32, 29, 0.16);
   }
   .menu-label {
     display: block;
@@ -477,7 +474,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    border-bottom: 1px solid var(--border-soft);
+    border-bottom: 1px solid var(--hairline, var(--border-soft));
     margin-bottom: 4px;
   }
   .resource-menu button {
@@ -486,7 +483,7 @@
     align-items: center;
     gap: 10px;
     padding: 9px 10px;
-    border-radius: 8px;
+    border-radius: 12px;
     text-align: left;
     font-size: 13px;
     color: var(--text);
@@ -503,7 +500,7 @@
   }
   .menu-divider {
     height: 1px;
-    background: var(--border-soft);
+    background: var(--hairline, var(--border-soft));
     margin: 5px 4px;
   }
   @media (max-width: 1100px) {

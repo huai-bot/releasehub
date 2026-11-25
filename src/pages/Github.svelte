@@ -776,7 +776,7 @@
     {#if tab === 'starred' && stars}<div class="github-pagination stars-pagination"><span>已加载 {starPage} 批 · {stars.items.length} / {stars.totalCount} 个{!hasMore ? ' · 已全部加载' : ''}</span><button class="button secondary small" disabled={!hasMore || contentLoading || assignmentBusy} onclick={() => void loadContent(true)}><Icon name={contentLoading ? 'loader' : 'plus'} class={contentLoading ? 'spinning' : ''} size={14} />{contentLoading ? '正在加载' : hasMore ? '继续加载 Stars' : '已全部加载'}</button></div>
     {:else if (tab === 'explore' || connected) && (repositories || activity)}<div class="github-pagination"><span>第 {displayPage} 页</span><div><button class="button secondary small" disabled={contentLoading || page <= 1} onclick={() => goPage(page - 1)}>上一页</button><button class="button secondary small" disabled={contentLoading || !hasMore || showingPrevious} onclick={() => goPage(page + 1)}>下一页</button></div></div>{/if}
   </div>
-  {#if selectedName}<div class="detail-region" bind:this={detailRegion} tabindex="-1">{#if detail && (detailLoading || detailError)}<div class="github-cache-status" role="status">{#if detailLoading}<span>正在更新详情…</span>{/if}{#if detailError}<p class="field-error">更新未完成，已保留原详情：{detailError}</p>{/if}</div>{/if}<GithubDetail name={selectedName} {detail} note={findRepositoryNote(notes, selectedName)} loading={detailLoading && !detail} error={detail ? '' : detailError} connected={verified} {preview} pending={pendingRepositories.has(selectedName)} subscribed={isSubscribed(selectedName, projects)} adding={addingRepositories.has(selectedName)} backLabel={linkBack ? '返回' : '返回列表'} onclose={() => void closeDetail()} onretry={() => { if (selectedName) void selectRepository(selectedName, false, true); }} onstar={(repository) => void setStar(repository)} onedit={editRepository} onnote={editNote} onlists={(repository) => void openAssignment([repository.fullName], 'replace')} onadd={(repository) => void addRepository(repository)} {onopen} {onoriginal} /></div>{/if}
+  {#if selectedName}<div class="surface list-surface detail-region" bind:this={detailRegion} tabindex="-1">{#if detail && (detailLoading || detailError)}<div class="github-cache-status" role="status">{#if detailLoading}<span>正在更新详情…</span>{/if}{#if detailError}<p class="field-error">更新未完成，已保留原详情：{detailError}</p>{/if}</div>{/if}<GithubDetail name={selectedName} {detail} note={findRepositoryNote(notes, selectedName)} loading={detailLoading && !detail} error={detail ? '' : detailError} connected={verified} {preview} pending={pendingRepositories.has(selectedName)} subscribed={isSubscribed(selectedName, projects)} adding={addingRepositories.has(selectedName)} backLabel={linkBack ? '返回' : '返回列表'} onclose={() => void closeDetail()} onretry={() => { if (selectedName) void selectRepository(selectedName, false, true); }} onstar={(repository) => void setStar(repository)} onedit={editRepository} onnote={editNote} onlists={(repository) => void openAssignment([repository.fullName], 'replace')} onadd={(repository) => void addRepository(repository)} {onopen} {onoriginal} /></div>{/if}
 </div>
 </div>
 {/if}
@@ -796,7 +796,7 @@
 {/if}
 
 <style>
-  .github-preview { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; color: var(--warning); background: var(--warning-bg); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 14px; padding: 8px 12px; font-size: 12px; }
+  .github-preview { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; color: var(--warning); background: var(--warning-bg); border: 1px solid var(--border); border-radius: 16px; margin-bottom: 14px; padding: 8px 14px; font-size: 12px; }
   .github-preview label { display: flex; gap: 8px; align-items: center; }
   .github-preview select { padding: 4px 8px; font-size: 12px; }
   .page-heading { flex: 0 0 auto; margin-bottom: 14px; }
@@ -813,7 +813,7 @@
   .website-account strong { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 13px; color: var(--heading); }
   .website-account p, .website-note, .account-consistency { font-size: 12px; color: var(--muted); line-height: 1.7; }
   .website-note { margin-top: 7px; max-width: 75ch; }
-  .account-mismatch { margin-top: 9px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; line-height: 1.7; background: var(--warning-bg); color: var(--warning); overflow-wrap: anywhere; }
+  .account-mismatch { margin-top: 9px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 12px; font-size: 12px; line-height: 1.7; background: var(--warning-bg); color: var(--warning); overflow-wrap: anywhere; }
   .account-consistency { margin-top: 6px; }
   .website-error { margin-top: 7px; }
   .github-repository-workspace { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 16px; flex: 1 1 0; min-height: 0; margin-top: 16px; overflow: hidden; }
@@ -853,21 +853,24 @@
   .github-columns { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 14px; min-width: 0; min-height: 0; align-items: stretch; }
   .github-columns.with-detail { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); }
   .github-results, .detail-region { min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
-  .detail-region { border-radius: var(--r-card); }
+  .detail-region { border-radius: var(--r-card); align-self: start; max-height: 100%; }
   .github-controls::-webkit-scrollbar, .github-results::-webkit-scrollbar, .detail-region::-webkit-scrollbar, .github-feed-region::-webkit-scrollbar, .github-account::-webkit-scrollbar { width: 8px; }
-  .github-controls::-webkit-scrollbar-thumb, .github-results::-webkit-scrollbar-thumb, .detail-region::-webkit-scrollbar-thumb, .github-feed-region::-webkit-scrollbar-thumb, .github-account::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+  .github-results::-webkit-scrollbar-track, .detail-region::-webkit-scrollbar-track, .github-account::-webkit-scrollbar-track { margin-block: 14px; background: transparent; }
+  .github-controls::-webkit-scrollbar-thumb, .github-results::-webkit-scrollbar-thumb, .detail-region::-webkit-scrollbar-thumb, .github-feed-region::-webkit-scrollbar-thumb, .github-account::-webkit-scrollbar-thumb { background: var(--neu-dark, var(--border)); border: 2px solid var(--neu-bg, transparent); border-radius: 999px; }
   .detail-region:focus { outline: none; }
   .github-results:focus-visible, .detail-region:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-  .results-heading { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--surface-soft); }
-  .results-heading h2 { font-size: 12px; }
-  .results-heading > span { margin-left: auto; color: var(--muted); font-size: 12px; }
-  .repo-row { padding: 14px 16px; border-top: 1px solid var(--hairline); }
-  .repo-row:hover { background: var(--surface-soft); }
-  .repo-row.selected { background: var(--accent-soft); }
+  .results-heading { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: var(--neu-bg, var(--surface-soft)); border-bottom: 1px solid var(--hairline, var(--border)); border-radius: calc(var(--r-card, 14px) - 1px) calc(var(--r-card, 14px) - 1px) 0 0; }
+  .results-heading h2 { font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+  .results-heading > span { margin-left: auto; color: var(--muted); font-size: 12px; text-align: right; }
+  .repo-row { position: relative; margin: 6px 10px; padding: 12px 14px; border-top: 0; border-radius: 16px; transition: background 180ms ease; }
+  .repo-row + .repo-row::before { content: ""; position: absolute; left: 14px; right: 14px; top: -3px; height: 1px; background: var(--hairline, var(--border)); pointer-events: none; transition: opacity 150ms ease; }
+  .repo-row:hover { background: var(--quiet-hover, var(--surface-soft)); }
+  .repo-row.selected, .repo-row.selected:hover { background: var(--accent-soft); }
+  .repo-row:is(:hover, .selected)::before, .repo-row:is(:hover, .selected) + .repo-row::before { opacity: 0; }
   .repo-main { display: block; width: 100%; min-width: 0; padding: 0; text-align: left; }
   .repo-title { display: flex; align-items: center; gap: 7px; color: var(--accent); flex-wrap: wrap; }
   .repo-title strong { font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
-  .repo-summary.local-note-summary { padding: 7px 10px; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 6px; color: var(--heading); }
+  .repo-summary.local-note-summary { padding: 7px 11px; background: color-mix(in srgb, var(--neu-bg, var(--surface-soft)) 65%, transparent); border: 1px solid var(--hairline, var(--border)); border-radius: 10px; color: var(--heading); }
   .upstream-summary { color: var(--muted); font-size: 12px; }
   .repo-summary { display: block; color: var(--subtle); font-size: 13px; line-height: 1.7; margin-top: 5px; overflow-wrap: anywhere; }
   .repo-row-bottom { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 9px; margin-top: 11px; }
@@ -880,7 +883,7 @@
   .lists-topline strong { color: var(--heading); font-size: 12px; }
   .lists-topline > span { margin-right: auto; color: var(--muted); font-size: 12px; }
   .list-options { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
-  .list-options button { display: inline-flex; align-items: baseline; gap: 7px; max-width: 100%; padding: 5px 10px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--subtle); font-size: 12px; overflow-wrap: anywhere; text-align: left; }
+  .list-options button { display: inline-flex; align-items: baseline; gap: 7px; max-width: 100%; padding: 6px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--subtle); font-size: 12px; overflow-wrap: anywhere; text-align: left; }
   .list-options button:hover { border-color: var(--accent); color: var(--accent); }
   .list-options button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
   .list-options button span { font-size: 10.5px; font-variant-numeric: tabular-nums; }
@@ -903,7 +906,7 @@
   .assignment-options { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 13px; }
   .assignment-options label { display: flex; align-items: center; gap: 7px; color: var(--heading); font-size: 12px; }
   .assignment-options label span { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-  .batch-toolbar { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 12px; }
+  .batch-toolbar { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin: 8px 10px 4px; padding: 10px 14px; border-top: 0; border-radius: 14px; background: var(--quiet-hover, var(--surface-soft)); font-size: 12px; }
   .batch-toolbar label { display: flex; align-items: center; gap: 7px; color: var(--subtle); }
   .batch-toolbar > span { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: auto; }
   .repo-select-line { display: flex; align-items: flex-start; gap: 10px; }
@@ -911,7 +914,7 @@
   .original-name { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; margin-top: 3px; }
   .github-row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
   .notes-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; }
-  .page-load-error { padding: 10px 16px; border-top: 1px solid var(--border); }
+  .page-load-error { margin: 8px 10px; padding: 10px 14px; border-top: 0; border-radius: 14px; }
   .stars-pagination { flex-wrap: wrap; }
   .list-options button:focus-visible, .assignment-heading h2:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
   input[type="checkbox"] { accent-color: var(--accent); }
@@ -919,17 +922,21 @@
   .original-name::selection, .repo-summary::selection { background: var(--accent-soft); color: var(--heading); }
   .repo-loading { padding: 18px; color: var(--muted); font-size: 12px; }
   .loading-row { display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--border); padding: 20px 0; margin-top: 12px; }
-  .loading-row > span { width: 32px; height: 32px; background: var(--surface-soft); border-radius: 12px; }
+  .loading-row > span { width: 32px; height: 32px; background: var(--surface-soft); border-radius: 11px; }
   .loading-row > div { flex: 1; display: flex; flex-direction: column; gap: 9px; }
-  .loading-row i { height: 8px; border-radius: 3px; width: 75%; background: var(--border); }
+  .loading-row i { height: 8px; border-radius: 6px; width: 75%; background: var(--border); }
   .loading-row i:last-child { width: 48%; }
-  .activity-row { display: flex; align-items: flex-start; gap: 11px; padding: 15px 16px; border-top: 1px solid var(--hairline); }
+  .activity-row { position: relative; display: flex; align-items: flex-start; gap: 11px; margin: 6px 10px; padding: 12px 14px; border-top: 0; border-radius: 16px; transition: background 180ms ease; }
+  .activity-row + .activity-row::before { content: ""; position: absolute; left: 14px; right: 14px; top: -3px; height: 1px; background: var(--hairline, var(--border)); pointer-events: none; transition: opacity 150ms ease; }
+  .activity-row:hover { background: var(--quiet-hover, var(--surface-soft)); }
+  .activity-row:hover::before, .activity-row:hover + .activity-row::before { opacity: 0; }
   .activity-row > div { flex: 1; min-width: 0; }
   .activity-row p { font-size: 12px; color: var(--subtle); overflow-wrap: anywhere; }
   .activity-row strong { color: var(--heading); }
   .repo-link { max-width: 100%; overflow-wrap: anywhere; font-size: 12px; }
   .activity-row div > span { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
-  .github-pagination { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .github-pagination { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 16px; border-top: 0; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .github-pagination::before { content: ""; position: absolute; left: 16px; right: 16px; top: 0; height: 1px; background: var(--hairline, var(--border)); pointer-events: none; }
   .github-pagination > div { display: flex; gap: 8px; }
   @media (max-width: 1250px) { .github-repository-workspace { grid-template-columns: 180px minmax(0, 1fr); gap: 12px; } .github-columns.with-detail { grid-template-columns: minmax(0, 1fr); } .github-results.compact-hidden { display: none; } .github-row-actions { gap: 4px; } }
   @media (max-width: 1040px) { .github-tabs { gap: 4px; } .github-tabs button { padding: 8px 11px; } .list-editor-fields { grid-template-columns: minmax(0, 1fr); } .results-heading { flex-wrap: wrap; gap: 8px; } }

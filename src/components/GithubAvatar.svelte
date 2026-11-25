@@ -14,6 +14,6 @@
 </span>
 
 <style>
-  .github-avatar { width: 34px; height: 34px; flex: 0 0 34px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-soft); color: var(--subtle); font-size: 12px; font-weight: 650; overflow: hidden; }
+  .github-avatar { width: 34px; height: 34px; flex: 0 0 34px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-soft); color: var(--subtle); font-size: 12px; font-weight: 650; overflow: hidden; }
   img { width: 100%; height: 100%; object-fit: cover; }
 </style>

@@ -115,7 +115,7 @@ html :is(.global-search, .input-leading) input { border: 0; border-radius: 0; ou
 html :is(.global-search, .input-leading) .icon-button { box-shadow: none; background: transparent; }
 html :is(.global-search, .input-leading) .icon-button:hover:not(:disabled) { background: var(--quiet-hover); box-shadow: none; transform: none; }
 html :is(.global-search, .input-leading) .icon-button:active:not(:disabled) { color: var(--cobalt); box-shadow: var(--inset-sm); }
-html .global-search kbd { border: 1px solid var(--hairline); background: transparent; box-shadow: none; border-radius: 6px; }
+html .global-search kbd { border: 1px solid var(--hairline); background: transparent; box-shadow: none; border-radius: 8px; }
 
 /* ---- Cards: same colour as the page, shaped only by shadow; content stays flat ---- */
 html .surface, html .download-card, html .build-task-card, html .startup-card, html .settings-section, html .quiet-card,
@@ -125,7 +125,7 @@ html .stat-grid, html .overview-hero, html .home-first-resource, html .agent-con
 html .surface .surface, html .settings-section .surface { box-shadow: none; }
 html .surface.list-surface { background: var(--neu-bg); border: 1px solid var(--hairline); border-radius: var(--r-card); box-shadow: none; }
 html .section-heading { background: transparent; }
-html .detail-panel { background: var(--neu-bg); border: 0; box-shadow: -10px 0 26px var(--neu-dark); }
+html .detail-panel { background: var(--neu-bg); border: 0; border-radius: var(--r-card) 0 0 var(--r-card); box-shadow: -10px 0 26px var(--neu-dark); }
 html dialog { background: var(--neu-bg); border: 0; border-radius: var(--r-card); box-shadow: var(--raise), 0 30px 60px rgba(35, 32, 29, .18); }
 html dialog::backdrop { background: rgba(35, 32, 29, .28); }
 html .modal-header, html .modal-footer { border-color: var(--border); }
@@ -134,6 +134,36 @@ html .toast.danger { box-shadow: var(--raise), inset 4px 0 0 var(--vermilion); }
 html .table-heading { background: transparent; }
 html .operation-error, html .field-error, html .feed-error { border: 0; border-radius: 14px; background: var(--danger-bg); color: var(--danger); }
 html .field-error { box-shadow: inset 3px 0 0 var(--vermilion); }
+html .detail-error, html .asset-needed, html .source-callout, html .download-error, html .hash-details,
+html .build-progress-line, html .task-details, html .setting-note, html .rotation-confirm,
+html .secret-panel, html .data-location, html .advanced-fields, html .inline-callout,
+html .integrity-disclaimer, html .workspace-note { border-radius: 14px; }
+html .asset-choice, html .confirm-package { border-radius: 16px; }
+html .app-avatar { border-radius: 11px; }
+html .app-avatar.large { border-radius: 16px; }
+html .download-icon, html .task-icon { border-radius: 14px; }
+html .version-pill, html .subtle-count { border-radius: 8px; }
+html .version-summary em { border-radius: 7px; padding: 2px 6px; }
+html .skeleton-lines span { border-radius: 6px; }
+html .release-markdown pre { border-radius: 14px; }
+html .release-markdown code { border-radius: 6px; }
+html .release-markdown blockquote { border-radius: 0 10px 10px 0; }
+html .suggestions button { border-radius: 10px; }
+html .surface > .list-toolbar { position: relative; margin-bottom: 0; border-bottom: 0; padding: 14px 18px 12px; }
+html .surface > .list-toolbar::after { content: ""; position: absolute; left: 18px; right: 18px; bottom: 0; height: 1px; background: var(--hairline); pointer-events: none; }
+html .bulk-toolbar { margin: 10px 14px 4px; padding: 10px 16px; border-top: 0; border-radius: 14px; }
+html .download-item, html .build-task { position: relative; border-top: 0; padding: 20px 22px 17px; }
+html .download-item + .download-item::before, html .build-task + .build-task::before { content: ""; position: absolute; left: 22px; right: 22px; top: 0; height: 1px; background: var(--hairline); pointer-events: none; }
+html .detail-footer { margin: 0 23px; padding: 14px 0; border-top-color: var(--hairline); }
+html .section-notice { margin: 0 14px 14px; border-top: 0; border-radius: 14px; }
+html .project-list { padding: 4px 10px 10px; }
+html .project-row { position: relative; margin: 4px 0; padding: 12px 14px; border-top: 0; border-radius: 16px; }
+html .project-row + .project-row::before { content: ""; position: absolute; left: 14px; right: 14px; top: -2px; height: 1px; background: var(--hairline); pointer-events: none; transition: opacity 150ms ease; }
+html .project-row:hover { background: var(--quiet-hover); }
+html .project-row.row-checked { background: var(--quiet-hover); }
+html .project-row.row-selected, html .project-row.row-selected:hover { background: var(--accent-soft); }
+html .project-row:is(:hover, .row-selected, .row-checked)::before,
+html .project-row:is(:hover, .row-selected, .row-checked) + .project-row::before { opacity: 0; }
 
 /* Badges are information, not controls: flat. */
 html .status-badge { border: 0; border-radius: 10px; background: transparent; padding-left: 0; padding-right: 0; font-weight: 600; }
@@ -145,10 +175,12 @@ html .status-badge.neutral::before { background: var(--neu-dark); box-shadow: va
 
 /* ---- Segmented controls & tab strips: a recessed tray of keys ---- */
 html .segmented-tabs, html body .github-tabs, html body .detail-tabs { gap: 6px; padding: 5px; border: 0; border-radius: 20px; background: var(--neu-bg); box-shadow: var(--inset-sm); width: fit-content; max-width: 100%; }
+html body .detail-tabs { margin: 4px 23px 8px; }
 html .segmented-tabs button, html body .github-tabs button, html body .detail-tabs button {
   border: 0; border-radius: 15px; background: var(--neu-bg); color: var(--subtle);
   transition: transform 220ms var(--spring), box-shadow 180ms ease, color 160ms;
 }
+html body .detail-tabs button { padding: 8px 14px; }
 html .segmented-tabs button:hover, html body .github-tabs button:hover, html body .detail-tabs button:hover { background: var(--quiet-hover); color: var(--heading); box-shadow: none; }
 html .segmented-tabs button.active, html body .github-tabs button.active, html body .detail-tabs button.active,
 html .segmented-tabs button:active, html body .github-tabs button:active {
@@ -174,11 +206,13 @@ html .theme-check { background: var(--cobalt); box-shadow: var(--cobalt-glow); }
 
 /* Rows inside cards are flat text with hairlines */
 html .setting-row, html .home-update-row, html .home-pending-row, html .home-section-empty { border-color: var(--border); }
+html .home-pending-row, html .home-section-empty { margin: 0 18px; padding: 14px 0; border-top-color: var(--hairline); }
 
 /* ---- Progress & scrollbars ---- */
 html progress { appearance: none; border: 0; height: 8px; border-radius: 6px; background: var(--neu-bg); box-shadow: var(--inset-sm); overflow: hidden; }
 html progress::-webkit-progress-bar { background: transparent; }
 html progress::-webkit-progress-value { background: var(--cobalt); border-radius: 6px; box-shadow: var(--cobalt-glow); }
+::-webkit-scrollbar-track { margin-block: 14px; background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--neu-dark); border: 2px solid var(--neu-bg); border-radius: 8px; }
 :focus-visible { outline: 2px solid var(--cobalt); outline-offset: 3px; }
 

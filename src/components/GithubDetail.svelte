@@ -14,7 +14,7 @@
   const repository = $derived(detail?.repository ?? null);
 </script>
 
-<aside class="surface list-surface github-detail" aria-label={`${name} 仓库详情`} aria-busy={loading}>
+<aside class="github-detail" aria-label={`${name} 仓库详情`} aria-busy={loading}>
   <div class="repo-detail-top"><button class="text-button" onclick={onclose}><Icon name="chevronRight" class="back-arrow" size={15} />{backLabel}</button><button class="icon-button" aria-label="刷新仓库详情" disabled={loading || pending} onclick={onretry}><Icon name="refresh" size={16} /></button></div>
   {#if loading}
     <div class="detail-body" role="status"><p class="muted">正在读取 {name}…</p><div class="skeleton-lines"><span></span><span></span><span></span></div></div>
@@ -52,7 +52,7 @@
 
 <style>
   .github-detail { min-width: 0; align-self: start; }
-  .repo-detail-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--hairline); }
+  .repo-detail-top { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 16px; background: var(--neu-bg, var(--surface)); border-bottom: 1px solid var(--hairline); border-radius: calc(var(--r-card, 14px) - 1px) calc(var(--r-card, 14px) - 1px) 0 0; }
   .repo-detail-top :global(.back-arrow) { transform: rotate(180deg); }
   .detail-body { padding: 18px; min-width: 0; }
   .repo-heading { display: flex; align-items: flex-start; gap: 10px; color: var(--accent); }
@@ -61,13 +61,13 @@
   .repo-flags { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
   .repo-description { color: var(--subtle); font-size: 12.5px; overflow-wrap: anywhere; line-height: 1.75; margin-top: 8px; }
   .original-name { margin-top: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-  .local-note { margin: 10px 0 4px; padding: 9px 12px; border: 1px solid var(--border); background: var(--surface-soft); border-radius: 8px; font-size: 13.5px; line-height: 1.65; color: var(--heading); overflow-wrap: anywhere; }
+  .local-note { margin: 10px 0 4px; padding: 9px 12px; border: 1px solid var(--hairline, var(--border)); background: var(--surface-soft); border-radius: 12px; font-size: 13.5px; line-height: 1.65; color: var(--heading); overflow-wrap: anywhere; }
   .repo-homepage { display: flex; flex-direction: column; align-items: start; gap: 3px; margin-top: 10px; font-size: 12px; overflow-wrap: anywhere; }
   .repo-homepage .text-button { white-space: normal; overflow-wrap: anywhere; display: block; }
   .repo-statline { display: flex; flex-wrap: wrap; gap: 7px 16px; color: var(--muted); font-size: 11px; margin: 15px 0 10px; font-variant-numeric: tabular-nums; }
   .repo-statline > span { display: inline-flex; align-items: center; gap: 4px; }
   .repo-topics { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
-  .repo-topics span { padding: 1px 7px; border-radius: 4px; background: var(--surface-soft); border: 1px solid var(--border); color: var(--subtle); font-size: 11px; overflow-wrap: anywhere; }
+  .repo-topics span { padding: 2px 9px; border-radius: 10px; background: var(--surface-soft); border: 1px solid var(--hairline, var(--border)); color: var(--subtle); font-size: 11px; overflow-wrap: anywhere; }
   .repo-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 17px 0 8px; }
   .repo-pages { display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:10px; }
   .readme-heading { display: flex; align-items: center; gap: 7px; margin: 24px 0 13px; padding-bottom: 10px; border-bottom: 1px solid var(--border); color: var(--muted); }

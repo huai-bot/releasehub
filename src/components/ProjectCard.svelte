@@ -97,7 +97,7 @@
   .project-card:active { transform: translateY(2px); box-shadow: var(--inset); transition-duration: 120ms; }
   .project-card.focused,
   .project-card:focus-within { box-shadow: var(--inset); transform: translateY(2px); }
-  .project-card.focused::after { content: ""; position: absolute; top: 14px; right: 14px; width: 8px; height: 8px; border-radius: 50%; background: var(--cobalt); box-shadow: var(--cobalt-glow); }
+  .project-card.focused::after { content: ""; position: absolute; top: 16px; left: 16px; width: 8px; height: 8px; border-radius: 50%; background: var(--cobalt); box-shadow: var(--cobalt-glow); pointer-events: none; }
   .card-identity {
     width: 100%;
     min-height: 184px;
@@ -107,7 +107,8 @@
     justify-content: center;
     gap: 16px;
     padding: 24px 16px;
-    border-radius: 17px;
+    border-radius: var(--r-card, 24px);
+    outline-offset: 2px;
     user-select: none;
     text-align: center;
   }
@@ -165,11 +166,13 @@
   }
   .card-more {
     position: absolute;
-    right: 4px; /* 调整位置 */
-    top: 4px;
+    right: 10px;
+    top: 10px;
     width: 32px;
-    height: 28px;
-    border-radius: 8px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
     color: var(--muted);
     font-size: 20px;
     line-height: 1;
@@ -230,16 +233,23 @@
     display: flex;
     flex-direction: row;
     align-items: center;
-    padding: 8px 14px;
-    border-radius: 12px;
+    padding: 0;
+    border-radius: 18px;
   }
   .layout-list:hover {
     transform: translateX(2px);
   }
+  .layout-list.focused::after {
+    top: 50%;
+    left: auto;
+    right: 54px;
+    transform: translateY(-50%);
+  }
   .layout-list .card-identity {
     flex-direction: row;
-    min-height: 48px;
-    padding: 0;
+    min-height: 56px;
+    padding: 10px 56px 10px 14px;
+    border-radius: 18px;
     justify-content: flex-start;
     gap: 14px;
     text-align: left;
@@ -247,7 +257,7 @@
   .layout-list .card-avatar {
     width: 36px;
     height: 36px;
-    border-radius: 9px;
+    border-radius: 12px;
     font-size: 14px;
   }
   .layout-list .card-content {
@@ -262,9 +272,11 @@
     font-size: 11.5px;
   }
   .layout-list .card-more {
-    position: static;
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
     opacity: 0.6;
-    margin-left: auto;
     flex-shrink: 0;
   }
   .layout-list:hover .card-more {

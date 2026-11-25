@@ -32,10 +32,14 @@
 </div>
 
 <style>
-  .update-item { display:flex; align-items:flex-start; gap:14px; padding:22px; border-top:1px solid var(--border); }
-  .update-item.selected { background:var(--surface-soft); }
+  .updates-queue { padding:4px 10px 10px; }
+  .update-item { position:relative; display:flex; align-items:flex-start; gap:14px; margin:4px 0; padding:18px 16px; border-top:0; border-radius:16px; transition:background 180ms ease; }
+  .update-item + .update-item::before { content:""; position:absolute; left:16px; right:16px; top:-2px; height:1px; background:var(--hairline, var(--border)); pointer-events:none; transition:opacity 150ms ease; }
+  .update-item:hover { background:var(--quiet-hover, var(--surface-soft)); }
+  .update-item.selected, .update-item.selected:hover { background:var(--accent-soft); }
+  .update-item:is(:hover, .selected)::before, .update-item:is(:hover, .selected) + .update-item::before { opacity:0; }
   .update-item > input { margin-top:11px; flex-shrink:0; accent-color:var(--accent); }
-  .update-avatar { width:44px; height:44px; flex:0 0 44px; display:grid; place-items:center; border:1px solid var(--border); border-radius:10px; color:var(--subtle); background:var(--surface-soft); font-weight:650; }
+  .update-avatar { width:44px; height:44px; flex:0 0 44px; display:grid; place-items:center; border:1px solid var(--hairline, var(--border)); border-radius:14px; color:var(--subtle); background:var(--surface-soft); font-weight:650; }
   .update-content { min-width:0; flex:1; }
   .update-heading { display:flex; gap:9px; align-items:center; flex-wrap:wrap; }
   .update-heading .plain-link { font-size:17px; font-weight:650; color:var(--heading); overflow-wrap:anywhere; text-align:left; }
@@ -50,5 +54,5 @@
   .update-file { margin-top:7px; font-size:12px; color:var(--muted); line-height:1.6; overflow-wrap:anywhere; }
   .update-notes { margin-top:13px; max-width:75ch; line-height:1.65; color:var(--subtle); font-size:13px; overflow-wrap:anywhere; }
   .update-actions { display:flex; flex-wrap:wrap; gap:9px; margin-top:15px; }
-  @media (max-width:1100px) { .update-item { padding:18px; gap:10px; } .update-avatar { display:none; } }
+  @media (max-width:1100px) { .update-item { padding:16px 14px; gap:10px; } .update-avatar { display:none; } }
 </style>
