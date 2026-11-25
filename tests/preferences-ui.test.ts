@@ -6,6 +6,7 @@ import TitleBar from '../src/components/TitleBar.svelte';
 import ProxySettings from '../src/components/ProxySettings.svelte';
 import ExternalDownloadSettings from '../src/components/ExternalDownloadSettings.svelte';
 import { createPreviewSnapshot } from '../src/lib/preview';
+import { hasProjectUpdate } from '../src/lib/ui';
 import { defaultNavigationOrder, moveNavigation, normalizeNavigation } from '../src/lib/navigation';
 import type { InstallationCheck, ProxyTestResult, Settings } from '../src/lib/types';
 
@@ -45,6 +46,41 @@ beforeEach(() => {
 afterEach(async () => { await cleanup?.(); target.remove(); });
 
 describe('startup and desktop navigation', () => {
+  it('marks all update versions read across filters and can mute or resume a single subscription', async () => {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'updates';
+    const software = snapshot.projects[0];
+    const files = snapshot.projects.find(project => project.managementMode === 'files')!;
+    files.fileStatus = 'updateAvailable';
+    const versions = snapshot.projects.filter(hasProjectUpdate).map(project => ({ projectId: project.id, tag: project.release!.tag }));
+    mocks.dispatch.mockImplementation(async (action: string, payload) => {
+      if (action === 'snapshot') return snapshot;
+      if (action === 'mark_updates_read') { snapshot.readUpdateTags = Object.fromEntries(payload.versions.map((row: {projectId:string;tag:string}) => [row.projectId,row.tag])); return payload.versions.length; }
+      if (action === 'update_project') { Object.assign(software, payload.changes); return software; }
+      if (action === 'check_updates') return { checked: 1, updates: 1, unreadUpdates: 0, errors: 0 };
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = async () => { await unmount(instance); }; await settle();
+    const nav = (label: string) => [...target.querySelectorAll<HTMLButtonElement>('nav button')].find(item => item.querySelector('span')?.textContent === label)!;
+    const badge = () => nav('可更新').querySelector('.nav-count')?.textContent;
+    const active = () => target.querySelector<HTMLElement>('#main-content:not([hidden])')!;
+    expect(badge()).toBe(String(versions.length));
+    active().querySelectorAll<HTMLButtonElement>('[aria-label="资源类型筛选"] button')[2].click(); await settle();
+    expect(active().querySelectorAll('.update-item')).toHaveLength(1);
+    button('全部已读').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('mark_updates_read', { versions });
+    expect(badge()).toBeUndefined(); expect(button('全部已读').disabled).toBe(true);
+    expect(active().querySelectorAll('.update-item.read')).toHaveLength(1);
+    nav('资源库').click(); await settle();
+    const menu = async () => { active().querySelector<HTMLButtonElement>('.card-more')!.click(); await settle(); };
+    await menu(); button('屏蔽更新').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('update_project',{ id: software.id, changes: { updatesMuted: true } });
+    nav('可更新').click(); await settle(); active().querySelector<HTMLButtonElement>('[aria-label="资源类型筛选"] button')!.click(); await settle();
+    expect(active().querySelectorAll('.update-item')).toHaveLength(versions.length - 1);
+    nav('资源库').click(); await settle(); await menu(); button('恢复更新').click(); await settle();
+    expect(mocks.dispatch).toHaveBeenCalledWith('check_updates',{ projectIds: [software.id], allowAutoDownload: false });
+    expect(badge()).toBeUndefined();
+    nav('可更新').click(); await settle(); expect(active().querySelectorAll('.update-item')).toHaveLength(versions.length);
+  });
   it('opens the saved page only on startup and applies changed preferences on the next start', async () => {
     let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'agent';
     mocks.dispatch.mockImplementation(async (action: string, payload: { settings?: Partial<Settings> }) => {

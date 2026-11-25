@@ -11,6 +11,8 @@ struct Subscription {
     management_mode:String,
     #[serde(default)]
     backup_enabled:bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    updates_muted:bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
@@ -46,7 +48,7 @@ fn empty_project(owner:String,repo:String,channel:String,preference:String) -> P
     Project { id:uuid::Uuid::new_v4().to_string(), name:repo.clone(),
         url:format!("https://github.com/{owner}/{repo}"),owner,repo,description:String::new(),avatar_url:None,
         channel,preference,management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,installed_source:None,executable_path:None,
-        backup_enabled:false,
+        backup_enabled:false,updates_muted:false,
         release:None,selected_asset_id:None,status:"notChecked".into(),checked_at:None,error:None,
         default_branch:"main".into(),source_head_sha:None,source_ahead:None,created_at:time }
 }
@@ -85,6 +87,10 @@ impl Core {
         let reclassify=changes.channel.is_some() || changes.preference.is_some() || changes.management_mode.is_some() || changes.asset_pattern.is_some();
         let local_edit=changes.installed_version.is_some() || changes.installed_path.is_some() || changes.executable_path.is_some();
         let p=self.store.mutate_project(id,local_edit,|p:&mut Project| {
+            if let Some(muted)=changes.updates_muted {
+                p.updates_muted=muted;
+                if muted && p.status=="checking" { p.status="notChecked".into(); }
+            }
             if let Some(mode)=changes.management_mode {
                 validate_management_mode(&mode)?;
                 if p.management_mode!=mode {p.selected_asset_id=None;}
@@ -146,6 +152,16 @@ impl Core {
         })?;
         self.changed(); Ok(p)
     }
+    pub(crate) fn unread_updates(&self) -> Result<Vec<Project>,String> {
+        let downloads=self.store.downloads()?;
+        let mut projects=self.store.projects()?;
+        let read=self.store.current_read_tags()?;
+        projects.retain_mut(|project| {
+            selection::update_file_status(project,&downloads,&self.data_dir);
+            project.available_update_tag().is_some_and(|tag| read.get(&project.id).map(String::as_str)!=Some(tag))
+        });
+        Ok(projects)
+    }
     pub(crate) async fn check_updates(self:&Arc<Self>,payload:&Value)->Result<Value,String> {
         let _guard=self.checks.lock().await;
         let allow_auto=match payload.get("allowAutoDownload") { None=>true, Some(Value::Bool(v))=>*v,_=>return Err("自动下载参数无效".into()) };
@@ -154,10 +170,13 @@ impl Core {
         self.verify_installations(true).await?;
         let projects=self.store.projects()?;
         if let Some(ids)=&ids { for id in ids { if !projects.iter().any(|p| &p.id==id) { return Err("要检查的项目不存在".into()); } } }
-        let mut checked=0; let mut updates=0; let mut errors=0;
-        for mut p in projects.into_iter().filter(|p| ids.as_ref().is_none_or(|v| v.contains(&p.id))) {
+        let mut checked=0; let mut updates=0; let mut found=std::collections::HashMap::new(); let mut errors=0;
+        for mut p in projects.into_iter().filter(|p| !p.updates_muted && ids.as_ref().is_none_or(|v| v.contains(&p.id))) {
             let id=p.id.clone();
-            self.store.mutate("projects",&id,|current:&mut Project| {current.status="checking".into();current.error=None;Ok(())})?;
+            let current=self.store.mutate("projects",&id,|current:&mut Project| {
+                if !current.updates_muted {current.status="checking".into();current.error=None;} Ok(())
+            })?;
+            if current.updates_muted { continue; }
             self.changed();
             let fetched=async {
                 let raw=self.github.api(&p.owner,&p.repo,&[],None).await?; metadata(&mut p,&raw)?;
@@ -169,6 +188,7 @@ impl Core {
             checked+=1;
             let downloads=self.store.downloads()?;
             let updated=self.store.mutate("projects",&id,|current:&mut Project| {
+                if current.updates_muted {return Ok(());}
                 current.checked_at=Some(now());
                 match fetched {
                     Ok((mut release,head,tag_commit))=> {
@@ -187,11 +207,13 @@ impl Core {
                 Ok(())
             });
             let updated=match updated {Ok(p)=>p,Err(e) if self.store.project(&id).is_err()=>{let _=e;continue;},Err(e)=>return Err(e)};
-            if updated.status=="updateAvailable" {updates+=1;
+            if !updated.updates_muted && updated.status=="updateAvailable" {
+                updates+=1;
+                if let Some(tag)=updated.available_update_tag() { found.insert(id.clone(),tag.to_owned()); }
                 if allow_auto&&self.store.settings()?.auto_download {
                     if let (Some(asset),Some(r))=(updated.selected_asset_id,updated.release.as_ref()) {
                         let exists=self.store.downloads()?.iter().any(|d|d.project_id==updated.id&&d.asset_id==asset&&d.tag==r.tag);
-                        if !exists {if let Err(e)=self.queue_download(&updated.id,asset) {
+                        if !exists {if let Err(e)=self.queue_auto_download(&updated.id,asset) {
                             self.store.mutate("projects",&id,|p:&mut Project|{p.error=Some(format!("自动下载未开始：{e}"));Ok(())})?;
                         }}
                     }
@@ -199,12 +221,14 @@ impl Core {
             }
             self.changed();
         }
-        Ok(json!({"checked":checked,"updates":updates,"errors":errors}))
+        let unread=if found.is_empty() {0} else {self.unread_updates()?.iter().filter(|project|
+            found.get(&project.id).map(String::as_str)==project.available_update_tag()).count()};
+        Ok(json!({"checked":checked,"updates":updates,"unreadUpdates":unread,"errors":errors}))
     }
     pub(crate) fn export_library(&self)->Result<String,String> {
         let s=self.store.settings()?;
         let library=Library {version:1,projects:self.store.projects()?.into_iter().map(|p|Subscription{
-            repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern,backup_enabled:p.backup_enabled&&p.management_mode=="software",management_mode:p.management_mode}).collect(),
+            repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern,backup_enabled:p.backup_enabled&&p.management_mode=="software",updates_muted:p.updates_muted,management_mode:p.management_mode}).collect(),
             repository_notes:self.store.repository_notes()?,
             settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),material:Some(s.material),blur:Some(s.blur),library_layout:Some(s.library_layout),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
                 auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray,download_connections:Some(s.download_connections),
@@ -244,6 +268,7 @@ impl Core {
             let mut p=empty_project(owner,repo,input.channel,input.preference);
             p.management_mode=input.management_mode;
             p.backup_enabled=input.backup_enabled&&p.management_mode=="software";
+            p.updates_muted=input.updates_muted;
             if p.management_mode=="files" {p.file_status=Some("notDownloaded".into());}
             p.asset_pattern=input.asset_pattern.map(|s|bounded_text(&s,200,"文件名规则")).transpose()?;ready.push(p);
         }

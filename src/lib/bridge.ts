@@ -14,6 +14,7 @@ export interface Actions {
   update_project: { payload: { id: string; changes: ProjectChanges }; result: Project };
   remove_project: { payload: { id: string }; result: null };
   check_updates: { payload: { projectIds?: string[]; allowAutoDownload?: boolean }; result: CheckResult };
+  mark_updates_read: { payload: { versions: { projectId: string; tag: string }[] }; result: number };
   download_asset: { payload: { projectId: string; assetId: number }; result: DownloadRecord };
   send_external_download: { payload: { projectId: string; assetId: number; confirmed: true }; result: DownloadRecord };
   retry_external_download: { payload: { id: string; confirmed: true }; result: DownloadRecord };

@@ -389,21 +389,20 @@ async fn scheduled_checks(app: tauri::AppHandle, host: Arc<HostState>) {
         first = false;
         previous_check = Instant::now();
         let Ok(result) = host.core.handle("check_updates", json!({"allowAutoDownload": true})).await else { continue };
-        if result["updates"].as_u64().unwrap_or(0) == 0 { continue; }
+        if result["unreadUpdates"].as_u64().unwrap_or(0) == 0 { continue; }
         let Ok(current_settings) = host.core.handle("get_settings", json!({})).await else { continue };
         if !current_settings["notifications"].as_bool().unwrap_or(true) { continue; }
-        let Ok(after) = host.core.handle("snapshot", json!({})).await else { continue };
+        let Ok(unread) = host.core.unread_updates() else { continue };
         let mut names = Vec::new();
-        for project in after["projects"].as_array().into_iter().flatten() {
-            let id = project["id"].as_str().unwrap_or_default();
-            let tag = project["release"]["tag"].as_str().unwrap_or_default();
-            if project["status"].as_str() == Some("updateAvailable") && notified.get(id).map(String::as_str) != Some(tag) {
-                names.push(project["name"].as_str().unwrap_or("软件").to_owned());
-                notified.insert(id.to_owned(), tag.to_owned());
+        for project in unread {
+            if let Some(tag) = project.available_update_tag() {
+                if notified.get(&project.id).map(String::as_str) == Some(tag) { continue; }
+                notified.insert(project.id.clone(), tag.to_owned());
+                names.push(project.name);
             }
         }
         if !names.is_empty() {
-            let title = format!("发现 {} 项软件更新", names.len());
+            let title = format!("发现 {} 项更新", names.len());
             let body = names.into_iter().take(4).collect::<Vec<_>>().join("、");
             let _ = app.notification().builder().title(title).body(body).show();
         }
@@ -491,6 +490,33 @@ fn startup_message(message: &str) {
 fn startup_message(message: &str) { eprintln!("{message}"); }
 
 #[cfg(windows)]
+fn main_window_class(data_dir: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let path = data_dir.canonicalize()?;
+    let digest = Sha256::digest(path.as_os_str().as_encoded_bytes());
+    Ok(format!("ReleaseHub.Main.{digest:x}"))
+}
+
+#[cfg(windows)]
+fn wake_running_window(class: &str) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW};
+    let class: Vec<u16> = class.encode_utf16().chain(Some(0)).collect();
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let window = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+        if !window.is_null() {
+            unsafe {
+                ShowWindow(window, if IsIconic(window) != 0 { SW_RESTORE } else { SW_SHOW });
+                SetForegroundWindow(window);
+            }
+            return true;
+        }
+        if Instant::now() >= deadline { return false; }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+}
+
+#[cfg(windows)]
 fn refresh_executable_icon(executable: &std::path::Path) {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_UPDATEITEM, SHCNF_FLUSHNOWAIT, SHCNF_PATHW};
@@ -519,7 +545,13 @@ pub fn run() {
             let handle = app.handle().clone();
             let events = Arc::new(move |name: &str, value: Value| { let _ = handle.emit(name, value); });
             // Acquire the data lock before creating the instance identity or opening a WebView.
-            let core = Core::new(data_dir.clone(), portable, events)?;
+            #[cfg(windows)]
+            let window_class = main_window_class(&data_dir)?;
+            let Some(core) = Core::try_open(data_dir.clone(), portable, events)? else {
+                #[cfg(windows)]
+                if wake_running_window(&window_class) { std::process::exit(0); }
+                return Err(Core::DATA_IN_USE.into());
+            };
             let secrets = SecretStore::for_data_directory(&data_dir)?;
             let webview_dir = data_dir.join("webview");
             fs::create_dir_all(&webview_dir)?;
@@ -545,9 +577,10 @@ pub fn run() {
             app.manage(host.clone());
             let window_config = app.config().app.windows.iter()
                 .find(|window| window.label == "main").ok_or("找不到主窗口设置。")?;
-            tauri::WebviewWindowBuilder::from_config(app, window_config)?
-                .data_directory(webview_dir)
-                .build()?;
+            let window = tauri::WebviewWindowBuilder::from_config(app, window_config)?;
+            #[cfg(windows)]
+            let window = window.window_classname(window_class);
+            window.data_directory(webview_dir).build()?;
             setup_tray(app)?;
             #[cfg(windows)]
             refresh_executable_icon(&executable);

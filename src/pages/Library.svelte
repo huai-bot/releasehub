@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import type { LibraryLayout, Project, RepositoryNote } from '../lib/types';
-  import { canDownloadAsset, hasProjectUpdate, isFilesProject, matchesProject, projectPresentation } from '../lib/ui';
+  import { canDownloadAsset, hasProjectUpdate, hasUnreadUpdate, isFilesProject, matchesProject, projectPresentation } from '../lib/ui';
   import Icon from '../components/Icon.svelte';
   import ProjectCard from '../components/ProjectCard.svelte';
   import UpdatesQueue from '../components/UpdatesQueue.svelte';
@@ -15,6 +15,9 @@
     busy,
     layout = 'three',
     notes = [],
+    readTags,
+    onMarkRead,
+    onToggleUpdates,
     onlayout,
     onnote,
     onadd,
@@ -35,6 +38,9 @@
     busy: boolean;
     layout?: LibraryLayout;
     notes?: RepositoryNote[];
+    readTags?: Record<string, string>;
+    onMarkRead?: (projects: Project[]) => void;
+    onToggleUpdates?: (project: Project) => void;
     onlayout?: (layout: LibraryLayout) => void;
     onnote?: (project: Project) => void;
     onadd: () => void;
@@ -58,6 +64,7 @@
   }
 
   const base = $derived(projects.filter((project) => !updatesOnly || hasProjectUpdate(project)));
+  const unread = $derived(updatesOnly ? base.filter(project => hasUnreadUpdate(project, readTags)) : []);
   const softwareCount = $derived(base.filter((project) => !isFilesProject(project)).length);
   const filesCount = $derived(base.filter(isFilesProject).length);
   const typed = $derived(
@@ -177,10 +184,13 @@
 />
 
 <div class="page-heading">
-  <h1>{updatesOnly ? '可更新' : '资源库'}<span class="heading-count">{base.length}</span></h1>
+  <h1>{updatesOnly ? '可更新' : '资源库'}{#if !updatesOnly || unread.length}<span class="heading-count">{updatesOnly ? unread.length : base.length}</span>{/if}</h1>
   {#if updatesOnly}
     <div class="heading-actions">
       {#if base.length}
+        {#if onMarkRead}<button class="button secondary" disabled={busy || !unread.length} onclick={() => onMarkRead?.(unread)}>
+          <Icon name="check" size={16} />全部已读
+        </button>{/if}
         <button class="button secondary" disabled={busy} onclick={() => oncheck(base.map((project) => project.id))}>
           <Icon name="refresh" class={busy ? 'spinning' : ''} size={16} />重新检查
         </button>
@@ -288,7 +298,7 @@
           选择当前 {visible.length} 项
         </label>
       </div>
-      <UpdatesQueue projects={visible} {selected} {busy} {onselect} ontoggle={toggle} {ondownload} />
+      <UpdatesQueue projects={visible} {readTags} {selected} {busy} {onselect} ontoggle={toggle} {ondownload} />
     {:else}
       <div class="library-card-grid" class:layout-two={layout === 'two'} class:layout-three={layout === 'three'} class:layout-list={layout === 'list'}>
         {#each visible as project (project.id)}
@@ -351,6 +361,9 @@
     <button role="menuitem" onclick={() => perform(onselect)}>
       <Icon name="info" size={16} />查看详情
     </button>
+    {#if onToggleUpdates}<button role="menuitem" disabled={busy} onclick={() => perform(onToggleUpdates)}>
+      <Icon name={menu.project.updatesMuted ? 'eye' : 'eyeOff'} size={16} />{menu.project.updatesMuted ? '恢复更新' : '屏蔽更新'}
+    </button>{/if}
     {#if !isFilesProject(menu.project) && onBackup}
       <div class="menu-divider"></div>
       <button role="menuitem" disabled={busy} onclick={() => perform(onBackup)}>
@@ -376,6 +389,7 @@
   .heading-actions {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 10px;
   }
   .selection-heading {

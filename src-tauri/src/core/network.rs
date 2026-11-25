@@ -320,4 +320,52 @@ mod tests {
         assert_eq!(github.release(&project).await.unwrap().unwrap().tag,"v2.0.0");
         project.channel="preview".into();assert_eq!(github.release(&project).await.unwrap().unwrap().tag,"v3.0.0-beta.1");
     }
+    #[tokio::test]
+    async fn update_inbox_persists_reads_skips_muted_and_announces_only_new_tags() {
+        use super::super::Core;
+        use serde_json::json;
+        let directory=tempfile::tempdir().unwrap();
+        let open=|| Core::new(directory.path().into(),true,Arc::new(|_,_|{})).unwrap();
+        let seed=|core:&Core, tag:&str| {
+            let mut cache=core.github.cache.lock().unwrap();
+            let asset=json!({"id":15,"name":"app-win-x64.zip","size":20,"content_type":"application/zip",
+                "browser_download_url":format!("https://github.com/owner/app/releases/download/{tag}/app-win-x64.zip")});
+            let release=json!({"id":8,"tag_name":tag,"draft":false,"prerelease":false,"published_at":"2026-01-01T00:00:00Z",
+                "html_url":format!("https://github.com/owner/app/releases/tag/{tag}"),"assets":[asset]});
+            let commit=json!({"sha":"a".repeat(40)});
+            for (suffix,value) in [(String::new(),json!({"name":"app","private":false,"default_branch":"main"})),
+                ("/releases/latest".into(),release),("/commits/main".into(),commit.clone()),(format!("/commits/{tag}"),commit)] {
+                cache.insert(format!("https://api.github.com/repos/owner/app{suffix}"),Cached{json:value,etag:None,until:Instant::now()+Duration::from_secs(120)});
+            }
+        };
+        let core=open(); let mut project=test_project("owner","app"); project.installed_version=Some("v1.0.0".into());
+        core.store.put_project(&project).unwrap(); seed(&core,"v2.0.0");
+        let checked=core.handle("check_updates",json!({})).await.unwrap(); assert_eq!(checked,json!({"checked":1,"updates":1,"unreadUpdates":1,"errors":0}));
+        let mark=|tag:&str| json!({"versions":[{"projectId":project.id,"tag":tag}]});
+        assert_eq!(core.handle("mark_updates_read",mark("v2.0.0")).await.unwrap(),1);
+        assert_eq!(core.handle("mark_updates_read",mark("v2.0.0")).await.unwrap(),0);
+        drop(core);
+        let core=open(); seed(&core,"v2.0.0");
+        assert_eq!(core.handle("check_updates",json!({})).await.unwrap(),json!({"checked":1,"updates":1,"unreadUpdates":0,"errors":0}));
+        assert!(core.unread_updates().unwrap().is_empty());
+        let snapshot=core.handle("snapshot",json!({})).await.unwrap();
+        assert_eq!(snapshot["readUpdateTags"][&project.id],"v2.0.0");
+        assert_eq!(snapshot["projects"][0]["status"],"updateAvailable"); assert_eq!(snapshot["projects"][0]["installedVersion"],"v1.0.0");
+        seed(&core,"v3.0.0"); assert_eq!(core.handle("check_updates",json!({})).await.unwrap()["unreadUpdates"],1);
+        assert_eq!(core.handle("mark_updates_read",mark("v2.0.0")).await.unwrap(),0);
+        assert_eq!(core.unread_updates().unwrap().len(),1);
+        let mute=|muted:bool| json!({"id":project.id,"changes":{"updatesMuted":muted}});
+        core.handle("update_project",mute(true)).await.unwrap(); drop(core);
+        let core=open(); assert!(core.unread_updates().unwrap().is_empty());
+        let skipped=json!({"checked":0,"updates":0,"unreadUpdates":0,"errors":0});
+        assert_eq!(core.handle("check_updates",json!({})).await.unwrap(),skipped);
+        assert_eq!(core.handle("check_updates",json!({"projectIds":[project.id]})).await.unwrap(),skipped);
+        core.queue_auto_download(&project.id,15).unwrap(); assert!(core.store.downloads().unwrap().is_empty());
+        assert_eq!(core.handle("mark_updates_read",mark("v3.0.0")).await.unwrap(),0);
+        assert!(core.export_library().unwrap().contains("\"updatesMuted\": true"));
+        core.handle("update_project",mute(false)).await.unwrap(); seed(&core,"v3.0.0");
+        assert_eq!(core.handle("check_updates",json!({})).await.unwrap()["unreadUpdates"],1);
+        core.handle("mark_updates_read",mark("v3.0.0")).await.unwrap(); seed(&core,"v2.0.0");
+        assert_eq!(core.handle("check_updates",json!({})).await.unwrap()["unreadUpdates"],0);
+    }
 }

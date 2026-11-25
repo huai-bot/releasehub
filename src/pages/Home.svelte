@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { DownloadRecord, GithubRepository, Project, Snapshot } from '../lib/types';
-  import { formatBytes, formatDate, hasProjectUpdate, isDownloadRunning, pendingInstallDownloads, type Page, type Tone } from '../lib/ui';
+  import { formatBytes, formatDate, hasUnreadUpdate, isDownloadRunning, pendingInstallDownloads, type Page, type Tone } from '../lib/ui';
   import Icon from '../components/Icon.svelte';
   import GithubFeed from '../components/GithubFeed.svelte';
   import RollingCounter from '../components/RollingCounter.svelte';
@@ -15,28 +15,29 @@
     onnotice?: (message: string, tone?: Tone) => void; onGithubLogin?: () => void;
     oninterval?: (minutes: number) => Promise<boolean> | boolean;
   } = $props();
-  const updates = $derived(snapshot.projects.filter(hasProjectUpdate));
+  const monitored = $derived(snapshot.projects.filter(project => !project.updatesMuted));
+  const updates = $derived(monitored.filter(project => hasUnreadUpdate(project, snapshot.readUpdateTags)));
   const pending = $derived(pendingInstallDownloads(snapshot.downloads, snapshot.projects));
   const activeDownloads = $derived(snapshot.downloads.filter(isDownloadRunning));
-  const failures = $derived(snapshot.projects.filter((project) => project.status === 'error').length);
-  const lastCheck = $derived(snapshot.projects.reduce<string | null>((latest, project) => project.checkedAt && (!latest || project.checkedAt > latest) ? project.checkedAt : latest, null));
+  const failures = $derived(monitored.filter((project) => project.status === 'error').length);
+  const lastCheck = $derived(monitored.reduce<string | null>((latest, project) => project.checkedAt && (!latest || project.checkedAt > latest) ? project.checkedAt : latest, null));
   function showPending(download: DownloadRecord) {
     if (oninstall) oninstall(download);
     else onpage('downloads');
   }
 </script>
 
-<div class="page-heading"><div><h1>首页</h1></div><button class="button primary" disabled={busy || !snapshot.projects.length} onclick={() => oncheck()}><Icon name={busy ? 'loader' : 'refresh'} class={busy ? 'spinning' : ''} size={16} />{busy ? '正在处理' : '检查更新'}</button></div>
+<div class="page-heading"><div><h1>首页</h1></div><button class="button primary" disabled={busy || !monitored.length} onclick={() => oncheck()}><Icon name={busy ? 'loader' : 'refresh'} class={busy ? 'spinning' : ''} size={16} />{busy ? '正在处理' : '检查更新'}</button></div>
 
 <section class="home-overview" aria-label="资源概览">
   <button onclick={() => onpage('library')}><Icon name="library" size={20} /><span class="overview-label">资源</span><RollingCounter value={snapshot.projects.length} label="资源" /></button>
-  <button onclick={() => onpage('updates')}><Icon name="updates" size={20} /><span class="overview-label">可更新</span><RollingCounter value={updates.length} label="可更新" tone={updates.length ? 'key' : 'default'} /></button>
+  <button onclick={() => onpage('updates')}><Icon name="updates" size={20} /><span class="overview-label">未读更新</span><RollingCounter value={updates.length} label="未读更新" tone={updates.length ? 'key' : 'default'} /></button>
   <button onclick={() => onpage('downloads')}><Icon name="download" size={20} /><span class="overview-label">下载中</span><RollingCounter value={activeDownloads.length} label="下载中" tone={activeDownloads.length ? 'key' : 'default'} /></button>
 </section>
 
 {#if !snapshot.projects.length}<section class="home-first-resource"><div><h2>订阅第一个 GitHub 项目</h2><p>公开项目无需登录</p></div><button class="button primary" onclick={onadd}><Icon name="plus" size={16} />添加资源</button></section>{/if}
 
-<CadenceModule projects={snapshot.projects} interval={snapshot.settings.checkIntervalMinutes} {busy} onsave={oninterval} {onselect} />
+<CadenceModule projects={monitored} interval={snapshot.settings.checkIntervalMinutes} {busy} onsave={oninterval} {onselect} />
 
 <div class="home-workspace-grid">
   <section class="surface" aria-labelledby="home-updates-title"><div class="section-heading"><div class="section-title-row"><h2 id="home-updates-title">版本更新</h2>{#if lastCheck}<span class="section-meta">{formatDate(lastCheck, true)}</span>{/if}</div><button class="text-button" onclick={() => onpage('updates')}>全部<Icon name="chevronRight" size={15} /></button></div>
@@ -46,7 +47,7 @@
           <div class="update-card"><strong>{project.name}</strong><p>{project.managementMode === 'files' ? '最新文件' : project.installedVersion ?? '未记录版本'}<Icon name="arrowRight" size={12} /><span class="key-data">{project.release?.tag}</span></p>{#if project.release?.publishedAt}<small>{formatDate(project.release.publishedAt)}</small>{/if}</div>
         {/snippet}
       </CardStack></div>
-    {:else}<div class="home-section-empty"><Icon name="success" size={20} /><p>{snapshot.projects.length ? '无待更新版本' : '暂无订阅资源'}</p></div>{/if}
+    {:else}<div class="home-section-empty"><Icon name="success" size={20} /><p>{snapshot.projects.length ? '没有未读更新' : '暂无订阅资源'}</p></div>{/if}
     {#if failures}<div class="section-notice"><Icon name="alert" size={15} /><span>{failures} 项检查失败</span><button class="text-button" onclick={() => onpage('library')}>查看</button></div>{/if}
   </section>
 

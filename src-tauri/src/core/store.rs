@@ -1,4 +1,4 @@
-use super::models::{now, BackupRecord, InstallJournal, BuildTask, DownloadRecord, Project, RepositoryNote, Settings};
+use super::models::{now, BackupRecord, InstallJournal, BuildTask, DownloadRecord, Project, RepositoryNote, Settings, UpdateVersion};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{path::Path, sync::Mutex};
@@ -6,7 +6,7 @@ use std::{path::Path, sync::Mutex};
 #[path = "installation_checks_store.rs"]
 mod installation_checks_store;
 
-const SCHEMA_VERSION:i64=5;
+const SCHEMA_VERSION:i64=6;
 fn migrate(db:&mut Connection)->Result<(),String> {
     let version:i64=db.pragma_query_value(None,"user_version",|r|r.get(0)).map_err(storage_error)?;
     if version>SCHEMA_VERSION {return Err("资料库由更新版本创建，请升级 ReleaseHub 后打开".into());}
@@ -66,6 +66,10 @@ fn migrate(db:&mut Connection)->Result<(),String> {
             CREATE INDEX IF NOT EXISTS installation_checks_download ON installation_checks(download_id);
             CREATE TABLE IF NOT EXISTS installation_bindings (id TEXT PRIMARY KEY, json TEXT NOT NULL);
             PRAGMA user_version=5;").map_err(storage_error)?;
+    }
+    if version<6 {
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS update_reads (project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            tag TEXT NOT NULL, PRIMARY KEY(project_id,tag)); PRAGMA user_version=6;").map_err(storage_error)?;
     }
     tx.commit().map_err(storage_error)
 }
@@ -142,6 +146,28 @@ impl Store {
         Ok(value)
     }
     pub fn projects(&self) -> Result<Vec<Project>, String> { self.list("projects") }
+    pub fn current_read_tags(&self) -> Result<std::collections::HashMap<String,String>, String> {
+        let db=self.db.lock().map_err(storage_error)?;
+        let mut query=db.prepare("SELECT projects.id, update_reads.tag FROM projects JOIN update_reads
+            ON project_id=projects.id AND tag=json_extract(projects.json,'$.release.tag')").map_err(storage_error)?;
+        let rows=query.query_map([], |row| Ok((row.get(0)?,row.get(1)?))).map_err(storage_error)?;
+        rows.collect::<Result<_,_>>().map_err(storage_error)
+    }
+    pub fn mark_updates_read(&self, versions: &[UpdateVersion]) -> Result<usize,String> {
+        let mut db=self.db.lock().map_err(storage_error)?;
+        let transaction=db.transaction().map_err(storage_error)?;
+        let mut count=0;
+        {
+            let mut insert=transaction.prepare("INSERT OR IGNORE INTO update_reads(project_id,tag)
+                SELECT id,?2 FROM projects WHERE id=?1 AND json_extract(json,'$.release.tag')=?2
+                AND NOT coalesce(json_extract(json,'$.updatesMuted'),0)").map_err(storage_error)?;
+            for version in versions {
+                count+=insert.execute(params![version.project_id,version.tag]).map_err(storage_error)?;
+            }
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(count)
+    }
     pub fn project(&self, id: &str) -> Result<Project, String> { self.get("projects", id) }
     pub fn put_project(&self, p: &Project) -> Result<(), String> { self.put("projects", &p.id, p) }
     pub fn remove_project(&self, id: &str) -> Result<(), String> {
@@ -288,7 +314,7 @@ mod tests {
         assert_eq!(migrated.project(&p.id).unwrap().repo,"schema-four");
         assert!(migrated.installations(None).unwrap().is_empty());
         assert!(migrated.install_bindings(None).unwrap().is_empty());
-        assert_eq!(migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),5);
+        assert_eq!(migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),SCHEMA_VERSION);
     }
     #[test] fn version_three_migrates_backup_schema_and_executable_without_losing_metadata() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();
@@ -297,7 +323,7 @@ mod tests {
         store.db.lock().unwrap().execute_batch("DROP TABLE backups;DROP TABLE install_journals;PRAGMA user_version=3;").unwrap();drop(store);
         let migrated=Store::new(&path).unwrap();assert_eq!(migrated.settings().unwrap().color_scheme,"teal");assert!(migrated.project(&p.id).unwrap().executable_path.is_none());
         assert!(migrated.backup(&p.id).unwrap().is_none());assert!(migrated.journals().unwrap().is_empty());
-        assert_eq!(migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),5);
+        assert_eq!(migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),SCHEMA_VERSION);
         drop(migrated);assert_eq!(Store::new(&path).unwrap().project(&p.id).unwrap().repo,"schema");
     }
     #[test] fn version_two_migrates_old_records_once_without_losing_preferences() {
@@ -324,12 +350,12 @@ mod tests {
         let migrated_project=migrated.project(&id).unwrap();assert_eq!(migrated_project.management_mode,"software");
         let asset=&migrated_project.release.as_ref().unwrap().assets[0];assert!(asset.downloadable);assert!(!asset.installable);
         for kind in ["portable","installer","other"] {assert_eq!(migrated.download(kind).unwrap().installable,kind!="other");}
-        let version:i64=migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();assert_eq!(version,5);
+        let version:i64=migrated.db.lock().unwrap().pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();assert_eq!(version,SCHEMA_VERSION);
         let mut settings=migrated.settings().unwrap();settings.color_scheme="amber".into();migrated.save_settings(&settings).unwrap();drop(migrated);
         let reopened=Store::new(&path).unwrap();assert_eq!(reopened.settings().unwrap().color_scheme,"amber");
-        reopened.db.lock().unwrap().pragma_update(None,"user_version",6).unwrap();drop(reopened);
+        reopened.db.lock().unwrap().pragma_update(None,"user_version",SCHEMA_VERSION+1).unwrap();drop(reopened);
         assert!(Store::new(&path).err().unwrap().contains("更新版本"));
-        let db=Connection::open(path).unwrap();assert_eq!(db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),6);
+        let db=Connection::open(path).unwrap();assert_eq!(db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),SCHEMA_VERSION+1);
     }
     #[test] fn migration_failure_rolls_back_data_and_version() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("db.sqlite");let store=Store::new(&path).unwrap();

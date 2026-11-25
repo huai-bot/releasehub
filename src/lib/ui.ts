@@ -61,8 +61,12 @@ export function getProjectStatus(project: Pick<Project, 'managementMode' | 'file
   return fileStatus[project.fileStatus ?? 'notDownloaded'];
 }
 
-export function hasProjectUpdate(project: Pick<Project, 'managementMode' | 'fileStatus' | 'status'>): boolean {
-  return isFilesProject(project) ? project.fileStatus === 'updateAvailable' : project.status === 'updateAvailable';
+export function hasProjectUpdate(project: Pick<Project, 'managementMode' | 'fileStatus' | 'status' | 'updatesMuted'>): boolean {
+  return !project.updatesMuted && (isFilesProject(project) ? project.fileStatus === 'updateAvailable' : project.status === 'updateAvailable');
+}
+
+export function hasUnreadUpdate(project: Project, readTags?: Record<string, string>): boolean {
+  return hasProjectUpdate(project) && !!project.release && readTags?.[project.id] !== project.release.tag;
 }
 
 export function needsProjectAttention(project: Pick<Project, 'managementMode' | 'fileStatus' | 'status'>): boolean {

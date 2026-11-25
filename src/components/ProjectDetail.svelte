@@ -1,10 +1,11 @@
 <script lang="ts">
   import type { AssetPreference, BackupRecord, Channel, InstallationCheck, ManagementMode, Project, ProjectChanges, RepositoryNote } from '../lib/types';
-  import { assetKindLabel, canDownloadAsset, canInstallAsset, formatBytes, formatDate, getProjectStatus, isFilesProject, projectInitials, projectPresentation } from '../lib/ui';
+  import { assetKindLabel, canDownloadAsset, canInstallAsset, formatBytes, formatDate, getProjectStatus, hasProjectUpdate, isFilesProject, projectInitials, projectPresentation } from '../lib/ui';
   import Icon from './Icon.svelte';
   import { canConfirmInstallation, canVerifyInstallation, installationLabel, installationSourceLabel, latestInstallation } from '../lib/installation-state';
   import ReleaseNotes from './ReleaseNotes.svelte';
-  let { project, note = null, installations = [], busy, onclose, oncheck, ondownload, onupdate, onmark, onremove, onopen, onversions, ondiagnostic, preview = false, onrun, onexecutable, onrestore, ondeletebackup, onexternal, onnote, onSettings, onVerify, onConfirmInstallation, initialTab = 'notes' }: {
+  let { project, readTag, note = null, installations = [], busy, onclose, oncheck, ondownload, onupdate, onmark, onremove, onopen, onversions, ondiagnostic, preview = false, onrun, onexecutable, onrestore, ondeletebackup, onexternal, onnote, onSettings, onVerify, onConfirmInstallation, initialTab = 'notes' }: {
+    readTag?: string;
     project: Project; note?: RepositoryNote | null; installations?: InstallationCheck[]; busy: boolean; onclose: () => void; oncheck: (ids: string[]) => void;
     ondownload: (project: Project) => void; onexternal?: (project: Project) => void; onupdate: (id: string, changes: ProjectChanges) => void;
     onmark: (project: Project) => void;
@@ -40,7 +41,9 @@
     {#if presentation.description}
       <p>{presentation.description}</p>
     {/if}
-    <span class={`status-badge ${status.tone}`}><span class="tiny-dot"></span>{status.label}</span>
+    {#if !project.updatesMuted && !(readTag && readTag === project.release?.tag && hasProjectUpdate(project) && project.status === 'updateAvailable')}
+      <span class={`status-badge ${status.tone}`}><span class="tiny-dot"></span>{status.label}</span>
+    {/if}
     {#if onnote}
       <button class="text-button secondary small" disabled={busy} onclick={() => onnote?.(project)}>
         <Icon name="edit" size={13} />{presentation.annotated ? '编辑备注' : '设置备注'}
@@ -58,14 +61,14 @@
       </details>
     </div>
   {/if}
-  <div class="detail-primary-actions">{#if installation && canVerifyInstallation(installation) && onVerify}<button class="button primary" disabled={busy} onclick={() => onVerify?.(project.id)}><Icon name="refresh" size={16} />立即检测</button>{:else}<button class="button primary" disabled={busy || !selectedAsset} onclick={() => ondownload(project)}><Icon name="download" size={16} />下载已选文件</button>{/if}{#if !installation || !canVerifyInstallation(installation) || !onVerify}<button class="button secondary" disabled={busy} aria-label={`检查 ${presentation.label} 更新`} onclick={() => oncheck([project.id])}><Icon name="refresh" size={16} /></button>{/if}</div>
+  <div class="detail-primary-actions">{#if installation && canVerifyInstallation(installation) && onVerify}<button class="button primary" disabled={busy} onclick={() => onVerify?.(project.id)}><Icon name="refresh" size={16} />立即检测</button>{:else}<button class="button primary" disabled={busy || !selectedAsset} onclick={() => ondownload(project)}><Icon name="download" size={16} />下载已选文件</button>{/if}{#if !project.updatesMuted && (!installation || !canVerifyInstallation(installation) || !onVerify)}<button class="button secondary" disabled={busy} aria-label={`检查 ${presentation.label} 更新`} onclick={() => oncheck([project.id])}><Icon name="refresh" size={16} /></button>{/if}</div>
   {#if !files}<div class="managed-entry"><button class="button secondary small" disabled={busy} onclick={() => onrun(project)}><Icon name="play" size={15} />{project.executablePath ? '打开软件' : '选择启动程序'}</button><button class="text-button" disabled={busy} onclick={() => onmark(project)}>修改本机版本</button></div>{/if}
   {#if project.error}<div class="detail-error" role="alert"><Icon name="alert" size={16} /><span>{project.error}</span></div>{/if}
   {#if project.release && !selectedAsset}<button class="asset-needed" onclick={() => tab = 'assets'}><Icon name="info" size={16} /><span>选择发行文件</span><Icon name="chevronRight" size={14} /></button>{/if}
   <div class="detail-tabs" role="tablist" aria-label="详情内容"><button role="tab" aria-selected={tab === 'notes'} class:active={tab === 'notes'} onclick={() => tab = 'notes'}>更新说明</button><button role="tab" aria-selected={tab === 'assets'} class:active={tab === 'assets'} onclick={() => tab = 'assets'}>发行文件 <span>{project.release?.assets.length ?? 0}</span></button></div>
   <div class="detail-content">
     {#if tab === 'notes'}
-      {#if project.release}<div class="release-title"><span>{project.release.name || project.release.tag}</span><button class="icon-button" title="在 GitHub 阅读完整说明" aria-label="在 GitHub 阅读完整说明" onclick={() => onopen(project.release!.url)}><Icon name="external" size={15} /></button></div><ReleaseNotes body={project.release.body} repositoryUrl={project.release.url} {onopen} />{:else}<div class="empty-state compact"><Icon name="notes" size={30} /><h3>{project.status === 'noRelease' ? '尚无发行版' : '暂无发行信息'}</h3><button class="button secondary small" disabled={busy} onclick={() => oncheck([project.id])}>检查更新</button></div>{/if}
+      {#if project.release}<div class="release-title"><span>{project.release.name || project.release.tag}</span><button class="icon-button" title="在 GitHub 阅读完整说明" aria-label="在 GitHub 阅读完整说明" onclick={() => onopen(project.release!.url)}><Icon name="external" size={15} /></button></div><ReleaseNotes body={project.release.body} repositoryUrl={project.release.url} {onopen} />{:else}<div class="empty-state compact"><Icon name="notes" size={30} /><h3>{project.status === 'noRelease' ? '尚无发行版' : '暂无发行信息'}</h3>{#if !project.updatesMuted}<button class="button secondary small" disabled={busy} onclick={() => oncheck([project.id])}>检查更新</button>{/if}</div>{/if}
       {#if project.sourceAhead}<div class="source-callout"><Icon name="code" size={17} /><div><strong>源码有未发布提交</strong><button class="text-button" onclick={() => onopen(project.url)}>查看原项目<Icon name="external" size={13} /></button></div></div>{/if}
     {:else if tab === 'assets'}
       <p class="field-hint">{files ? '仅保存附件，不自动安装 · 单文件 ≤ 4 GB' : '仅兼容软件包支持安装 · 单文件 ≤ 4 GB'}</p>

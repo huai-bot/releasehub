@@ -38,6 +38,10 @@ pub struct Core {
 }
 impl Core {
     pub fn new(data_dir: PathBuf, portable: bool, events: EventSink) -> Result<Arc<Self>, String> {
+        Self::try_open(data_dir, portable, events)?.ok_or_else(|| Self::DATA_IN_USE.to_owned())
+    }
+    pub(crate) const DATA_IN_USE: &'static str = "此资料库已被另一个 ReleaseHub 占用，请从右下角托盘打开原窗口；如需重启，请先从托盘退出原程序";
+    pub(crate) fn try_open(data_dir: PathBuf, portable: bool, events: EventSink) -> Result<Option<Arc<Self>>, String> {
         std::fs::create_dir_all(&data_dir).map_err(|_| "无法写入数据目录，请将便携文件夹放到可写的位置".to_string())?;
         let data_dir = std::fs::canonicalize(data_dir).map_err(|_| "无法读取数据目录".to_string())?;
         let lock_path = data_dir.join(".releasehub.lock");
@@ -48,10 +52,11 @@ impl Core {
         }
         let data_lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
             .open(lock_path).map_err(|_| "无法打开资料库锁文件，请检查目录权限".to_string())?;
-        data_lock.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => "此资料库已被另一个 ReleaseHub 占用，请从右下角托盘打开原窗口；如需重启，请先从托盘退出原程序".to_string(),
-            std::fs::TryLockError::Error(_) => "无法锁定资料库，请使用本地可写的资料库文件夹".to_string(),
-        })?;
+        match data_lock.try_lock() {
+            Ok(()) => {},
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(_)) => return Err("无法锁定资料库，请使用本地可写的资料库文件夹".into()),
+        }
         for folder in ["downloads", "apps", "backups"] {
             let path = data_dir.join(folder);
             std::fs::create_dir_all(&path).map_err(|_| "无法创建数据文件夹".to_string())?;
@@ -71,7 +76,7 @@ impl Core {
         core.repair_backup_paths()?;
         core.recover_installs()?;
         core.store.recover_installation_checks()?;
-        Ok(core)
+        Ok(Some(core))
     }
     pub fn set_github_token(&self, token: Option<String>) { self.github.set_token(token); }
     pub fn set_proxy_password(&self, password: Option<String>) -> Result<(), String> { self.proxy.set_password(password) }
@@ -90,7 +95,7 @@ impl Core {
             "snapshot" => {
                 let downloads=self.store.downloads()?;let mut projects=self.store.projects()?;
                 for p in &mut projects { selection::update_file_status(p,&downloads,&self.data_dir); }
-                Ok(json!({"projects": projects, "downloads": downloads, "installations": self.store.installations(None)?,
+                Ok(json!({"projects": projects, "readUpdateTags": self.store.current_read_tags()?, "downloads": downloads, "installations": self.store.installations(None)?,
                     "buildTasks": self.store.tasks()?, "repositoryNotes": self.store.repository_notes()?, "settings": self.store.settings()?,
                     "runtime": {"appVersion": env!("CARGO_PKG_VERSION"), "dataDir": self.data_dir.to_string_lossy(),
                         "portable": self.portable, "githubTokenConfigured": self.github.token_configured(),
@@ -113,6 +118,12 @@ impl Core {
                 self.store.remove_project(&id)?; self.changed(); Ok(Value::Null)
             }
             "check_updates" => self.check_updates(&payload).await,
+            "mark_updates_read" => {
+                let versions: Vec<UpdateVersion> = decode(payload["versions"].clone())?;
+                let count = self.store.mark_updates_read(&versions)?;
+                if count > 0 { self.changed(); }
+                output(count)
+            }
             "download_asset" => output(self.queue_download(&text(&payload, "projectId", 128)?, integer(&payload, "assetId")?)?),
             "send_external_download" => {
                 if payload["confirmed"].as_bool() != Some(true) { return Err("请先确认向本机下载器发送公开发行链接".into()); }

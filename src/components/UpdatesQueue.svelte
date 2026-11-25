@@ -2,7 +2,8 @@
   import type { Project } from '../lib/types';
   import { formatBytes, formatDate, isFilesProject, projectInitials, releaseSummary, selectedDownloadAsset } from '../lib/ui';
   import Icon from './Icon.svelte';
-  let { projects, selected, busy, ontoggle, onselect, ondownload }: {
+  let { projects, readTags, selected, busy, ontoggle, onselect, ondownload }: {
+    readTags?: Record<string, string>;
     projects: Project[]; selected: Set<string>; busy: boolean; ontoggle: (id: string) => void;
     onselect: (project: Project) => void; ondownload: (project: Project) => void;
   } = $props();
@@ -12,7 +13,7 @@
   {#each projects as project (project.id)}
     {@const files = isFilesProject(project)}
     {@const asset = selectedDownloadAsset(project)}
-    <article class="update-item" class:selected={selected.has(project.id)}>
+    <article class="update-item" class:read={!!project.release && readTags?.[project.id] === project.release.tag} class:selected={selected.has(project.id)}>
       <input type="checkbox" checked={selected.has(project.id)} aria-label={`选择更新 ${project.name}`} onchange={() => ontoggle(project.id)} />
       <span class="update-avatar">{projectInitials(project)}</span>
       <div class="update-content">
@@ -44,6 +45,7 @@
   .version-transition { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-top:14px; font-size:14px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
   .version-transition > span { color:var(--subtle); }
   .version-transition strong { color:var(--accent); font-size:16px; }
+  .read .version-transition strong { color:var(--subtle); }
   .version-transition .preview-label { color:var(--warning); font-size:11px; }
   .update-file { margin-top:7px; font-size:12px; color:var(--muted); line-height:1.6; overflow-wrap:anywhere; }
   .update-notes { margin-top:13px; max-width:75ch; line-height:1.65; color:var(--subtle); font-size:13px; overflow-wrap:anywhere; }

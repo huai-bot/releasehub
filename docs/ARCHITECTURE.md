@@ -10,7 +10,7 @@ The UI never talks to arbitrary remote APIs. It invokes one Tauri command `dispa
 
 `src/lib/types.ts` is the source contract. Rust uses serde camelCase for fields and enums. Record times are RFC3339 UTC strings; GitHub cache updatedAt and sessionRevision are epoch-millisecond numbers. Optional values are explicit null, not empty-string guesses. Errors returned to the UI are short helpful Chinese strings, without credential-bearing URLs or header values.
 
-Snapshot shape: `{ projects, downloads, installations, buildTasks, repositoryNotes, settings, runtime }`.
+Snapshot shape: `{ projects, readUpdateTags, downloads, installations, buildTasks, repositoryNotes, settings, runtime }`. `readUpdateTags` maps project IDs to their currently displayed tag only if it was marked read. Schema 6 retains acknowledged `(project_id, tag)` pairs, including previously selected channels. Removing a subscription also removes its read history. Read state never changes availability or installation metadata.
 
 The host enriches `runtime` with app version, portable mode/data directory, GitHub/Agent status and `proxyPasswordConfigured`; secret values are excluded.
 
@@ -48,7 +48,7 @@ Downloads use `downloadConnections` (1..8, default 4) independently of concurren
 
 External downloader settings are `useExternalDownloader` (default false) and `externalDownloader: { name, endpoint, requestTemplate }`. Only loopback HTTP JSON POST is allowed, with no proxy, redirects, cookies or OAuth headers. The AB preset uses `127.0.0.1:15151/start-headless-download`; tokens are substituted as JSON string data without recursive expansion. `external` records do not imply completion: explicit file import validates exact size, known upstream digest, owned destination and no symlink/reparse ancestors before atomically publishing. Automatic downloads stay internal. The external configuration is excluded from portable JSON library export.
 
-The host provides periodic update scheduling and native notifications based on settings. The core handles checks and optional automatic download of confidently selected compatible assets. `check_updates` itself must not run an installer.
+The host provides periodic update scheduling and native notifications based on settings. `updatesMuted` defaults to false and travels with subscriptions. Muted projects are excluded from manual and scheduled update scans, automatic downloads, the update list and notifications. Acknowledged releases stay in the queue but not its unread count, home reminders or native notifications. On Windows, launching a second copy for a locked data directory restores that directory's existing main window before opening a WebView. Independent portable directories still run independently.
 
 ## Actions implemented by core
 
@@ -58,8 +58,9 @@ The host provides periodic update scheduling and native notifications based on s
 | get_settings | {} | Settings only; used by idle scheduling without loading the library |
 | add_project | { input: AddProjectInput } | Project |
 | update_project | { id, changes: ProjectChanges } | Project |
+| mark_updates_read | { versions: { projectId, tag }[] } | Number acknowledged; atomic and idempotent. Stale tags never acknowledge a newly arrived version. |
 | remove_project | { id } | null (remove tracking, never installed/downloaded files) |
-| check_updates | { projectIds?: string[], allowAutoDownload?: boolean } | CheckResult; omitted IDs means all; UI default true, Agent HTTP must force false |
+| check_updates | { projectIds?: string[], allowAutoDownload?: boolean } | CheckResult: checked, updates, unreadUpdates and errors. Omitted IDs means all unmuted subscriptions; UI default true, Agent HTTP must force false. Never installs. |
 | download_asset | { projectId, assetId } | DownloadRecord (queued) |
 | send_external_download | { projectId, assetId, confirmed: true } | DownloadRecord; reserved external state, deduplicated, public metadata only |
 | retry_external_download | { id, confirmed: true } | DownloadRecord; explicit resend after receipt check |

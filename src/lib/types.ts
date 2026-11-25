@@ -37,6 +37,7 @@ export interface Release {
 export interface Project {
   /** Missing in older records; backups are opt-in per software. */
   backupEnabled?: boolean;
+  updatesMuted?: boolean;
   managementMode?: ManagementMode;
   fileStatus?: FileStatus;
   id: string;
@@ -175,6 +176,7 @@ export interface RuntimeInfo {
 }
 
 export interface Snapshot {
+  readUpdateTags?: Record<string, string>;
   projects: Project[];
   downloads: DownloadRecord[];
   installations?: InstallationCheck[];
@@ -195,6 +197,7 @@ export interface AddProjectInput {
 
 export interface ProjectChanges {
   backupEnabled?: boolean;
+  updatesMuted?: boolean;
   managementMode?: ManagementMode;
   channel?: Channel;
   preference?: AssetPreference;
@@ -248,6 +251,7 @@ export interface BackupRecord {
 export interface CheckResult {
   checked: number;
   updates: number;
+  unreadUpdates: number;
   errors: number;
 }
 

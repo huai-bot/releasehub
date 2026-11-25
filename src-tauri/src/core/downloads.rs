@@ -42,9 +42,17 @@ pub(crate) fn local_file_exists(data:&Path,d:&DownloadRecord)->bool {
 }
 impl Core {
     pub(crate) fn queue_download(self:&Arc<Self>,project_id:&str,asset_id:u64)->Result<DownloadRecord,String>{
+        self.enqueue_project_asset(project_id,asset_id,false)?.ok_or_else(||"未加入下载队列".into())
+    }
+    pub(crate) fn queue_auto_download(self:&Arc<Self>,project_id:&str,asset_id:u64)->Result<(),String>{
+        self.enqueue_project_asset(project_id,asset_id,true).map(|_| ())
+    }
+    fn enqueue_project_asset(self:&Arc<Self>,project_id:&str,asset_id:u64,automatic:bool)->Result<Option<DownloadRecord>,String>{
         let queued={
             let _guard=self.download_queue.lock().map_err(|_|"下载队列不可用".to_string())?;
-            let p=self.store.project(project_id)?;let release=p.release.as_ref().ok_or("请先检查项目发行版本")?;
+            let p=self.store.project(project_id)?;
+            if automatic && p.updates_muted {return Ok(None);}
+            let release=p.release.as_ref().ok_or("请先检查项目发行版本")?;
             let a=release.assets.iter().find(|a|a.id==asset_id).ok_or("找不到此发行附件")?;
             if !a.downloadable{return Err(format!("无法下载：{}",a.reason));}
             network::trusted_download_url(&a.url)?;
@@ -52,14 +60,14 @@ impl Core {
             let digest=expected_sha(a.digest.as_deref())?;
             if let Some(existing)=self.store.downloads()?.into_iter().find(|d|d.project_id==p.id&&d.asset_id==asset_id&&d.tag==release.tag
                 &&(["queued","downloading","external","installing"].contains(&d.status.as_str())
-                    ||(["completed","installed"].contains(&d.status.as_str())&&local_file_exists(&self.data_dir,d)))){return Ok(existing);}
+                    ||(["completed","installed"].contains(&d.status.as_str())&&local_file_exists(&self.data_dir,d)))){return Ok(Some(existing));}
             let time=now();let record=DownloadRecord{id:uuid::Uuid::new_v4().to_string(),project_id:p.id,project_name:p.name,
                 asset_id,file_name:safe_name(&a.name),tag:release.tag.clone(),url:a.url.clone(),kind:a.kind.clone(),
                 installable:p.management_mode=="software"&&a.installable,
                 total_bytes:a.size,received_bytes:0,status:"queued".into(),path:None,sha256:None,verified:false,error:None,created_at:time.clone(),updated_at:time};
             self.store.set_digest(&record.id,digest.as_deref())?;self.store.put_download(&record)?;record
         };
-        self.download_event(&queued);self.changed();self.pump_downloads();Ok(queued)
+        self.download_event(&queued);self.changed();self.pump_downloads();Ok(Some(queued))
     }
     pub(crate) fn retry_download(self:&Arc<Self>,id:&str)->Result<DownloadRecord,String>{
         let record={

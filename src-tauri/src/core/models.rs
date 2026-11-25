@@ -35,11 +35,24 @@ pub struct Project {
     pub executable_path: Option<String>,
     #[serde(default)]
     pub backup_enabled: bool,
+    #[serde(default)]
+    pub updates_muted: bool,
     pub installed_source: Option<String>, pub release: Option<Release>,
     pub selected_asset_id: Option<u64>, pub status: String,
     pub checked_at: Option<String>, pub error: Option<String>, pub default_branch: String,
     pub source_head_sha: Option<String>, pub source_ahead: Option<bool>, pub created_at: String,
 }
+impl Project {
+    pub fn available_update_tag(&self) -> Option<&str> {
+        let available = if self.management_mode == "files" {
+            self.file_status.as_deref() == Some("updateAvailable")
+        } else { self.status == "updateAvailable" };
+        self.release.as_ref().filter(|_| available && !self.updates_muted).map(|release| release.tag.as_str())
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateVersion { pub project_id: String, pub tag: String }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", from = "DownloadRecordWire")]
 pub struct DownloadRecord {
@@ -255,6 +268,7 @@ pub struct ProjectChanges {
     pub channel: Option<String>, pub preference: Option<String>,
     pub management_mode: Option<String>,
     pub backup_enabled: Option<bool>,
+    pub updates_muted: Option<bool>,
     #[serde(default, deserialize_with = "double_option")]
     pub asset_pattern: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
@@ -321,7 +335,7 @@ pub fn test_project(owner:&str,repo:&str)->Project {
     Project{id:uuid::Uuid::new_v4().to_string(),owner:owner.into(),repo:repo.into(),name:repo.into(),description:String::new(),
         url:format!("https://github.com/{owner}/{repo}"),avatar_url:None,channel:"stable".into(),preference:"auto".into(),
         management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,executable_path:None,
-        backup_enabled:false,
+        backup_enabled:false,updates_muted:false,
         installed_source:None,release:None,
         selected_asset_id:None,status:"notChecked".into(),checked_at:None,error:None,default_branch:"main".into(),
         source_head_sha:None,source_ahead:None,created_at:now()}

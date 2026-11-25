@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { hasProjectUpdate, type Page } from '../lib/ui';
+  import { hasUnreadUpdate, type Page } from '../lib/ui';
   import type { Snapshot, WorkspacePage } from '../lib/types';
   import { normalizeNavigation, moveNavigation, workspacePages } from '../lib/navigation';
   import Icon from './Icon.svelte';
@@ -9,7 +9,7 @@
     onnavigate: (page: Page) => void; onadd: () => void; ondata: () => void;
     onreorder: (order: WorkspacePage[]) => Promise<boolean>;
   } = $props();
-  const updateCount = $derived(snapshot.projects.filter(hasProjectUpdate).length);
+  const updateCount = $derived(snapshot.projects.filter(project => hasUnreadUpdate(project, snapshot.readUpdateTags)).length);
   const downloadCount = $derived(snapshot.downloads.filter((download) => ['queued', 'downloading'].includes(download.status)).length);
   const order = $derived(normalizeNavigation(snapshot.settings.navigationOrder));
   const pages = $derived(order.map((id) => workspacePages.find((item) => item.id === id)!));
