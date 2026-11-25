@@ -18,7 +18,7 @@
 </script>
 
 <div class="page-heading"><h1>下载<span class="heading-count">{retained.length}</span></h1></div>
-<section class="surface downloads-surface">
+<section class="surface list-surface downloads-surface">
   <div class="list-toolbar"><div class="segmented-tabs" aria-label="下载状态筛选"><button class:active={filter === 'all'} onclick={() => filter = 'all'}>全部</button><button class:active={filter === 'active'} onclick={() => filter = 'active'}>进行中 <span>{active}</span></button><button class:active={filter === 'ready'} onclick={() => filter = 'ready'}>已完成 <span>{ready}</span></button><button class:active={filter === 'issues'} onclick={() => filter = 'issues'}>失败 / 已取消</button></div></div>
   {#each visible as download (download.id)}
     {@const installable = canInstallDownload(download)}

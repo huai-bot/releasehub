@@ -748,7 +748,7 @@
 
 </div>
 <div class="github-columns" class:with-detail={selectedName !== null}>
-  <div class="surface github-results" bind:this={resultsRegion} class:compact-hidden={selectedName !== null} id="github-results" role="tabpanel" tabindex="0" aria-labelledby={`github-tab-${tab}`} aria-busy={contentLoading}>
+  <div class="surface list-surface github-results" bind:this={resultsRegion} class:compact-hidden={selectedName !== null} id="github-results" role="tabpanel" tabindex="0" aria-labelledby={`github-tab-${tab}`} aria-busy={contentLoading}>
     {#if hasContent && (contentLoading || showingPrevious)}<div class="github-cache-status" role="status"><span>{contentLoading ? (showingPrevious ? `正在读取第 ${page} 页，保留上一页内容` : '正在后台更新…') : '新页面未读到，显示上一页内容'}</span></div>{/if}
     {#if hasContent && contentError}<div class="page-load-error"><p class="field-error" role="alert">更新未完成，已保留原内容：{contentError}</p><button class="text-button" onclick={() => void loadContent(contentAppend, true)}>{contentAppend ? '重试下一批' : '重试这一页'}</button></div>{/if}
     {#if tab !== 'explore' && !connected}
@@ -818,7 +818,7 @@
   .website-error { margin-top: 7px; }
   .github-repository-workspace { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 16px; flex: 1 1 0; min-height: 0; margin-top: 16px; overflow: hidden; }
   .github-controls { min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; padding-right: 8px; }
-  .github-feed-region { flex: 1; min-height: 0; overflow-y: auto; margin-top: 16px; scrollbar-gutter: stable; overscroll-behavior: contain; }
+  .github-feed-region { flex: 1; min-height: 0; overflow-y: auto; margin-top: 8px; padding-block: 8px; scrollbar-gutter: stable; overscroll-behavior: contain; }
   .github-feed-region[hidden] { display: none; }
   .account-line { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 9px; }
   .account-identity { flex: 1; min-width: 140px; }
@@ -853,15 +853,15 @@
   .github-columns { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 14px; min-width: 0; min-height: 0; align-items: stretch; }
   .github-columns.with-detail { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); }
   .github-results, .detail-region { min-width: 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; overscroll-behavior: contain; }
-  .github-results { border-radius: 8px; }
+  .detail-region { border-radius: var(--r-card); }
   .github-controls::-webkit-scrollbar, .github-results::-webkit-scrollbar, .detail-region::-webkit-scrollbar, .github-feed-region::-webkit-scrollbar, .github-account::-webkit-scrollbar { width: 8px; }
   .github-controls::-webkit-scrollbar-thumb, .github-results::-webkit-scrollbar-thumb, .detail-region::-webkit-scrollbar-thumb, .github-feed-region::-webkit-scrollbar-thumb, .github-account::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
   .detail-region:focus { outline: none; }
-  .detail-region:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 8px; }
+  .github-results:focus-visible, .detail-region:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
   .results-heading { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--surface-soft); }
   .results-heading h2 { font-size: 12px; }
   .results-heading > span { margin-left: auto; color: var(--muted); font-size: 12px; }
-  .repo-row { padding: 14px 16px; border-top: 1px solid var(--border); }
+  .repo-row { padding: 14px 16px; border-top: 1px solid var(--hairline); }
   .repo-row:hover { background: var(--surface-soft); }
   .repo-row.selected { background: var(--accent-soft); }
   .repo-main { display: block; width: 100%; min-width: 0; padding: 0; text-align: left; }
@@ -923,7 +923,7 @@
   .loading-row > div { flex: 1; display: flex; flex-direction: column; gap: 9px; }
   .loading-row i { height: 8px; border-radius: 3px; width: 75%; background: var(--border); }
   .loading-row i:last-child { width: 48%; }
-  .activity-row { display: flex; align-items: flex-start; gap: 11px; padding: 15px 16px; border-top: 1px solid var(--border); }
+  .activity-row { display: flex; align-items: flex-start; gap: 11px; padding: 15px 16px; border-top: 1px solid var(--hairline); }
   .activity-row > div { flex: 1; min-width: 0; }
   .activity-row p { font-size: 12px; color: var(--subtle); overflow-wrap: anywhere; }
   .activity-row strong { color: var(--heading); }

@@ -200,7 +200,7 @@
   {/if}
 </div>
 
-<section class:surface={updatesOnly} class:library-gallery={!updatesOnly} class="library-surface">
+<section class:surface={updatesOnly} class:list-surface={updatesOnly} class:library-gallery={!updatesOnly} class="library-surface">
   <div class="list-toolbar resource-toolbar">
     <div class="segmented-tabs" role="group" aria-label="资源类型筛选">
       {#if updatesOnly}

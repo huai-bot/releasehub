@@ -104,22 +104,26 @@ a, html .plain-link { color: var(--heading); }
 html .plain-link:hover { color: var(--cobalt); }
 
 /* ---- Inputs live in recessed wells ---- */
-html input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), html select, html textarea {
+html input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):where(:not(.global-search input, .input-leading input)), html select, html textarea {
   border: 0; border-radius: 14px; background: var(--neu-bg); box-shadow: var(--inset-sm); color: var(--text);
 }
-html input:not([type="checkbox"]):focus, html select:focus, html textarea:focus { box-shadow: var(--inset), 0 0 0 2px rgba(47, 75, 208, .35); }
+html input:not([type="checkbox"]):where(:not(.global-search input, .input-leading input)):focus, html select:focus, html textarea:focus { box-shadow: var(--inset), 0 0 0 2px rgba(47, 75, 208, .35); }
 html input[type="checkbox"], html input[type="radio"] { accent-color: var(--cobalt); }
 html .global-search, html .input-leading { border: 0; border-radius: 18px; background: var(--neu-bg); box-shadow: var(--inset-sm); height: 38px; }
-html .global-search:focus-within, html .input-leading:focus-within { background: var(--neu-bg); box-shadow: var(--inset); }
-html .global-search input, html .input-leading input { box-shadow: none; background: transparent; }
-html .global-search kbd { border: 0; background: var(--neu-bg); box-shadow: var(--raise-sm); border-radius: 6px; }
+html .global-search:focus-within, html .input-leading:focus-within { outline: 2px solid var(--focus); outline-offset: -2px; }
+html :is(.global-search, .input-leading) input { border: 0; border-radius: 0; outline: none; box-shadow: none; background: transparent; }
+html :is(.global-search, .input-leading) .icon-button { box-shadow: none; background: transparent; }
+html :is(.global-search, .input-leading) .icon-button:hover:not(:disabled) { background: var(--quiet-hover); box-shadow: none; transform: none; }
+html :is(.global-search, .input-leading) .icon-button:active:not(:disabled) { color: var(--cobalt); box-shadow: var(--inset-sm); }
+html .global-search kbd { border: 1px solid var(--hairline); background: transparent; box-shadow: none; border-radius: 6px; }
 
 /* ---- Cards: same colour as the page, shaped only by shadow; content stays flat ---- */
 html .surface, html .download-card, html .build-task-card, html .startup-card, html .settings-section, html .quiet-card,
-html .stat-grid, html .overview-hero, html .home-first-resource, html .feed-content, html .agent-connection-card {
+html .stat-grid, html .overview-hero, html .home-first-resource, html .agent-connection-card {
   background: var(--neu-bg); border: 0; border-radius: var(--r-card); box-shadow: var(--raise);
 }
 html .surface .surface, html .settings-section .surface { box-shadow: none; }
+html .surface.list-surface { background: var(--neu-bg); border: 1px solid var(--hairline); border-radius: var(--r-card); box-shadow: none; }
 html .section-heading { background: transparent; }
 html .detail-panel { background: var(--neu-bg); border: 0; box-shadow: -10px 0 26px var(--neu-dark); }
 html dialog { background: var(--neu-bg); border: 0; border-radius: var(--r-card); box-shadow: var(--raise), 0 30px 60px rgba(35, 32, 29, .18); }
@@ -145,10 +149,10 @@ html .segmented-tabs button, html body .github-tabs button, html body .detail-ta
   border: 0; border-radius: 15px; background: var(--neu-bg); color: var(--subtle);
   transition: transform 220ms var(--spring), box-shadow 180ms ease, color 160ms;
 }
-html .segmented-tabs button:hover, html body .github-tabs button:hover, html body .detail-tabs button:hover { background: var(--neu-bg); color: var(--heading); box-shadow: var(--raise-sm); }
+html .segmented-tabs button:hover, html body .github-tabs button:hover, html body .detail-tabs button:hover { background: var(--quiet-hover); color: var(--heading); box-shadow: none; }
 html .segmented-tabs button.active, html body .github-tabs button.active, html body .detail-tabs button.active,
 html .segmented-tabs button:active, html body .github-tabs button:active {
-  background: var(--neu-bg); color: var(--cobalt); font-weight: 650; box-shadow: var(--raise-sm); transform: translateY(0);
+  background: var(--neu-bg); color: var(--cobalt); font-weight: 650; box-shadow: var(--inset-sm); transform: translateY(0);
 }
 html .segmented-tabs button.active::after, html body .github-tabs button.active::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--cobalt); box-shadow: var(--cobalt-glow); margin-left: 2px; }
 
@@ -192,6 +196,7 @@ html progress::-webkit-progress-value { background: var(--cobalt); border-radius
 .key-data { color: var(--cobalt); font-family: var(--font-num); font-variant-numeric: tabular-nums; }
 
 @media (forced-colors: active) {
+  html .surface.list-surface { border-color: CanvasText; }
   html .nav-item, html .button, html .surface, html .icon-button, .neu-module { box-shadow: none; border: 1px solid ButtonText; }
   html .nav-item.active { outline: 2px solid Highlight; }
 }

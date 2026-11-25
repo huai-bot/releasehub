@@ -4,6 +4,8 @@
   --neu-dark: #D6C8BD;
   --text: #23201D; --heading: #23201D; --muted: #6E655E; --subtle: #4A433D;
   --border: rgba(110, 101, 94, .16); --border-strong: rgba(110, 101, 94, .28);
+  --hairline: color-mix(in srgb, var(--muted) 14%, transparent);
+  --quiet-hover: color-mix(in srgb, var(--muted) 8%, var(--neu-bg));
   --cobalt: #2F4BD0; --vermilion: #E2552D; --danger: #B8401C;
   --raise: -6px -6px 14px var(--neu-light), 6px 6px 14px var(--neu-dark);
   --raise-hover: -8px -8px 18px var(--neu-light), 8px 8px 18px var(--neu-dark);

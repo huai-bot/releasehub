@@ -47,7 +47,7 @@
   .titlebar { padding-right: 0; gap: 12px; user-select: none; }
   .breadcrumb { align-self: stretch; min-width: 105px; }
   .global-search { width: clamp(210px, 26vw, 330px); }
-  .window-controls { display: flex; align-self: stretch; margin-left: 2px; border-left: 1px solid var(--border); }
+  .window-controls { display: flex; align-self: stretch; margin-left: 8px; }
   .window-controls button { display: grid; place-items: center; width: 42px; padding: 0; color: var(--subtle); border-radius: 0; }
   .window-controls button:hover:not(:disabled) { background: var(--border); color: var(--heading); }
   .window-controls .window-close:hover:not(:disabled) { background: #c42b1c; color: #fff; }

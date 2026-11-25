@@ -14,7 +14,7 @@
   const repository = $derived(detail?.repository ?? null);
 </script>
 
-<aside class="surface github-detail" aria-label={`${name} 仓库详情`} aria-busy={loading}>
+<aside class="surface list-surface github-detail" aria-label={`${name} 仓库详情`} aria-busy={loading}>
   <div class="repo-detail-top"><button class="text-button" onclick={onclose}><Icon name="chevronRight" class="back-arrow" size={15} />{backLabel}</button><button class="icon-button" aria-label="刷新仓库详情" disabled={loading || pending} onclick={onretry}><Icon name="refresh" size={16} /></button></div>
   {#if loading}
     <div class="detail-body" role="status"><p class="muted">正在读取 {name}…</p><div class="skeleton-lines"><span></span><span></span><span></span></div></div>
@@ -52,7 +52,7 @@
 
 <style>
   .github-detail { min-width: 0; align-self: start; }
-  .repo-detail-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--border); }
+  .repo-detail-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--hairline); }
   .repo-detail-top :global(.back-arrow) { transform: rotate(180deg); }
   .detail-body { padding: 18px; min-width: 0; }
   .repo-heading { display: flex; align-items: flex-start; gap: 10px; color: var(--accent); }

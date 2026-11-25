@@ -4,7 +4,7 @@ html[data-releasehub-theme], html[data-releasehub-theme] :where([data-color-mode
   --fgColor-default: var(--text) !important; --fgColor-muted: var(--muted) !important; --fgColor-neutral: var(--subtle) !important;
   --fgColor-link: var(--text) !important; --fgColor-accent: var(--text) !important;
   --fgColor-danger: var(--danger) !important; --fgColor-attention: var(--danger) !important; --focus-outlineColor: var(--cobalt) !important;
-  --borderColor-default: var(--border-strong) !important; --borderColor-muted: var(--border) !important;
+  --borderColor-default: var(--border) !important; --borderColor-muted: var(--hairline) !important;
   --header-bgColor: var(--neu-bg) !important; --header-fgColor-default: var(--text) !important;
   --underlineNav-borderColor-active: transparent !important; --fontStack-system: var(--font-ui) !important;
   color: var(--text); font-family: var(--font-ui); font-variant-numeric: tabular-nums;
@@ -40,18 +40,26 @@ body:has(.GlobalNav, .AppHeader) react-partial[partial-name="marketing-header"] 
 .Box-header:first-child, .Box-body:first-child, .timeline-comment-header { border-start-start-radius: var(--r-card); border-start-end-radius: var(--r-card); }
 .Box-footer:last-child { border-end-start-radius: var(--r-card); border-end-end-radius: var(--r-card); }
 
+:is(.GlobalNav, .AppHeader, .AppHeader-globalBar, .AppHeader-localBar, clipboard-copy, .js-clipboard-copy, .Button--invisible, [data-variant="invisible"]) {
+  --reader-key-shadow: none; --reader-key-bg: transparent; --reader-key-hover: var(--quiet-hover);
+  --reader-key-pressed: var(--inset-sm); --reader-key-lift: 0px; --reader-key-travel: 0px;
+}
+:is(.GlobalNav, .AppHeader, .AppHeader-globalBar, .AppHeader-localBar) :focus-visible,
+:is(clipboard-copy, .js-clipboard-copy):focus-visible { outline-offset: -2px; }
+:is(.GlobalNav, .AppHeader) :is(.AppHeader-actionsDivider, [class*="MoreButtonDivider"]) { background: var(--hairline) !important; box-shadow: none !important; }
 :is(.btn, .Button, .AppHeader-button, [class*="prc-Button-ButtonBase-"], [data-component="IconButton"]):not(.Button--link, [role="menuitem"]) {
   --button-default-fgColor-rest: var(--text); --button-primary-fgColor-rest: var(--text);
-  background: var(--neu-bg) !important; border-color: transparent !important; border-radius: var(--r-key) !important;
-  box-shadow: var(--raise) !important; color: var(--text) !important; font-family: var(--font-ui) !important;
+  background: var(--reader-key-bg, var(--neu-bg)) !important; border-color: transparent !important; border-radius: var(--r-key) !important;
+  box-shadow: var(--reader-key-shadow, var(--raise-sm)) !important; color: var(--text) !important; font-family: var(--font-ui) !important;
+  &:hover:not(:disabled, [aria-disabled="true"]) { background: var(--reader-key-hover, var(--neu-bg)) !important; }
   &:is(:active, [aria-pressed="true"], [aria-expanded="true"]):not(:disabled, [aria-disabled="true"]) {
-    color: var(--cobalt) !important; box-shadow: var(--inset) !important;
+    color: var(--cobalt) !important; box-shadow: var(--reader-key-pressed, var(--inset)) !important;
   }
   &:is(:disabled, [aria-disabled="true"]) { color: var(--muted) !important; box-shadow: none !important; }
   @media (prefers-reduced-motion: no-preference) {
     transition: transform 200ms var(--spring-soft), box-shadow 160ms ease, color 160ms ease !important;
-    &:hover:not(:disabled, [aria-disabled="true"]) { transform: translateY(-1px); }
-    &:is(:active, [aria-pressed="true"], [aria-expanded="true"]):not(:disabled, [aria-disabled="true"]) { transform: translateY(1px); transition-duration: 120ms !important; }
+    &:hover:not(:disabled, [aria-disabled="true"]) { transform: translateY(var(--reader-key-lift, -1px)); }
+    &:is(:active, [aria-pressed="true"], [aria-expanded="true"]):not(:disabled, [aria-disabled="true"]) { transform: translateY(var(--reader-key-travel, 1px)); transition-duration: 120ms !important; }
   }
 }
 :is(.form-control, .form-select, textarea, input:is([type="text"], [type="search"], [type="email"], [type="url"])) {
@@ -67,6 +75,13 @@ input:is([type="radio"], [type="checkbox"]), [role="switch"] { accent-color: var
   max-width: 1040px; margin-inline: auto; padding-inline: clamp(18px, 4vw, 48px) !important;
 }
 .repository-content .Box-body:has(.markdown-body[data-test-selector="body-content"]) { padding: 0; }
+.Box:has(> .Box-body > .markdown-body) {
+  & > .Box-body { border-bottom: 0 !important; }
+  & > .Box-body > .border-md-bottom { border-bottom: 0 !important; padding-bottom: 0 !important; }
+  & > .Box-footer { border-top: 1px solid var(--hairline) !important; }
+}
+.Box-footer .Box-row { border-color: var(--hairline) !important; }
+.markdown-body hr { height: 1px !important; background: var(--hairline) !important; border: 0 !important; }
 .repository-content .Box-body:has(.markdown-body) h1:not(.Overlay-title) { color: var(--heading); letter-spacing: -.025em; }
 .repository-content .Label--success { border: 0; color: var(--cobalt) !important; background: transparent !important; font-weight: 650; }
 .markdown-body { background: var(--neu-bg) !important; color: var(--text) !important; font: 400 16px/1.65 var(--font-ui) !important; font-variant-numeric: tabular-nums !important; }

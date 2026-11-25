@@ -106,7 +106,7 @@
   {#if saved}
     <p class="feed-history" role="status">{busy ? '已显示历史内容，正在后台验证网页登录并更新…' : error ? '更新失败，保留历史内容。' : '已显示历史内容，网页会话待验证。'}</p>
   {/if}
-  <div class="feed-content" aria-busy={initialLoading || busy}>
+  <div class="surface list-surface feed-content" aria-busy={initialLoading || busy}>
     {#if restoring}
       <div class="feed-loading" role="status"><Icon name="loader" class="spinning" size={20} /><h3>正在恢复官网登录…</h3></div>
     {:else if !connected && !saved && !initialLoading && !page?.items.length}
@@ -158,9 +158,8 @@
   .feed-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
   .feed-disconnect { margin-left: 4px; color: var(--muted); }
   .feed-history { margin: 0 0 12px; color: var(--subtle); font-size: 12px; line-height: 1.65; }
-  .feed-content { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
   .feed-list { margin: 0; padding: 0; list-style: none; }
-  .feed-list > li + li { border-top: 1px solid var(--border); }
+  .feed-list > li + li { border-top: 1px solid var(--hairline); }
   .feed-row { display: flex; align-items: flex-start; gap: 13px; padding: 19px 20px; }
   .feed-copy { flex: 1; min-width: 0; }
   .feed-byline { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 14px; margin-bottom: 5px; color: var(--subtle); font-size: 12px; }
