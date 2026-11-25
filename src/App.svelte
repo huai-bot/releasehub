@@ -539,7 +539,7 @@
   </div>
 {/if}
 
-{#if readerUrl && snapshot}<GithubReader url={readerUrl} projects={snapshot.projects} {preview} ondownload={project => void downloadProject(project)} onclose={() => readerUrl = null} />{/if}
+{#if readerUrl && snapshot}<GithubReader url={readerUrl} theme={snapshot.settings.theme} projects={snapshot.projects} {preview} ondownload={project => void downloadProject(project)} onclose={() => readerUrl = null} />{/if}
 
 {#if modal?.kind === 'add'}
   <Modal title="添加资源" onclose={closeDialog}>

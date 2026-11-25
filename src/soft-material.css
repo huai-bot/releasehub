@@ -1,0 +1,23 @@
+:root {
+  --neu-bg: #F2E8E0;
+  --neu-light: #FFFFFF;
+  --neu-dark: #D6C8BD;
+  --text: #23201D; --heading: #23201D; --muted: #6E655E; --subtle: #4A433D;
+  --border: rgba(110, 101, 94, .16); --border-strong: rgba(110, 101, 94, .28);
+  --cobalt: #2F4BD0; --vermilion: #E2552D; --danger: #B8401C;
+  --raise: -6px -6px 14px var(--neu-light), 6px 6px 14px var(--neu-dark);
+  --raise-hover: -8px -8px 18px var(--neu-light), 8px 8px 18px var(--neu-dark);
+  --raise-sm: -3px -3px 8px var(--neu-light), 3px 3px 8px var(--neu-dark);
+  --inset: inset 4px 4px 10px var(--neu-dark), inset -4px -4px 10px var(--neu-light);
+  --inset-sm: inset 2px 2px 5px var(--neu-dark), inset -2px -2px 5px var(--neu-light);
+  --spring: cubic-bezier(.34, 1.56, .64, 1); --spring-soft: cubic-bezier(.3, 1.32, .6, 1);
+  --r-card: 24px; --r-key: 16px;
+  --font-ui: "Bahnschrift", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-num: "Bahnschrift", "Cascadia Mono", Consolas, monospace;
+}
+:root[data-theme="dark"]:where(:not([data-releasehub-theme])), :root[data-releasehub-theme="dark"] {
+  --neu-bg: #24211E; --neu-light: #312D29; --neu-dark: #171513;
+  --text: #EDE5DD; --heading: #F6EFE8; --muted: #A89E95; --subtle: #CFC5BC;
+  --border: rgba(207, 197, 188, .12); --border-strong: rgba(207, 197, 188, .22);
+  --cobalt: #7D93FF; --vermilion: #FF7A52; --danger: #FF8C66;
+}

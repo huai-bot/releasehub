@@ -1,12 +1,14 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use tauri::{webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder}, AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Rect, WebviewUrl};
+use tauri::{webview::{Color, NewWindowResponse, PageLoadEvent, WebviewBuilder}, AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Rect, Theme, WebviewUrl};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 use uuid::Uuid;
 
 const PREFIX: &str = "github-reader-";
+const STYLE: &str = concat!(include_str!("../../src/soft-material.css"), "\n", include_str!("reader.css"));
+const APPLY_THEME: &str = include_str!("reader-theme.js");
 
 #[derive(Deserialize)]
 struct Bounds { x: f64, y: f64, width: f64, height: f64 }
@@ -63,11 +65,16 @@ pub(crate) fn open(app: &AppHandle, input: Value, profile: PathBuf, mode: &str, 
     let url = input["url"].as_str().and_then(|text| Url::parse(text).ok()).filter(readable).ok_or("这里只能打开 GitHub 内容页。")?;
     let rect = bounds(&input)?;
     let window = app.get_window("main").ok_or("主窗口未打开。")?;
+    let theme = match input["theme"].as_str() { Some("light") => "light", Some("dark") => "dark", _ => "system" };
+    let dark = theme == "dark" || (theme == "system" && window.theme().ok() == Some(Theme::Dark));
+    let background = if dark { Color(36, 33, 30, 255) } else { Color(242, 232, 224, 255) };
     close_active(app)?;
     let nav_app = app.clone(); let nav_label = label.clone();
     let popup_app = app.clone(); let popup_label = label.clone();
     let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(url))
         .data_directory(profile).disable_drag_drop_handler()
+        .background_color(background)
+        .initialization_script(format!("({APPLY_THEME})({});", json!({"theme":theme,"css":STYLE})))
         .on_navigation(move |url| {
             if release_asset(url) { send(&nav_app,&nav_label,"download",url.as_str()); false }
             else if readable(url) { true } else {

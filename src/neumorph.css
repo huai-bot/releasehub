@@ -3,31 +3,15 @@
  * light (top-left) and shade (bottom-right). Depth is reserved for interactive
  * elements; prose, lists and tables stay flat. Cobalt marks pressed / on / current /
  * key data only; vermilion is a sparing alert. Loaded after app.css. */
+@import './soft-material.css';
+
 :root {
-  --neu-bg: #F2E8E0;
-  --neu-light: #FFFFFF;
-  --neu-dark: #D6C8BD;
-  --raise: -6px -6px 14px var(--neu-light), 6px 6px 14px var(--neu-dark);
-  --raise-hover: -8px -8px 18px var(--neu-light), 8px 8px 18px var(--neu-dark);
-  --raise-sm: -3px -3px 8px var(--neu-light), 3px 3px 8px var(--neu-dark);
-  --inset: inset 4px 4px 10px var(--neu-dark), inset -4px -4px 10px var(--neu-light);
-  --inset-sm: inset 2px 2px 5px var(--neu-dark), inset -2px -2px 5px var(--neu-light);
-  --cobalt: #2F4BD0;
   --cobalt-glow: 0 0 6px rgba(47, 75, 208, .75), 0 0 14px rgba(47, 75, 208, .35);
-  --vermilion: #E2552D;
-  --spring: cubic-bezier(.34, 1.56, .64, 1);
-  --spring-soft: cubic-bezier(.3, 1.32, .6, 1);
-  --r-card: 24px;
-  --r-key: 16px;
-  --font-ui: "Bahnschrift", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  --font-num: "Bahnschrift", "Cascadia Mono", Consolas, monospace;
 
   --bg: var(--neu-bg); --surface: var(--neu-bg); --surface-soft: var(--neu-bg); --sidebar: var(--neu-bg); --hero: var(--neu-bg);
-  --text: #23201D; --heading: #23201D; --muted: #6E655E; --subtle: #4A433D;
-  --border: rgba(110, 101, 94, .16); --border-strong: rgba(110, 101, 94, .28);
   --accent: var(--cobalt); --accent-hover: #2440B8; --accent-ink: #FFFFFF;
   --accent-soft: rgba(47, 75, 208, .09); --mint: rgba(47, 75, 208, .18);
-  --danger: #B8401C; --danger-bg: rgba(226, 85, 45, .10);
+  --danger-bg: rgba(226, 85, 45, .10);
   --warning: #B8401C; --warning-bg: rgba(226, 85, 45, .08);
   --success: var(--cobalt); --success-bg: rgba(47, 75, 208, .07);
   --focus: var(--cobalt); --shadow: var(--raise);
@@ -42,15 +26,11 @@
   background: var(--neu-bg);
 }
 :root[data-theme="dark"] {
-  --neu-bg: #24211E; --neu-light: #312D29; --neu-dark: #171513;
-  --cobalt: #7D93FF; --cobalt-glow: 0 0 6px rgba(125, 147, 255, .8), 0 0 16px rgba(125, 147, 255, .35);
-  --vermilion: #FF7A52;
+  --cobalt-glow: 0 0 6px rgba(125, 147, 255, .8), 0 0 16px rgba(125, 147, 255, .35);
   --bg: var(--neu-bg); --surface: var(--neu-bg); --surface-soft: var(--neu-bg); --sidebar: var(--neu-bg); --hero: var(--neu-bg);
-  --text: #EDE5DD; --heading: #F6EFE8; --muted: #A89E95; --subtle: #CFC5BC;
-  --border: rgba(207, 197, 188, .12); --border-strong: rgba(207, 197, 188, .22);
   --accent: var(--cobalt); --accent-hover: #A3B3FF; --accent-ink: #10142B;
   --accent-soft: rgba(125, 147, 255, .12); --mint: rgba(125, 147, 255, .22);
-  --danger: #FF8C66; --danger-bg: rgba(255, 122, 82, .12); --warning: #FF8C66; --warning-bg: rgba(255, 122, 82, .10);
+  --danger-bg: rgba(255, 122, 82, .12); --warning: #FF8C66; --warning-bg: rgba(255, 122, 82, .10);
   --success: var(--cobalt); --success-bg: rgba(125, 147, 255, .10); --focus: var(--cobalt);
   --glass-workspace: var(--neu-bg); --glass-sidebar: var(--neu-bg); --glass-card: var(--neu-bg); --glass-card-hover: var(--neu-bg);
   --glass-card-selected: var(--neu-bg); --glass-panel: var(--neu-bg); --glass-control: var(--neu-bg);

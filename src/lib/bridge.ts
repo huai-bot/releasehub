@@ -51,7 +51,7 @@ export interface Actions {
   export_library_file: { payload: Record<string, never>; result: { path: string } | null };
   import_library_file: { payload: Record<string, never>; result: { imported: number; skipped: number; notesImported: number } | null };
   open_url: { payload: { url: string }; result: null };
-  reader_open: { payload: { id: string; url: string; bounds: ReaderBounds }; result: null };
+  reader_open: { payload: { id: string; url: string; theme: Settings['theme']; bounds: ReaderBounds }; result: null };
   reader_resize: { payload: { id: string; bounds: ReaderBounds }; result: null };
   reader_close: { payload: { id: string }; result: null };
   reader_external: { payload: { id: string }; result: null };

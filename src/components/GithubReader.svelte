@@ -2,10 +2,10 @@
   import { onMount, tick } from 'svelte';
   import { dispatch, watchReader, type ReaderBounds } from '../lib/bridge';
   import { readableError, safeGithubUrl, trackedAsset } from '../lib/ui';
-  import type { Project } from '../lib/types';
+  import type { Project, Theme } from '../lib/types';
   import Icon from './Icon.svelte';
 
-  let { url, preview, projects, ondownload, onclose }: { url: string; preview: boolean; projects: Project[]; ondownload: (project: Project) => void; onclose: () => void } = $props();
+  let { url, theme, preview, projects, ondownload, onclose }: { url: string; theme: Theme; preview: boolean; projects: Project[]; ondownload: (project: Project) => void; onclose: () => void } = $props();
   let dialog: HTMLDialogElement;
   let viewport: HTMLDivElement;
   let title = $state('GitHub 原文');
@@ -34,7 +34,7 @@
   async function open() {
     error = ''; notice = ''; externalUrl = ''; downloadUrl = ''; waitForPage();
     if (preview) { loading = false; return; }
-    try { await dispatch('reader_open', { id, url, bounds: bounds() }); opened = true; }
+    try { await dispatch('reader_open', { id, url, theme, bounds: bounds() }); opened = true; }
     catch (reason) { clearTimeout(timeout); loading = false; error = readableError(reason); }
   }
   async function leave() {
@@ -97,28 +97,36 @@
 
 <dialog class="reader" bind:this={dialog} aria-label="GitHub 原文" oncancel={event => { event.preventDefault(); void leave(); }}>
   <header class="reader-bar">
-    <button class="button secondary small" onclick={() => void leave()}><Icon name="chevronRight" class="back" size={16} />返回</button>
+    <button class="reader-key" onclick={() => void leave()}><Icon name="chevronRight" class="back" size={16} />返回</button>
     <strong title={title}>{title}</strong>
-    {#if loading}<Icon name="loader" class="spinning" size={16} />{/if}
-    <button class="text-button" disabled={preview} onclick={() => void external()}><Icon name="external" size={15} />在浏览器打开</button>
+    {#if loading}<span class="reader-light" role="status" aria-label="正在加载"></span>{/if}
+    <button class="reader-key" disabled={preview} onclick={() => void external()}><Icon name="external" size={15} />在浏览器打开</button>
   </header>
-  {#if notice}<div class="reader-notice" role="status"><span>{notice}</span>{#if download}<button class="button secondary small" onclick={() => void queueAsset()}><Icon name="download" size={14} />在追新下载</button>{/if}</div>{/if}
+  {#if notice}<div class="reader-notice" role="status"><span>{notice}</span>{#if download}<button class="reader-key" onclick={() => void queueAsset()}><Icon name="download" size={14} />在追新下载</button>{/if}</div>{/if}
   <div class="reader-body" bind:this={viewport} aria-busy={loading}>
-    {#if error}<div class="empty-state"><p role="alert">{error}</p><button class="button secondary" onclick={() => { opening = open(); }}>重试</button></div>
+    {#if error}<div class="empty-state"><p role="alert">{error}</p><button class="reader-key" onclick={() => { opening = open(); }}>重试</button></div>
     {:else if preview}<div class="empty-state"><p>桌面版会在这里显示 GitHub 原文。</p></div>{/if}
   </div>
 </dialog>
 
 <style>
-  dialog.reader { position:fixed; inset:0; margin:auto; width:calc(100vw - 32px); max-width:1440px; height:calc(100vh - 32px); max-height:none; padding:0; overflow:hidden; background:var(--surface); color:var(--text); }
+  dialog.reader { position:fixed; inset:0; margin:auto; width:calc(100vw - 32px); max-width:1440px; height:calc(100vh - 32px); max-height:none; padding:0; overflow:hidden; border:none; border-radius:var(--r-card); background:var(--neu-bg); color:var(--text); font-variant-numeric:tabular-nums; }
   .reader[open] { display:flex; flex-direction:column; }
-  .reader-bar { display:flex; align-items:center; gap:16px; flex:none; padding:12px 20px; border-bottom:1px solid var(--border); }
-  .reader-bar strong { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--heading); font-size:14px; }
-  .reader-bar button { flex:none; }
+  .reader-bar { display:flex; align-items:center; gap:20px; flex:none; padding:16px 24px; }
+  .reader-bar strong { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--heading); font-size:15px; }
+  .reader-key { flex:none; display:inline-flex; align-items:center; justify-content:center; gap:7px; min-height:36px; padding:8px 15px; border:0; border-radius:var(--r-key); background:var(--neu-bg); color:var(--text); font:600 13px/1.5 var(--font-ui); box-shadow:var(--raise); transition:transform 200ms var(--spring-soft),box-shadow 160ms ease,color 160ms ease; }
+  .reader-key:hover:not(:disabled) { transform:translateY(-1px); }
+  .reader-key:active:not(:disabled) { transform:translateY(1px); box-shadow:var(--inset); color:var(--cobalt); transition-duration:120ms; }
+  .reader-key:focus-visible { outline:2px solid var(--cobalt); outline-offset:3px; }
+  .reader-key:disabled { color:var(--muted); box-shadow:none; }
+  .reader-light { width:8px; height:8px; flex:none; border-radius:50%; background:var(--cobalt); }
   .reader-bar :global(.back) { transform:rotate(180deg); }
-  .reader-notice { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:7px 20px; font-size:12px; color:var(--subtle); }
+  .reader-notice { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:4px 24px 14px; font-size:13px; color:var(--subtle); }
   .reader-notice span { overflow-wrap:anywhere; }
   .reader-notice button { flex:none; }
-  .reader-body { flex:1; min-height:0; margin:0 8px 8px; }
+  .reader-body { flex:1; min-height:0; margin:0 16px 18px; background:var(--neu-bg); border-radius:var(--r-card); }
   .reader-body .empty-state { height:100%; }
+  .reader-body [role="alert"] { color:var(--danger); }
+  @media (prefers-reduced-motion:reduce) { .reader-key:is(:hover,:active):not(:disabled) { transform:none; } }
+  @media (forced-colors:active) { .reader-key, dialog.reader { border:1px solid ButtonText; } .reader-light { background:Highlight; } }
 </style>
