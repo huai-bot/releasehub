@@ -1,4 +1,4 @@
-use super::{models::*, network, selection, Core};
+use super::{local_apps::{has_repository, same_repository}, models::*, network, selection, Core};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -33,6 +33,8 @@ struct LibrarySettings {
     blur: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     library_layout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    library_sort: Option<String>,
     max_concurrent_downloads: usize, close_to_tray: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     download_connections: Option<usize>,
@@ -43,16 +45,17 @@ struct LibrarySettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     navigation_order: Option<Vec<String>>,
 }
-fn empty_project(owner:String,repo:String,channel:String,preference:String) -> Project {
+pub(super) fn empty_project(owner:String,repo:String,channel:String,preference:String) -> Project {
     let time=now();
+    let local = owner.is_empty() && repo.is_empty();
     Project { id:uuid::Uuid::new_v4().to_string(), name:repo.clone(),
-        url:format!("https://github.com/{owner}/{repo}"),owner,repo,description:String::new(),avatar_url:None,
-        channel,preference,management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,installed_source:None,executable_path:None,
+        url:if local { String::new() } else { format!("https://github.com/{owner}/{repo}") },owner,repo,description:String::new(),avatar_url:None,
+        repository_match:None,channel,preference,management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,installed_source:None,executable_path:None,
         backup_enabled:false,updates_muted:false,
-        release:None,selected_asset_id:None,status:"notChecked".into(),checked_at:None,error:None,
-        default_branch:"main".into(),source_head_sha:None,source_ahead:None,created_at:time }
+        release:None,selected_asset_id:None,status:if local { "local" } else { "notChecked" }.into(),checked_at:None,error:None,
+        default_branch:if local { "" } else { "main" }.into(),source_head_sha:None,source_ahead:None,created_at:time }
 }
-fn metadata(p:&mut Project,raw:&Value)->Result<(),String> {
+pub(super) fn metadata(p:&mut Project,raw:&Value)->Result<(),String> {
     if raw.get("private").and_then(Value::as_bool)!=Some(false) { return Err("只支持公开 GitHub 项目".into()); }
     p.name=network::field(raw,"name",200)?;
     p.default_branch=network::field(raw,"default_branch",200)?;
@@ -62,6 +65,22 @@ fn metadata(p:&mut Project,raw:&Value)->Result<(),String> {
     }).map(str::to_owned);
     Ok(())
 }
+
+pub(super) fn update_project_status(p: &mut Project) {
+    if !has_repository(p) {
+        p.status = "local".into();
+    } else if p.management_mode == "software" && p.release.is_some() && p.installed_version.is_none()
+        && p.repository_match.is_some() && (p.executable_path.is_some() || p.installed_path.is_some()) {
+        p.status = "versionUnknown".into();
+    } else {
+        selection::update_status(p);
+    }
+}
+
+fn same_update_source(a: &Project, b: &Project) -> bool {
+    has_repository(a) && same_repository(a, b) && a.channel == b.channel && !a.updates_muted
+}
+
 impl Core {
     pub(crate) async fn add_project(&self,input:AddProjectInput)->Result<Project,String> {
         validate_choices(&input.channel,&input.preference)?;validate_management_mode(&input.management_mode)?;
@@ -91,8 +110,12 @@ impl Core {
                 p.updates_muted=muted;
                 if muted && p.status=="checking" { p.status="notChecked".into(); }
             }
+            let prior_executable = p.executable_path.clone();
+            let prior_automatic_version = p.installed_source.as_deref() == Some("executable");
+            let version_edited = changes.installed_version.is_some();
             if let Some(mode)=changes.management_mode {
                 validate_management_mode(&mode)?;
+                if !has_repository(p) && mode == "files" { return Err("本地程序需要关联 GitHub 仓库后才能切换为文件项目".into()); }
                 if p.management_mode!=mode {p.selected_asset_id=None;}
                 p.management_mode=mode;
             }
@@ -115,7 +138,7 @@ impl Core {
             }
             if let Some(v)=changes.installed_version {
                 p.installed_version=v.map(|s| bounded_text(&s,200,"已安装版本")).transpose()?;
-                p.installed_source=p.installed_version.as_ref().map(|_| "manual".into());
+                p.installed_source=(p.installed_version.is_some() || (p.repository_match.is_some() && p.executable_path.is_some())).then(|| "manual".into());
             }
             if let Some(path)=changes.installed_path {
                 let path=path.map(|s| bounded_text(&s,4096,"已安装路径")).transpose()?;
@@ -146,8 +169,15 @@ impl Core {
                 }
                 p.selected_asset_id=selected;
             }
+            if prior_executable != p.executable_path {
+                if p.repository_match.as_deref() == Some("pending") { p.repository_match = Some("unmatched".into()); }
+                if prior_automatic_version && !version_edited {
+                    p.installed_version = None;
+                    p.installed_source = None;
+                }
+            }
             selection::update_file_status(p,&downloads,&self.data_dir);
-            if p.release.is_some() { selection::update_status(p); }
+            if !has_repository(p) || (p.release.is_some() && p.status != "checking") { update_project_status(p); }
             p.error=None; Ok(())
         })?;
         self.changed(); Ok(p)
@@ -171,66 +201,86 @@ impl Core {
         let projects=self.store.projects()?;
         if let Some(ids)=&ids { for id in ids { if !projects.iter().any(|p| &p.id==id) { return Err("要检查的项目不存在".into()); } } }
         let mut checked=0; let mut updates=0; let mut found=std::collections::HashMap::new(); let mut errors=0;
-        for mut p in projects.into_iter().filter(|p| !p.updates_muted && ids.as_ref().is_none_or(|v| v.contains(&p.id))) {
-            let id=p.id.clone();
-            let current=self.store.mutate("projects",&id,|current:&mut Project| {
-                if !current.updates_muted {current.status="checking".into();current.error=None;} Ok(())
-            })?;
-            if current.updates_muted { continue; }
-            self.changed();
-            let fetched=async {
-                let raw=self.github.api(&p.owner,&p.repo,&[],None).await?; metadata(&mut p,&raw)?;
-                let release=self.github.release(&p).await?;
-                let head=self.github.head(&p.owner,&p.repo,&p.default_branch).await.ok();
-                let tag_commit=if let Some(r)=&release {self.github.head(&p.owner,&p.repo,&r.tag).await.ok()}else{None};
-                Ok::<_,String>((release,head,tag_commit))
-            }.await;
-            checked+=1;
-            let downloads=self.store.downloads()?;
-            let updated=self.store.mutate("projects",&id,|current:&mut Project| {
-                if current.updates_muted {return Ok(());}
-                current.checked_at=Some(now());
-                match fetched {
-                    Ok((mut release,head,tag_commit))=> {
-                        // A concurrent user change of channel must not receive data from the previous channel.
-                        if current.channel!=p.channel {current.status="notChecked".into();return Ok(());}
-                        current.name=p.name;current.description=p.description;current.avatar_url=p.avatar_url;current.default_branch=p.default_branch;
-                        if let Some(r)=&mut release { for a in &mut r.assets {selection::classify_for_mode(a,current);} }
-                        let previous=current.selected_asset_id;
-                        current.selected_asset_id=release.as_ref().and_then(|r|selection::select_for_project(current,&r.assets,previous));
-                        current.release=release;current.source_ahead=head.as_ref().zip(tag_commit.as_ref()).map(|(a,b)|a!=b);
-                        current.source_head_sha=head;current.error=None;
-                        selection::update_file_status(current,&downloads,&self.data_dir);selection::update_status(current);
-                    }
-                    Err(error)=> {current.status="error".into();current.error=Some(error);errors+=1;}
-                }
-                Ok(())
-            });
-            let updated=match updated {Ok(p)=>p,Err(e) if self.store.project(&id).is_err()=>{let _=e;continue;},Err(e)=>return Err(e)};
-            if !updated.updates_muted && updated.status=="updateAvailable" {
-                updates+=1;
-                if let Some(tag)=updated.available_update_tag() { found.insert(id.clone(),tag.to_owned()); }
-                if allow_auto&&self.store.settings()?.auto_download {
-                    if let (Some(asset),Some(r))=(updated.selected_asset_id,updated.release.as_ref()) {
-                        let exists=self.store.downloads()?.iter().any(|d|d.project_id==updated.id&&d.asset_id==asset&&d.tag==r.tag);
-                        if !exists {if let Err(e)=self.queue_auto_download(&updated.id,asset) {
-                            self.store.mutate("projects",&id,|p:&mut Project|{p.error=Some(format!("自动下载未开始：{e}"));Ok(())})?;
-                        }}
-                    }
-                }
-            }
-            self.changed();
+        for p in projects.into_iter().filter(|p| has_repository(p) && !p.updates_muted && ids.as_ref().is_none_or(|v| v.contains(&p.id))) {
+            let Some(updated) = self.check_linked_project(&p, false, allow_auto).await? else { continue; };
+            checked += 1;
+            if updated.status == "error" { errors += 1; }
+            if updated.status == "updateAvailable" { updates += 1; }
+            if let Some(tag) = updated.available_update_tag() { found.insert(updated.id.clone(), tag.to_owned()); }
         }
         let unread=if found.is_empty() {0} else {self.unread_updates()?.iter().filter(|project|
             found.get(&project.id).map(String::as_str)==project.available_update_tag()).count()};
         Ok(json!({"checked":checked,"updates":updates,"unreadUpdates":unread,"errors":errors}))
     }
+    pub(super) async fn check_project_after_repository_change(self:&Arc<Self>, p:&Project) -> Result<(),String> {
+        let _guard = self.checks.lock().await;
+        self.check_linked_project(p, true, false).await.map(|_| ())
+    }
+
+    async fn check_linked_project(self:&Arc<Self>, expected:&Project, first_only:bool, allow_auto:bool) -> Result<Option<Project>,String> {
+        let id = &expected.id;
+        let Some((mut request, ())) = self.store.mutate_project_if(id, |p| {
+            if !same_update_source(p, expected) || (first_only && p.checked_at.is_some()) { return None; }
+            p.status = "checking".into();
+            p.error = None;
+            Some(())
+        })? else { return Ok(None); };
+        self.changed();
+        let allow_auto = allow_auto && !(request.repository_match.is_some() && request.release.is_none());
+        let fetched = async {
+            let raw = self.github.api(&request.owner, &request.repo, &[], None).await?;
+            metadata(&mut request, &raw)?;
+            let release = self.github.release(&request).await?;
+            let head = self.github.head(&request.owner, &request.repo, &request.default_branch).await.ok();
+            let tag_commit = if let Some(r) = &release { self.github.head(&request.owner, &request.repo, &r.tag).await.ok() } else { None };
+            Ok::<_, String>((release, head, tag_commit))
+        }.await;
+        let downloads = self.store.downloads()?;
+        let Some((updated, ())) = self.store.mutate_project_if(id, |current| {
+            // The same guard applies to successes and failures. `checking` also rejects a switch away and back.
+            if current.status != "checking" || !same_update_source(current, &request) { return None; }
+            current.checked_at = Some(now());
+            match fetched {
+                Ok((mut release, head, tag_commit)) => {
+                    current.name = request.name; current.description = request.description;
+                    current.avatar_url = request.avatar_url; current.default_branch = request.default_branch;
+                    if let Some(r) = &mut release { for a in &mut r.assets { selection::classify_for_mode(a, current); } }
+                    current.selected_asset_id = release.as_ref().and_then(|r| selection::select_for_project(current, &r.assets, current.selected_asset_id));
+                    current.release = release;
+                    current.source_ahead = head.as_ref().zip(tag_commit.as_ref()).map(|(a,b)| a != b);
+                    current.source_head_sha = head;
+                    current.error = None;
+                    selection::update_file_status(current, &downloads, &self.data_dir);
+                    update_project_status(current);
+                }
+                Err(error) => { current.status = "error".into(); current.error = Some(error); }
+            }
+            Some(())
+        })? else { return Ok(None); };
+        if allow_auto && updated.status == "updateAvailable" && self.store.settings()?.auto_download {
+            if let (Some(asset), Some(release)) = (updated.selected_asset_id, updated.release.as_ref()) {
+                let exists = self.store.downloads()?.iter().any(|d| d.project_id == updated.id && d.asset_id == asset && d.tag == release.tag);
+                if !exists {
+                    if let Err(e) = self.queue_auto_download(id, asset) {
+                        self.store.mutate_project_if(id, |p| {
+                            if !same_update_source(p, &updated) || p.available_update_tag() != Some(release.tag.as_str()) || p.selected_asset_id != Some(asset) { return None; }
+                            p.error = Some(format!("自动下载未开始：{e}"));
+                            Some(())
+                        })?;
+                    }
+                }
+            }
+        }
+        self.changed();
+        Ok(Some(updated))
+    }
+
     pub(crate) fn export_library(&self)->Result<String,String> {
         let s=self.store.settings()?;
-        let library=Library {version:1,projects:self.store.projects()?.into_iter().map(|p|Subscription{
+        let library=Library {version:1,projects:self.store.projects()?.into_iter().filter(has_repository).map(|p|Subscription{
             repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern,backup_enabled:p.backup_enabled&&p.management_mode=="software",updates_muted:p.updates_muted,management_mode:p.management_mode}).collect(),
             repository_notes:self.store.repository_notes()?,
-            settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),material:Some(s.material),blur:Some(s.blur),library_layout:Some(s.library_layout),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
+            settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),material:Some(s.material),blur:Some(s.blur),library_layout:Some(s.library_layout),library_sort:Some(s.library_sort),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
                 auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray,download_connections:Some(s.download_connections),
                 startup_page:Some(s.startup_page),startup_github_tab:Some(s.startup_github_tab),navigation_order:Some(s.navigation_order)}};
         serde_json::to_string_pretty(&library).map_err(|_|"订阅导出失败".into())
@@ -245,12 +295,16 @@ impl Core {
         if let Some(material)=library.settings.material {settings.material=material;}
         if let Some(blur)=library.settings.blur {settings.blur=blur;}
         if let Some(layout)=library.settings.library_layout {settings.library_layout=layout;}
+        if let Some(sort)=library.settings.library_sort {settings.library_sort=sort;}
         settings.notifications=library.settings.notifications;settings.auto_download=library.settings.auto_download;
         settings.max_concurrent_downloads=library.settings.max_concurrent_downloads;settings.close_to_tray=library.settings.close_to_tray;
         if let Some(connections)=library.settings.download_connections {settings.download_connections=connections;}
         if let Some(page)=library.settings.startup_page {settings.startup_page=page;}
         if let Some(tab)=library.settings.startup_github_tab {settings.startup_github_tab=tab;}
-        if let Some(order)=library.settings.navigation_order {settings.navigation_order=order;}
+        if let Some(mut order)=library.settings.navigation_order {
+            upgrade_navigation_order(&mut order);
+            settings.navigation_order=order;
+        }
         settings.validate()?;
         // Validate everything before any writes; malformed notes cannot partially import subscriptions.
         let mut notes=std::collections::BTreeMap::new();
@@ -333,6 +387,28 @@ mod tests {
         value["settings"]["libraryLayout"]=json!("grid");
         assert_eq!(target.import_library(&value.to_string()).unwrap_err(),"资源库布局无效");
         assert_eq!(target.store.settings().unwrap().library_layout,"list");
+    }
+    #[test] fn library_sort_roundtrips_and_legacy_import_keeps_sort_and_navigation_order() {
+        let dir=tempfile::tempdir().unwrap();
+        let core=Core::new(dir.path().join("data"),true,Arc::new(|_,_|{})).unwrap();
+        let mut settings=core.store.settings().unwrap();
+        settings.library_sort="nameDesc".into();
+        core.store.save_settings(&settings).unwrap();
+        let exported=core.export_library().unwrap();
+        let mut legacy:Value=serde_json::from_str(&exported).unwrap();
+        assert_eq!(legacy["settings"]["librarySort"],"nameDesc");
+        settings.library_sort="updated".into();
+        core.store.save_settings(&settings).unwrap();
+        core.import_library(&exported).unwrap();
+        assert_eq!(core.store.settings().unwrap().library_sort,"nameDesc");
+        settings.library_sort="updated".into();
+        core.store.save_settings(&settings).unwrap();
+        legacy["settings"].as_object_mut().unwrap().remove("librarySort");
+        legacy["settings"]["navigationOrder"]=json!(["agent","github","library","updates","downloads","home"]);
+        core.import_library(&serde_json::to_string(&legacy).unwrap()).unwrap();
+        let imported=core.store.settings().unwrap();
+        assert_eq!(imported.library_sort,"updated");
+        assert_eq!(imported.navigation_order,["agent","github","trainers","library","updates","downloads","home"]);
     }
     #[test] fn exports_only_subscriptions() {
         let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().into(),true,Arc::new(|_,_|{})).unwrap();

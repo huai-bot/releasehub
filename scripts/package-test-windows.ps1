@@ -25,7 +25,7 @@ Copy-Item -LiteralPath $exe -Destination (Join-Path $portable 'ReleaseHub.exe')
 Copy-Item -LiteralPath $mcp -Destination (Join-Path $portable 'tools/releasehub-mcp.exe')
 Copy-Item -LiteralPath (Join-Path $root 'LICENSE') -Destination $portable
 Copy-Item -LiteralPath (Join-Path $root 'docs/PORTABLE.txt') -Destination (Join-Path $portable 'README.txt')
-Copy-Item -LiteralPath (Join-Path $root 'docs/TESTING-0.4.md') -Destination (Join-Path $portable 'TESTING.md')
+# README.txt contains the current portable instructions; do not bundle an older round's guide.
 Copy-Item -LiteralPath (Join-Path $root 'integrations/releasehub-agent.ps1') -Destination (Join-Path $portable 'integrations')
 Copy-Item -LiteralPath (Join-Path $root 'docs/AGENT_GUIDE.md') -Destination (Join-Path $portable 'integrations/AGENT_GUIDE.md')
 [IO.File]::WriteAllText((Join-Path $portable 'portable.flag'), 'ReleaseHub portable test mode', [Text.UTF8Encoding]::new($false))

@@ -16,7 +16,8 @@
 
   const presentation = $derived(projectPresentation(project, note));
   const avatar = $derived.by(() => {
-    try { const url = new URL(project.avatarUrl ?? ''); return url.protocol === 'https:' ? url.href : null; } catch { return null; }
+    if (!project.avatarUrl) return null;
+    try { const url = new URL(project.avatarUrl); return url.protocol === 'https:' ? url.href : null; } catch { return null; }
   });
   let failedAvatar = $state<string | null>(null);
 
@@ -63,6 +64,7 @@
       {/if}
     </span>
     <div class="card-content">
+      {#if !project.owner && !project.repo}<span class="local-badge">{project.repositoryMatch === 'pending' ? '识别中' : '本地'}</span>{/if}
       {#if presentation.title}
         <strong title={presentation.title}>{presentation.title}</strong>
       {/if}
@@ -93,6 +95,7 @@
     box-shadow: var(--raise);
     transition: transform 220ms var(--spring), box-shadow 180ms ease;
   }
+  .local-badge { position: absolute; top: 8px; left: 12px; font-size: 11px; padding: 2px 7px; border-radius: 9px; color: var(--text); background: var(--accent-soft); }
   .project-card:hover { transform: translateY(-2px); box-shadow: var(--raise-hover); }
   .project-card:active { transform: translateY(2px); box-shadow: var(--inset); transition-duration: 120ms; }
   .project-card.focused,

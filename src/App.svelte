@@ -19,6 +19,7 @@
   import Library from './pages/Library.svelte';
   import Downloads from './pages/Downloads.svelte';
   import Github from './pages/Github.svelte';
+  import Trainers from './pages/Trainers.svelte';
   import GithubReader from './components/GithubReader.svelte';
   import Connections from './pages/Connections.svelte';
   import { isSubscribed } from './lib/github';
@@ -27,7 +28,8 @@
 
   type DialogState = { kind: 'add' } | { kind: 'install'; download: DownloadRecord; plan?: InstallPreview } | { kind: 'managed'; projectId: string } | { kind: 'mark'; project: Project } | { kind: 'note'; project: Project } | { kind: 'import' } | { kind: 'standaloneBackup'; project: Project } | { kind: 'settings'; project: Project };
   interface Toast { id: number; message: string; tone: Tone }
-  let snapshot = $state<Snapshot | null>(null);
+  // Snapshots and progress updates are immutable. Do not deep-proxy every release and attachment.
+  let snapshot = $state.raw<Snapshot | null>(null);
   let page = $state<Page>('home');
   let query = $state('');
   let selectedId = $state<string | null>(null);
@@ -64,33 +66,17 @@
   let unlisten: (() => void) | undefined;
   let toastId = 0;
   const toastTimers = new Set<ReturnType<typeof setTimeout>>();
-  // Last known snapshot, painted instantly at launch while the live one loads.
-  // Holds no credentials; actions stay disabled until the live state arrives.
-  const SNAPSHOT_CACHE = 'releasehub.snapshot.v1';
-  let stale = $state(false);
-  let persistTimer: ReturnType<typeof setTimeout> | undefined;
-  function persistSnapshot() {
-    clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => {
-      if (!snapshot || preview || destroyed) return;
-      try { globalThis.localStorage?.setItem(SNAPSHOT_CACHE, JSON.stringify({ version: 1, savedAt: Date.now(), snapshot })); } catch { /* storage full or unavailable: skip */ }
-    }, 800);
-  }
-  function cachedSnapshot(): Snapshot | null {
-    try {
-      const value = JSON.parse(globalThis.localStorage?.getItem(SNAPSHOT_CACHE) ?? 'null');
-      const cached = value?.version === 1 ? value.snapshot : null;
-      return cached?.settings && cached.runtime && Array.isArray(cached.projects) && Array.isArray(cached.downloads) ? { ...cached, buildTasks: cached.buildTasks ?? [], repositoryNotes: cached.repositoryNotes ?? [] } : null;
-    } catch { return null; }
-  }
-  const busy = $derived(pending.size > 0 || stale);
+  // SQLite is authoritative. Serializing a second, unbounded copy blocks WebView2.
+  // Queueing and network checks do not lock unrelated controls; mutations retain their guard.
+  const backgroundKeys = new Set(['check_updates', 'download_release_link', 'batch-download', 'add_local_executables']);
+  const busy = $derived([...pending].some(key => !backgroundKeys.has(key) && !key.startsWith('download:') && !key.startsWith('asset:')));
   const selectedProject = $derived(snapshot?.projects.find((project) => project.id === selectedId) ?? null);
   const managedProjectId = $derived(modal?.kind === 'managed' ? modal.projectId : null);
   const managedProject = $derived(snapshot?.projects.find((project) => project.id === managedProjectId) ?? null);
   const dialogSource = $derived(modal && 'project' in modal ? modal.project : null);
   const dialogProject = $derived(snapshot?.projects.find(item => item.id === dialogSource?.id) ?? dialogSource);
   const showingDetails = $derived(selectedProject !== null && ['home', 'library', 'updates'].includes(page));
-  const pageLabels: Record<Page, string> = { home: '首页', library: '资源库', updates: '可更新', downloads: '下载', github: 'GitHub', agent: 'AI 连接', settings: '设置' };
+  const pageLabels: Record<Page, string> = { home: '首页', library: '资源库', updates: '可更新', downloads: '下载', github: 'GitHub', trainers: '风灵月影', agent: 'AI 连接', settings: '设置' };
 
   let addRepository = $state('');
   let addMode = $state<ManagementMode>('software');
@@ -142,7 +128,7 @@
         refreshRequested = false;
         const atRequestStart = snapshot;
         const next = await dispatch('snapshot', {});
-        if (!destroyed && !preview) { snapshot = stale ? next : mergeSnapshotDownloads(snapshot, next, atRequestStart); stale = false; persistSnapshot(); }
+        if (!destroyed && !preview) snapshot = mergeSnapshotDownloads(snapshot, next, atRequestStart);
       }
     })();
     try { await refreshPromise; } finally { refreshPromise = null; refreshing = false; }
@@ -170,10 +156,7 @@
       startupError = '请打开 ReleaseHub 桌面版使用，或进入界面预览。';
       loading = false; return;
     }
-    if (!snapshot) {
-      const cached = cachedSnapshot();
-      if (cached) { snapshot = cached; stale = true; loading = false; page = cached.settings.startupPage; startupPageApplied = true; startupDone = true; }
-    }
+
     try {
       await refreshSnapshot();
       if (snapshot && !startupPageApplied) { page = snapshot.settings.startupPage; startupPageApplied = true; }
@@ -195,7 +178,7 @@
       }
     } catch (error) {
       startupError = readableError(error);
-      if (stale) operationError = `暂时无法读取最新本机状态：${startupError}。当前显示上次保存的内容，请点右上角刷新。`;
+      if (snapshot) operationError = `无法读取最新本机状态：${startupError}`;
     }
     finally { loading = false; }
   }
@@ -205,13 +188,12 @@
     systemDark = media.matches;
     const updateSystem = (event: MediaQueryListEvent) => { systemDark = event.matches; };
     media.addEventListener('change', updateSystem);
-    const clearCached = () => { try { globalThis.localStorage?.removeItem(SNAPSHOT_CACHE); } catch { /* ignore */ } };
-    window.addEventListener('releasehub:cache-cleared', clearCached);
+    try { globalThis.localStorage?.removeItem('releasehub.snapshot.v1'); } catch { /* legacy cache is optional */ }
     void initialize();
     const poll = setInterval(() => {
-      if (!unlisten && !preview && snapshot && !document.hidden && (snapshot.runtime.agent.enabled || (snapshot.installations ?? []).some(item => ['waiting', 'detecting', 'rebootRequired'].includes(item.status)) || snapshot.downloads.some((item) => ['queued', 'downloading', 'installing'].includes(item.status)) || snapshot.buildTasks.some((item) => ['claimed', 'running'].includes(item.status)))) void refreshSnapshot().catch(reportError);
+      if (!unlisten && !preview && snapshot && !document.hidden && (snapshot.runtime.agent.enabled || snapshot.projects.some(p => p.repositoryMatch === 'pending') || (snapshot.installations ?? []).some(item => ['waiting', 'detecting', 'rebootRequired'].includes(item.status)) || snapshot.downloads.some((item) => ['queued', 'downloading', 'installing'].includes(item.status)) || snapshot.buildTasks.some((item) => ['claimed', 'running'].includes(item.status)))) void refreshSnapshot().catch(reportError);
     }, 5_000);
-    return () => { destroyed = true; window.removeEventListener('releasehub:cache-cleared', clearCached); clearTimeout(persistTimer); unlisten?.(); clearInterval(poll); toastTimers.forEach(clearTimeout); media.removeEventListener('change', updateSystem); };
+    return () => { destroyed = true; unlisten?.(); clearInterval(poll); toastTimers.forEach(clearTimeout); media.removeEventListener('change', updateSystem); };
   });
 
   async function enterPreview() {
@@ -336,6 +318,25 @@
     const saved = await operate('update_project', { id: project.id, changes: { updatesMuted } });
     if (saved && !updatesMuted) await operate('check_updates', { projectIds: [project.id], allowAutoDownload: false });
   }
+  async function addLocal(paths: string[]) {
+    if (!paths.length) return;
+    const result = await operate('add_local_executables', { paths });
+    if (!result) return;
+    const parts = [];
+    if (result.added.length) parts.push(`已添加 ${result.added.length} 个本地软件，正在后台识别仓库`);
+    if (result.skipped.length) parts.push(`跳过 ${result.skipped.length} 项：${result.skipped[0].reason}`);
+    if (parts.length) notify(parts.join('；'), result.skipped.length ? 'warning' : 'success');
+  }
+  async function pickLocal() {
+    const paths = await operate('pick_local_executables', {}, { refresh: false });
+    if (paths?.length) await addLocal(paths);
+  }
+  async function setRepository(id: string, address: string | null) {
+    if (address && !parseRepository(address)) { formError = '请输入有效的 GitHub 仓库链接，或“作者/仓库名”。'; return false; }
+    const saved = await operate('set_project_repository', { id, repository: address ? parseRepository(address) : null },
+      { success: address ? '已保存仓库。' : '已改为本地软件。' });
+    return !!saved;
+  }
   async function downloadProject(project: Project, quiet = false): Promise<boolean> {
     const asset = project.release?.assets.find((item) => item.id === project.selectedAssetId && (item.downloadable ?? item.compatible));
     if (!asset) { chooseProject(project); if (!quiet) notify('请先在详情的“发行附件”中选择需要下载的文件。', 'warning'); return false; }
@@ -379,11 +380,14 @@
   async function updateProject(id: string, changes: ProjectChanges) {
     const result = await operate('update_project', { id, changes }, { success: '已保存。' });
     if (result && snapshot) snapshot = { ...snapshot, projects: snapshot.projects.map(item => item.id === result.id ? result : item) };
-    if (result && !result.updatesMuted && ('channel' in changes || 'preference' in changes || 'assetPattern' in changes || 'managementMode' in changes)) await checkUpdates([id]);
+    if (result && result.repo && !result.updatesMuted && ('channel' in changes || 'preference' in changes || 'assetPattern' in changes || 'managementMode' in changes)) await checkUpdates([id]);
   }
   async function saveSettings(changes: Partial<Settings>): Promise<boolean> {
     if (preview && snapshot) { snapshot = { ...snapshot, settings: { ...snapshot.settings, ...changes } }; notify('预览设置已更新。', 'neutral'); return true; }
-    return await operate('save_settings', { settings: changes }, { success: '设置已保存。' }) !== undefined;
+    const displayOnly = Object.keys(changes).every(key => key === 'librarySort' || key === 'libraryLayout');
+    const saved = await operate('save_settings', { settings: changes }, { refresh: !displayOnly, success: '设置已保存。' });
+    if (displayOnly && saved && snapshot) snapshot = { ...snapshot, settings: { ...snapshot.settings, ...changes } };
+    return saved !== undefined;
   }
   async function saveInterval(minutes: number): Promise<boolean> {
     if (preview && snapshot) { snapshot = { ...snapshot, settings: { ...snapshot.settings, checkIntervalMinutes: minutes } }; return true; }
@@ -414,7 +418,7 @@
     if (target.kind === 'asset') {
       const download = trackedAsset(snapshot?.projects ?? [], target.url);
       if (download) { await downloadProject({ ...download.project, selectedAssetId: download.asset.id }); return; }
-      readerUrl = target.releaseUrl; return;
+      await operate('download_release_link', { url: target.url }, { key: `asset:${target.url}`, success: '附件已加入下载队列。' }); return;
     }
     if (target.kind === 'repository' && target.repository && !original) {
       const origin = page;
@@ -510,7 +514,7 @@
     if (result) { importContents = ''; modal = null; notify(`已导入 ${result.imported} 项订阅、${result.notesImported} 条备注，跳过 ${result.skipped} 项重复订阅。`); }
   }
   async function removeProject(project: Project) { const result = await operate('remove_project', { id: project.id }, { success: '已取消订阅，下载文件和已安装软件保持不变。' }); if (result !== undefined) { modal = null; if (selectedId === project.id) selectedId = null; } }
-  async function hotkeys(event: KeyboardEvent) { if (readerUrl) return; if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && snapshot && !modal && !document.querySelector('dialog[open]')) { event.preventDefault(); const githubSearch = page === 'github' ? document.querySelector<HTMLInputElement>('#github-search') : null; if (githubSearch) { githubSearch.focus(); return; } if (!['library', 'updates', 'downloads'].includes(page)) navigate('library'); await tick(); searchInput?.focus(); } if (event.key === 'Escape' && !modal) selectedId = null; }
+  async function hotkeys(event: KeyboardEvent) { if (readerUrl) return; if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && snapshot && !modal && !document.querySelector('dialog[open]')) { event.preventDefault(); if (page === 'trainers') { document.querySelector<HTMLInputElement>('.trainer-toolbar input')?.focus(); return; } const githubSearch = page === 'github' ? document.querySelector<HTMLInputElement>('#github-search') : null; if (githubSearch) { githubSearch.focus(); return; } if (!['library', 'updates', 'downloads'].includes(page)) navigate('library'); await tick(); searchInput?.focus(); } if (event.key === 'Escape' && !modal) selectedId = null; }
 </script>
 
 <svelte:window onkeydown={hotkeys} />
@@ -521,7 +525,7 @@
   <main class="startup-shell"><div class="startup-brand"><BrandMark size={40} /><strong>ReleaseHub</strong></div><section class="startup-card" aria-live="polite">{#if loading}<span class="startup-icon"><Icon name="loader" class="spinning" size={30} /></span><h1>正在打开工作空间</h1><div class="skeleton-lines"><span></span><span></span><span></span></div>{:else}<span class="startup-icon"><Icon name="disconnected" size={29} /></span><h1>请在桌面程序中继续</h1><p class="startup-error">{startupError || '桌面服务未连接，请重新打开应用。'}</p><button class="button secondary" onclick={() => void initialize()}><Icon name="refresh" size={16} />重新连接桌面服务</button>{#if import.meta.env.DEV && !desktopAvailable()}<div class="preview-gate"><span class="status-badge warning">开发环境 · 示例数据</span><button class="button primary" onclick={() => void enterPreview()}>进入界面预览<Icon name="arrowRight" size={16} /></button></div>{/if}{/if}</section></main>
 {:else}
   <div class="app-shell"><Sidebar {page} {snapshot} {preview} {busy} onnavigate={navigate} onadd={showAdd} ondata={() => void operate('open_data_directory', {}, { refresh: false })} onreorder={(navigationOrder: WorkspacePage[]) => saveSettings({ navigationOrder })} />
-    <div class="workspace"><TitleBar title={pageLabels[page]} bind:query bind:inputElement={searchInput} {busy} {refreshing} onsearch={() => { if (!['library', 'updates', 'downloads'].includes(page)) page = 'library'; }} onrefresh={() => void refreshView()} onerror={reportError} />
+    <div class="workspace"><TitleBar title={pageLabels[page]} searchable={page !== 'trainers'} bind:query bind:inputElement={searchInput} {busy} {refreshing} onsearch={() => { if (!['library', 'updates', 'downloads'].includes(page)) page = 'library'; }} onrefresh={() => void refreshView()} onerror={reportError} />
       {#if preview}<div class="preview-banner"><Icon name="monitor" size={15} /><strong>界面预览</strong><span>示例版本、账号与状态</span><button onclick={exitPreview}>退出预览<Icon name="close" size={13} /></button></div>{/if}
       {#if operationError}<div class="operation-error" role="alert"><Icon name="alert" size={17} /><span>{operationError}</span><button class="icon-button" aria-label="收起错误提示" onclick={() => operationError = ''}><Icon name="close" size={16} /></button></div>{/if}
       <div class="workspace-content" class:with-details={showingDetails}>{#if visitedLocal.has('home') || page === 'home'}<main class="page-content" id={page === 'home' ? 'main-content' : undefined} hidden={page !== 'home'}><Home {snapshot} {busy} {selectedId} {preview} active={page === 'home'} oninstall={showInstall} onopen={(url) => void openUrl(url)} onGithubAdd={addGithubRepository} onnotice={notify} onGithubLogin={() => void navigate('github')} onpage={navigate} onselect={chooseProject} onadd={showAdd} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} oninterval={saveInterval} /></main>{/if}
@@ -530,16 +534,17 @@
         {:else if page === 'settings'}<SettingsPage settings={snapshot.settings} runtime={snapshot.runtime} {busy} {preview} onsave={saveSettings} onproxy={saveProxy} onproxytest={(proxy, password) => dispatch('test_proxy', { proxy, ...(password === undefined ? {} : { password }) })} onintegration={getIntegration} ongithub={() => navigate('github')} ondata={() => void operate('open_data_directory', {}, { refresh: false })} onexport={() => void exportFile()} onimport={() => void importFile()} ontextimport={() => { importContents = ''; openDialog({ kind: 'import' }); }} oncopyexport={() => void copyExport()} oncopy={(text) => void copy(text)} onopen={(url) => void openUrl(url)} />{/if}
       </main>{/if}
       {#each ['library', 'updates'] as localPage}
-         {#if visitedLocal.has(localPage as Page) || page === localPage}<main class="page-content" id={page === localPage ? 'main-content' : undefined} hidden={page !== localPage}><Library projects={snapshot.projects} readTags={snapshot.readUpdateTags} onMarkRead={markUpdatesRead} onToggleUpdates={toggleUpdates} notes={snapshot.repositoryNotes} layout={snapshot.settings.libraryLayout ?? 'three'} onlayout={(libraryLayout) => void saveSettings({ libraryLayout })} onnote={showNote} updatesOnly={localPage === 'updates'} active={page === localPage} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} onOpen={(project) => void runProject(project)} onFiles={showProjectFiles} onBackup={showProjectBackup} onRepository={(project) => void openUrl(`https://github.com/${project.owner}/${project.repo}`)} /></main>{/if}
+         {#if visitedLocal.has(localPage as Page) || page === localPage}<main class="page-content" id={page === localPage ? 'main-content' : undefined} hidden={page !== localPage}><Library projects={snapshot.projects} readTags={snapshot.readUpdateTags} onMarkRead={markUpdatesRead} onToggleUpdates={toggleUpdates} notes={snapshot.repositoryNotes} sort={snapshot.settings.librarySort ?? 'added'} onsort={(librarySort) => void saveSettings({ librarySort })} onpicklocal={pickLocal} onlocal={addLocal} allowDrop={!modal && !readerUrl && !showingDetails} onsettings={project => openDialog({ kind: 'settings', project })} layout={snapshot.settings.libraryLayout ?? 'three'} onlayout={(libraryLayout) => void saveSettings({ libraryLayout })} onnote={showNote} updatesOnly={localPage === 'updates'} active={page === localPage} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} onOpen={(project) => void runProject(project)} onFiles={showProjectFiles} onBackup={showProjectBackup} onRepository={(project) => void openUrl(`https://github.com/${project.owner}/${project.repo}`)} /></main>{/if}
        {/each}
        {#if visitedLocal.has('downloads') || page === 'downloads'}<main class="page-content" id={page === 'downloads' ? 'main-content' : undefined} hidden={page !== 'downloads'}><Downloads installations={snapshot.installations ?? []} onVerify={(id) => void verifyInstallation(id)} onConfirmInstallation={(id) => void confirmInstallation(id)} downloads={snapshot.downloads} {query} {busy} onexternalretry={(download) => showExternalDownload([], download)} onexternalimport={(download) => void importExternalDownload(download)} onretry={(id) => void operate('retry_download', { id }, { success: '已重新加入下载队列。' })} oncancel={(id) => void operate('cancel_download', { id }, { success: '已请求取消下载。' })} oninstall={showInstall} onDelete={(download) => void directDeleteDownload(download)} onfolder={(id) => void operate('open_download', { id }, { refresh: false })} onmark={markDownloaded} onproject={openProject} oncopy={(text) => void copy(text)} onversions={showManagedVersions} /></main>{/if}
+       {#if page === 'trainers'}<main id="main-content" class="page-content trainer-workspace"><Trainers {preview} active={!modal && !readerUrl} /></main>{/if}
        {#if githubVisited || page === 'github'}<main class="page-content github-workspace" id={page === 'github' ? 'main-content' : undefined} hidden={page !== 'github'}><Github bind:this={githubWorkspace} projects={snapshot.projects} repositoryNotes={snapshot.repositoryNotes} {preview} preload active={page === 'github'} initialTab={snapshot.settings.startupGithubTab} onadd={addGithubRepository} onopen={(url) => void openUrl(url)} onoriginal={(url) => void openUrl(url,true)} oncopy={(text) => void copy(text)} onnotice={notify} onnotes={(notes) => { if (snapshot) snapshot = { ...snapshot, repositoryNotes: notes }; }} /></main>{/if}
       {#if showingDetails && selectedProject}<button class="detail-backdrop" aria-label="关闭资源详情" onclick={() => selectedId = null}></button>{#key `${selectedProject.id}:${detailRevision}`}<ProjectDetail installations={snapshot.installations ?? []} onVerify={(id) => void verifyInstallation(id)} onConfirmInstallation={(id) => void confirmInstallation(id)} project={selectedProject} readTag={snapshot.readUpdateTags?.[selectedProject.id]} note={noteFor(selectedProject)} onnote={showNote} {busy} {preview} onexternal={(project) => showExternalDownload([project])} onrun={(project) => void runProject(project)} onexecutable={(project) => void chooseExecutable(project)} onrestore={(backup) => void directApplyBackup(backup, 'restore')} ondeletebackup={(backup) => void directApplyBackup(backup, 'delete')} onclose={() => selectedId = null} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onupdate={(id, changes) => void updateProject(id, changes)} onmark={showMark} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => void removeProject(project)} onopen={(url) => void openUrl(url)} onSettings={(project) => openDialog({ kind: 'settings', project })} />{/key}{/if}</div>
     </div>
   </div>
 {/if}
 
-{#if readerUrl && snapshot}<GithubReader url={readerUrl} theme={snapshot.settings.theme} projects={snapshot.projects} {preview} ondownload={project => void downloadProject(project)} onclose={() => readerUrl = null} />{/if}
+{#if readerUrl && snapshot}<GithubReader url={readerUrl} theme={snapshot.settings.theme} {preview} onclose={() => readerUrl = null} />{/if}
 
 {#if modal?.kind === 'add'}
   <Modal title="添加资源" onclose={closeDialog}>
@@ -567,7 +572,7 @@
 {:else if modal?.kind === 'standaloneBackup' && dialogProject}
   <BackupManagement project={dialogProject} revision={detailRevision} {busy} {preview} error={formError} onclose={closeDialog} onupdate={updateProject} onrestore={(backup) => void directApplyBackup(backup, 'restore')} ondelete={(backup) => void directApplyBackup(backup, 'delete')} />
 {:else if modal?.kind === 'settings' && dialogProject}
-  <ProjectSettings project={dialogProject} {busy} error={formError} onclose={closeDialog} onupdate={updateProject} onmark={showMark} onexecutable={(project) => void chooseExecutable(project)} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => void removeProject(project)} />
+  <ProjectSettings project={dialogProject} {busy} error={formError} onclose={closeDialog} onupdate={updateProject} onrepository={setRepository} onmark={showMark} onexecutable={(project) => void chooseExecutable(project)} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => void removeProject(project)} />
 {:else if modal?.kind === 'managed'}
   {#key modal.projectId}<ManagedVersions project={managedProject} versions={managedVersions} loading={managedLoading} error={managedError} actionError={formError} {busy} {preview} onclose={closeDialog} onrefresh={() => void loadManagedVersions()} onopen={(id) => void openManagedVersion(id)} onactivate={activateManagedVersion} />{/key}
 {:else if modal?.kind === 'mark'}

@@ -1,6 +1,9 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
-  import type { LibraryLayout, Project, RepositoryNote } from '../lib/types';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import { desktopAvailable } from '../lib/bridge';
+  import { emptyIndex, filterRows, libraryRows, prepareRows, sortRows, type IndexReply, type LibraryIndex } from '../lib/library-index';
+  import type { LibraryLayout, LibrarySort, Project, RepositoryNote } from '../lib/types';
   import { canDownloadAsset, hasProjectUpdate, hasUnreadUpdate, isFilesProject, matchesProject, projectPresentation } from '../lib/ui';
   import Icon from '../components/Icon.svelte';
   import ProjectCard from '../components/ProjectCard.svelte';
@@ -13,7 +16,7 @@
     query,
     selectedId,
     busy,
-    layout = 'three',
+    layout = 'three', sort = 'added', onsort, onlocal, onpicklocal, allowDrop = true, onsettings,
     notes = [],
     readTags,
     onMarkRead,
@@ -37,6 +40,9 @@
     selectedId: string | null;
     busy: boolean;
     layout?: LibraryLayout;
+    sort?: LibrarySort; onsort?: (sort: LibrarySort) => void;
+    onpicklocal?: () => void; onlocal?: (paths: string[]) => void; allowDrop?: boolean;
+    onsettings?: (project: Project) => void;
     notes?: RepositoryNote[];
     readTags?: Record<string, string>;
     onMarkRead?: (projects: Project[]) => void;
@@ -63,18 +69,61 @@
     return notesMap.get(`${project.owner}/${project.repo}`.toLowerCase()) ?? null;
   }
 
-  const base = $derived(projects.filter((project) => !updatesOnly || hasProjectUpdate(project)));
+  const base = $derived(updatesOnly ? projects.filter(hasProjectUpdate) : projects);
   const unread = $derived(updatesOnly ? base.filter(project => hasUnreadUpdate(project, readTags)) : []);
-  const softwareCount = $derived(base.filter((project) => !isFilesProject(project)).length);
-  const filesCount = $derived(base.filter(isFilesProject).length);
-  const typed = $derived(
-    base.filter((project) =>
-      resourceType === 'all' ? true : isFilesProject(project) ? resourceType === 'files' : resourceType === 'software'
-    )
-  );
-  const visible = $derived(
-    typed.filter((project) => matchesProject(project, query, getNote(project)) && (filter === 'all' || project.channel === filter))
-  );
+  const byId = $derived(new Map(projects.map(p => [p.id, p])));
+  const rows = $derived(libraryRows(projects, notesMap));
+  let worker: Worker | undefined, sentRows: typeof rows | undefined, generation = 0;
+  let indexed = $state.raw<LibraryIndex>(emptyIndex);
+  let indexing = $state(false);
+  $effect(() => {
+    if (updatesOnly || !active) return;
+    const data = rows, q = query, order = sort, request = ++generation;
+    const fallback = () => { indexed = filterRows(sortRows(prepareRows(data), order), q); indexing = false; };
+    if (data.length < 120 || typeof Worker === 'undefined') { sentRows = undefined; fallback(); return; }
+    try {
+      worker ??= new Worker(new URL('../lib/library-index.worker.ts', import.meta.url), { type: 'module' });
+      worker.onmessage = ({ data }: MessageEvent<IndexReply>) => { if (data.generation === generation) { indexed = data.result; indexing = false; } };
+      worker.onerror = () => { worker?.terminate(); worker = undefined; sentRows = undefined; if (request === generation) fallback(); };
+      indexing = true;
+      worker.postMessage({ generation: request, ...(sentRows === data ? {} : { rows: data }), query: q, sort: order });
+      sentRows = data;
+    } catch { fallback(); }
+  });
+  onDestroy(() => { generation++; worker?.terminate(); });
+  const filesCount = $derived(updatesOnly ? base.filter(isFilesProject).length : indexed.filesCount);
+  const softwareCount = $derived(updatesOnly ? base.length - filesCount : indexed.softwareCount);
+  const ids = $derived(resourceType === 'files' ? indexed.files : indexed.software);
+  const pageSize = 48;
+  let pageNumber = $state(0);
+  $effect(() => { resourceType; query; sort; pageNumber = 0; });
+  const pageCount = $derived(Math.max(1, Math.ceil(ids.length / pageSize)));
+  const currentPage = $derived(Math.min(pageNumber, pageCount - 1));
+  const visible = $derived(updatesOnly
+    ? base.filter(p => (resourceType === 'all' || (isFilesProject(p) ? 'files' : 'software') === resourceType) && (filter === 'all' || p.channel === filter) && matchesProject(p, query, getNote(p)))
+    : ids.slice(currentPage * pageSize, (currentPage + 1) * pageSize).map(id => byId.get(id)).filter((p): p is Project => !!p));
+
+  let surface: HTMLElement, dragOver = $state(false);
+  function inside(x: number, y: number) {
+    if (!surface || !active || !allowDrop || busy || updatesOnly || resourceType !== 'software') return false;
+    const r = surface.closest('main')?.getBoundingClientRect() ?? surface.getBoundingClientRect();
+    const scale = window.devicePixelRatio || 1;
+    return x / scale >= r.left && x / scale < r.right && y / scale >= r.top && y / scale < r.bottom;
+  }
+  onMount(() => {
+    if (updatesOnly || !onlocal || !desktopAvailable()) return;
+    let disposed = false, release: (() => void) | undefined;
+    try {
+      void getCurrentWebview().onDragDropEvent(({ payload }) => {
+        if (disposed) return;
+        if (payload.type === 'leave') { dragOver = false; return; }
+        const over = inside(payload.position.x, payload.position.y);
+        dragOver = over && payload.type !== 'drop';
+        if (over && payload.type === 'drop') onlocal?.(payload.paths);
+      }).then(stop => { if (disposed) stop(); else release = stop; }).catch(() => {});
+    } catch { /* The file chooser remains available if native drop is unavailable. */ }
+    return () => { disposed = true; release?.(); };
+  });
   const allVisibleSelected = $derived(visible.length > 0 && visible.every((project) => selected.has(project.id)));
   const chosen = $derived(projects.filter((project) => selected.has(project.id)));
   const downloadable = $derived(
@@ -90,6 +139,7 @@
   });
 
   $effect(() => {
+    if (!updatesOnly || !selected.size) return;
     const allowed = new Set(base.map((project) => project.id));
     if ([...selected].some((id) => !allowed.has(id))) {
       selected = new Set([...selected].filter((id) => allowed.has(id)));
@@ -102,6 +152,11 @@
     }
   });
 
+  async function turnPage(next: number) {
+    pageNumber = next; await tick();
+    surface?.closest('main')?.scrollTo?.({ top: 0 });
+    surface?.querySelector<HTMLButtonElement>('.card-identity')?.focus({ preventScroll: true });
+  }
   function toggle(id: string) {
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
@@ -197,10 +252,12 @@
       {/if}
       <button class="button primary" onclick={onadd}><Icon name="plus" size={17} />添加资源</button>
     </div>
+  {:else if resourceType === 'software' && onpicklocal}
+    <button class="button secondary small" disabled={busy} onclick={onpicklocal} title="也可直接把 .exe 文件拖到资源库"><Icon name="plus" size={15} />添加本地软件</button>
   {/if}
 </div>
 
-<section class:surface={updatesOnly} class:list-surface={updatesOnly} class:library-gallery={!updatesOnly} class="library-surface">
+<section bind:this={surface} class:drop-ready={dragOver} class:surface={updatesOnly} class:list-surface={updatesOnly} class:library-gallery={!updatesOnly} class="library-surface">
   <div class="list-toolbar resource-toolbar">
     <div class="segmented-tabs" role="group" aria-label="资源类型筛选">
       {#if updatesOnly}
@@ -235,6 +292,9 @@
       </div>
     {:else}
       <div class="gallery-toolbar-right">
+        <label class="sort-control">排序<select aria-label="资源排序" value={sort} onchange={(e) => onsort?.(e.currentTarget.value as LibrarySort)}>
+          <option value="added">最近添加</option><option value="name">名称升序</option><option value="nameDesc">名称降序</option><option value="released">最近发布</option><option value="updated">可更新优先</option>
+        </select></label>
         <div class="segmented-tabs layout-switcher" role="group" aria-label="布局切换">
           <button
             class:active={layout === 'two'}
@@ -268,6 +328,7 @@
     {/if}
   </div>
 
+  {#if dragOver}<div class="drop-prompt" role="status"><Icon name="import" size={19} />松开以添加本地软件</div>{/if}
   {#if updatesOnly && selected.size}
     <div class="bulk-toolbar">
       <span>已选 <strong>{selected.size}</strong> 项</span>
@@ -315,7 +376,13 @@
           />
         {/each}
       </div>
+      {#if pageCount > 1}<nav class="library-pages" aria-label="资源分页">
+        <span>第 {currentPage + 1} / {pageCount} 页 · 共 {ids.length} 项</span>
+        <button class="button secondary small" disabled={currentPage === 0} onclick={() => turnPage(currentPage - 1)}>上一页</button>
+        <button class="button secondary small" disabled={currentPage + 1 >= pageCount} onclick={() => turnPage(currentPage + 1)}>下一页</button>
+      </nav>{/if}
     {/if}
+  {:else if indexing && !updatesOnly}<p class="index-hint" role="status">正在整理资源…</p>
   {:else}
     <div class="empty-state spacious">
       <span class="empty-icon"><Icon name={query ? 'search' : updatesOnly ? 'success' : 'library'} size={29} /></span>
@@ -326,6 +393,7 @@
             ? '当前没有待更新的资源'
             : `还没有${resourceType === 'files' ? '文件订阅' : '软件'}`}
       </h3>
+      {#if !updatesOnly && resourceType === 'software' && !query}<p>把 .exe 拖到这里，或点“添加本地软件”。</p>{/if}
       {#if updatesOnly}
         <button class="button secondary small" disabled={busy} onclick={() => oncheck()}>
           <Icon name="refresh" size={15} />检查全部资源
@@ -361,7 +429,8 @@
     <button role="menuitem" onclick={() => perform(onselect)}>
       <Icon name="info" size={16} />查看详情
     </button>
-    {#if onToggleUpdates}<button role="menuitem" disabled={busy} onclick={() => perform(onToggleUpdates)}>
+    {#if onsettings && !isFilesProject(menu.project)}<button role="menuitem" disabled={busy} onclick={() => perform(onsettings)}><Icon name="settings" size={16} />设置 GitHub 仓库</button>{/if}
+    {#if menu.project.repo && onToggleUpdates}<button role="menuitem" disabled={busy} onclick={() => perform(onToggleUpdates)}>
       <Icon name={menu.project.updatesMuted ? 'eye' : 'eyeOff'} size={16} />{menu.project.updatesMuted ? '恢复更新' : '屏蔽更新'}
     </button>{/if}
     {#if !isFilesProject(menu.project) && onBackup}
@@ -370,13 +439,13 @@
         <Icon name="drive" size={16} />管理备份
       </button>
     {/if}
-    {#if onRepository}
+    {#if menu.project.repo && onRepository}
       <div class="menu-divider"></div>
       <button role="menuitem" disabled={busy} onclick={() => perform(onRepository)}>
         <Icon name="github" size={16} />查看 GitHub 仓库
       </button>
     {/if}
-    {#if onnote}
+    {#if menu.project.repo && onnote}
       <div class="menu-divider"></div>
       <button role="menuitem" disabled={busy} onclick={() => perform(onnote)}>
         <Icon name="edit" size={16} />编辑备注
@@ -386,6 +455,13 @@
 {/if}
 
 <style>
+  .drop-ready { outline: 2px dashed var(--accent); outline-offset: 8px; }
+  .drop-prompt { display: flex; align-items: center; gap: 8px; background: var(--accent-soft); padding: 12px; border-radius: 12px; margin: 0 0 16px; }
+  .sort-control, .library-pages { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; }
+  .sort-control select { max-width: 150px; color: var(--text); }
+  .library-pages { justify-content: flex-end; padding-top: 18px; }
+  .library-pages span { margin-right: auto; }
+  .index-hint { text-align: center; padding: 28px; color: var(--muted); }
   .heading-actions {
     display: flex;
     align-items: center;

@@ -2,6 +2,8 @@ use super::{models::*, network, Core};
 use super::download_transfer::{self, TransferOptions};
 use std::{path::{Path,PathBuf}, sync::{Arc,atomic::{AtomicBool,Ordering}}, time::Duration};
 
+const RELEASE_FILE_SOURCE: &str = "github-release";
+
 pub fn safe_name(value:&str)->String {
     let mut name:String=value.chars().map(|c|if c.is_control()||"/\\:*?\"<>|".contains(c){'_'}else{c}).take(180).collect();
     name=name.trim_matches([' ','.']).to_owned();
@@ -69,12 +71,30 @@ impl Core {
         };
         self.download_event(&queued);self.changed();self.pump_downloads();Ok(Some(queued))
     }
+    pub(super) fn enqueue_release_file(self:&Arc<Self>,repository:&str,tag:&str,asset_id:u64,name:&str,url:&str,size:u64,digest:Option<&str>)->Result<DownloadRecord,String>{
+        network::trusted_download_url(url)?;
+        if size==0||size>network::MAX_DOWNLOAD_BYTES{return Err("发行附件大小无效或超过4GB限制".into());}
+        let digest=expected_sha(digest)?;
+        let queued={
+            let _guard=self.download_queue.lock().map_err(|_|"下载队列不可用".to_string())?;
+            if let Some(existing)=self.store.downloads()?.into_iter().find(|d|d.project_id==RELEASE_FILE_SOURCE
+                &&d.project_name.eq_ignore_ascii_case(repository)&&d.asset_id==asset_id&&d.tag==tag
+                &&(["queued","downloading"].contains(&d.status.as_str())||(d.status=="completed"&&local_file_exists(&self.data_dir,d)))) {
+                return Ok(existing);
+            }
+            let time=now();let record=DownloadRecord{id:uuid::Uuid::new_v4().to_string(),project_id:RELEASE_FILE_SOURCE.into(),project_name:repository.into(),
+                asset_id,file_name:safe_name(name),tag:tag.into(),url:url.into(),kind:"other".into(),installable:false,
+                total_bytes:size,received_bytes:0,status:"queued".into(),path:None,sha256:None,verified:false,error:None,created_at:time.clone(),updated_at:time};
+            self.store.set_digest(&record.id,digest.as_deref())?;self.store.put_download(&record)?;record
+        };
+        self.download_event(&queued);self.changed();self.pump_downloads();Ok(queued)
+    }
     pub(crate) fn retry_download(self:&Arc<Self>,id:&str)->Result<DownloadRecord,String>{
         let record={
             let _guard=self.download_queue.lock().map_err(|_|"下载队列不可用".to_string())?;
             if self.active_downloads.lock().map_err(|_|"下载队列不可用".to_string())?.contains_key(id){return Err("下载仍在停止，请稍后重试".into());}
             let previous=self.store.download(id)?;
-            let files=self.store.project(&previous.project_id)?.management_mode=="files";
+            let files=previous.project_id==RELEASE_FILE_SOURCE||self.store.project(&previous.project_id)?.management_mode=="files";
             self.store.mutate("downloads",id,|d:&mut DownloadRecord|{
                 let missing=["completed","installed"].contains(&d.status.as_str())&&!local_file_exists(&self.data_dir,d);
                 if !["failed","cancelled","deleted"].contains(&d.status.as_str())&&!missing{return Err("只能重试失败、已取消或文件缺失的下载；已有文件不会覆盖".into());}
@@ -228,6 +248,34 @@ mod tests{
         assert!(core.update_project(&project.id,serde_json::from_value(serde_json::json!({"installedVersion":"v3"})).unwrap()).is_err());
         assert!(core.handle("add_project",serde_json::json!({"input":{"repository":"owner/no-network","channel":"stable","preference":"auto","managementMode":"files","installedVersion":"v1"}})).await.is_err());
         assert_eq!(core.store.downloads().unwrap().len(),2);
+    }
+    #[test]fn public_release_files_queue_and_retry_without_subscribing(){
+        let (_dir,core,_project)=paused_queue();
+        let address="https://github.com/other/tool/releases/download/v1/file.zip";
+        assert!(core.store.project(RELEASE_FILE_SOURCE).is_err());
+        let first=core.enqueue_release_file("other/tool","v1",929,"file.zip",address,12,None).unwrap();
+        let duplicate=core.enqueue_release_file("Other/Tool","v1",929,"file.zip",address,12,None).unwrap();
+        assert_eq!(first.id,duplicate.id);
+        assert_eq!(first.project_name,"other/tool");
+        assert!(!first.installable);
+        core.cancel_download(&first.id).unwrap();
+        let retried=core.retry_download(&first.id).unwrap();
+        assert_eq!(retried.status,"queued");
+        assert!(!retried.installable);
+    }
+    #[test]fn untracked_release_attachment_deduplicates_and_retries_without_subscription(){
+        let (_dir,core,_project)=paused_queue();
+        let url="https://github.com/untracked/tool/releases/download/v1/Tool.exe";
+        let record=core.enqueue_release_file("untracked/tool","v1",108,"Tool.exe",url,12,None).unwrap();
+        assert_eq!(record.project_id,RELEASE_FILE_SOURCE);
+        assert!(!record.installable);
+        assert_eq!(core.enqueue_release_file("UNTRACKED/tool","v1",108,"Tool.exe",url,12,None).unwrap().id,record.id);
+        assert_eq!(core.store.downloads().unwrap().len(),1);
+        core.cancel_download(&record.id).unwrap();
+        let retried=core.retry_download(&record.id).unwrap();
+        assert_eq!(retried.status,"queued");
+        assert!(!retried.installable);
+        assert_eq!(retried.tag,"v1");
     }
     #[test]fn external_download_prevents_duplicate_internal_download(){
         let (_dir,core,project)=paused_queue();let queued=core.queue_download(&project.id,7).unwrap();

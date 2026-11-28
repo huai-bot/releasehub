@@ -1,6 +1,6 @@
 <script lang="ts">
   import {
-    House, Library, CircleArrowUp, Download, Bot, Settings2, Plus, Search,
+    Gamepad2, House, Library, CircleArrowUp, Download, Bot, Settings2, Plus, Search,
     ArrowUpRight, ArrowRight, ChevronRight, ChevronDown, Check, X, LoaderCircle,
     RefreshCw, CircleHelp, ExternalLink, FolderOpen, Sun, Moon, Monitor,
     ShieldCheck, Shield, CircleAlert, CircleCheck, Info, FileDown, FileUp, Copy,
@@ -11,7 +11,7 @@
   } from '@lucide/svelte';
 
   const icons = {
-    home: House, library: Library, updates: CircleArrowUp, download: Download,
+    home: House, library: Library, updates: CircleArrowUp, download: Download, gamepad: Gamepad2,
     agent: Bot, settings: Settings2, plus: Plus, search: Search, arrowUpRight: ArrowUpRight,
     arrowRight: ArrowRight, chevronRight: ChevronRight, chevronDown: ChevronDown,
     check: Check, close: X, loader: LoaderCircle, refresh: RefreshCw, github: Code2,

@@ -6,6 +6,7 @@ export const workspacePages = [
   { id: 'updates', label: '可更新', icon: 'updates' },
   { id: 'downloads', label: '下载', icon: 'download' },
   { id: 'github', label: 'GitHub', icon: 'github' },
+  { id: 'trainers', label: '风灵月影', icon: 'gamepad' },
   { id: 'agent', label: 'AI 连接', icon: 'agent' },
 ] as const;
 export const defaultNavigationOrder: WorkspacePage[] = workspacePages.map((page) => page.id);

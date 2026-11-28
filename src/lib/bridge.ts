@@ -11,6 +11,18 @@ import type {
 export interface Actions {
   snapshot: { payload: Record<string, never>; result: Snapshot };
   add_project: { payload: { input: AddProjectInput }; result: Project };
+  add_local_executables: { payload: { paths: string[] }; result: { added: Project[]; skipped: { path: string; reason: string }[] } };
+  pick_local_executables: { payload: Record<string, never>; result: string[] };
+  set_project_repository: { payload: { id: string; repository: string | null }; result: Project };
+  github_release_assets: { payload: { repository: string }; result: { tag: string; url: string; assets: { id: number; name: string; size: number; url: string }[] } | null };
+  download_release_link: { payload: { url: string }; result: DownloadRecord };
+  trainer_open: { payload: { id: string; bounds: ReaderBounds }; result: null };
+  trainer_resize: { payload: { id: string; bounds: ReaderBounds }; result: null };
+  trainer_close: { payload: { id: string }; result: null };
+  trainer_external: { payload: { id: string }; result: null };
+  trainer_navigate: { payload: { id: string; location: 'home' | 'catalog' | 'search' | 'back'; query?: string }; result: null };
+  trainer_save: { payload: { id: string; url: string }; result: { path: string; fileName: string } | null };
+  trainer_reveal: { payload: { id: string }; result: null };
   update_project: { payload: { id: string; changes: ProjectChanges }; result: Project };
   remove_project: { payload: { id: string }; result: null };
   check_updates: { payload: { projectIds?: string[]; allowAutoDownload?: boolean }; result: CheckResult };

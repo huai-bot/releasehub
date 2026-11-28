@@ -37,20 +37,20 @@
     {#if presentation.title}
       <h2>{presentation.title}</h2>
     {/if}
-    <button class="text-button muted" onclick={() => onopen(project.url)}>{project.owner}/{project.repo}<Icon name="external" size={13} /></button>
+    {#if project.repo}<button class="text-button muted" onclick={() => onopen(project.url)}>{project.owner}/{project.repo}<Icon name="external" size={13} /></button>{/if}
     {#if presentation.description}
       <p>{presentation.description}</p>
     {/if}
     {#if !project.updatesMuted && !(readTag && readTag === project.release?.tag && hasProjectUpdate(project) && project.status === 'updateAvailable')}
       <span class={`status-badge ${status.tone}`}><span class="tiny-dot"></span>{status.label}</span>
     {/if}
-    {#if onnote}
+    {#if onnote && project.repo}
       <button class="text-button secondary small" disabled={busy} onclick={() => onnote?.(project)}>
         <Icon name="edit" size={13} />{presentation.annotated ? '编辑备注' : '设置备注'}
       </button>
     {/if}
   </div>
-  <div class="version-summary"><div><span>{files ? '管理方式' : '已记录版本'}</span><strong>{files ? '仅保存文件' : project.installedVersion ?? '尚未记录'}</strong>{#if !files && project.installedSource}<small>{project.installedSource === 'managed' ? '由追新管理' : project.installedSource === 'installer' ? '已自动验证' : '手动确认'}</small>{/if}</div><Icon name="arrowRight" size={18} /><div><span>最新发行 <em class:preview-label={project.release?.prerelease}>{project.release?.prerelease ? '预览' : '正式'}</em></span><strong class="accent-text">{project.release?.tag ?? '暂无信息'}</strong>{#if project.release?.publishedAt}<small>{formatDate(project.release.publishedAt)}</small>{/if}</div></div>
+  <div class="version-summary"><div><span>{files ? '管理方式' : '已记录版本'}</span><strong>{files ? '仅保存文件' : project.installedVersion ?? '尚未记录'}</strong>{#if !files && project.installedSource}<small>{project.installedSource === 'managed' ? '由追新管理' : project.installedSource === 'installer' ? '已自动验证' : project.installedSource === 'executable' ? '从主程序读取' : '手动确认'}</small>{/if}</div>{#if project.repo}<Icon name="arrowRight" size={18} /><div><span>最新发行 <em class:preview-label={project.release?.prerelease}>{project.release?.prerelease ? '预览' : '正式'}</em></span><strong class="accent-text">{project.release?.tag ?? '暂无信息'}</strong>{#if project.release?.publishedAt}<small>{formatDate(project.release.publishedAt)}</small>{/if}</div>{/if}</div>
   {#if installation}
     <div class="installation-box">
       <p role="status">{installationLabel(installation)}</p>
@@ -61,11 +61,11 @@
       </details>
     </div>
   {/if}
-  <div class="detail-primary-actions">{#if installation && canVerifyInstallation(installation) && onVerify}<button class="button primary" disabled={busy} onclick={() => onVerify?.(project.id)}><Icon name="refresh" size={16} />立即检测</button>{:else}<button class="button primary" disabled={busy || !selectedAsset} onclick={() => ondownload(project)}><Icon name="download" size={16} />下载已选文件</button>{/if}{#if !project.updatesMuted && (!installation || !canVerifyInstallation(installation) || !onVerify)}<button class="button secondary" disabled={busy} aria-label={`检查 ${presentation.label} 更新`} onclick={() => oncheck([project.id])}><Icon name="refresh" size={16} /></button>{/if}</div>
+  {#if project.repo}<div class="detail-primary-actions">{#if installation && canVerifyInstallation(installation) && onVerify}<button class="button primary" disabled={busy} onclick={() => onVerify?.(project.id)}><Icon name="refresh" size={16} />立即检测</button>{:else}<button class="button primary" disabled={busy || !selectedAsset} onclick={() => ondownload(project)}><Icon name="download" size={16} />下载已选文件</button>{/if}{#if !project.updatesMuted && (!installation || !canVerifyInstallation(installation) || !onVerify)}<button class="button secondary" disabled={busy} aria-label={`检查 ${presentation.label} 更新`} onclick={() => oncheck([project.id])}><Icon name="refresh" size={16} /></button>{/if}</div>{/if}
   {#if !files}<div class="managed-entry"><button class="button secondary small" disabled={busy} onclick={() => onrun(project)}><Icon name="play" size={15} />{project.executablePath ? '打开软件' : '选择启动程序'}</button><button class="text-button" disabled={busy} onclick={() => onmark(project)}>修改本机版本</button></div>{/if}
   {#if project.error}<div class="detail-error" role="alert"><Icon name="alert" size={16} /><span>{project.error}</span></div>{/if}
   {#if project.release && !selectedAsset}<button class="asset-needed" onclick={() => tab = 'assets'}><Icon name="info" size={16} /><span>选择发行文件</span><Icon name="chevronRight" size={14} /></button>{/if}
-  <div class="detail-tabs" role="tablist" aria-label="详情内容"><button role="tab" aria-selected={tab === 'notes'} class:active={tab === 'notes'} onclick={() => tab = 'notes'}>更新说明</button><button role="tab" aria-selected={tab === 'assets'} class:active={tab === 'assets'} onclick={() => tab = 'assets'}>发行文件 <span>{project.release?.assets.length ?? 0}</span></button></div>
+  {#if project.repo}<div class="detail-tabs" role="tablist" aria-label="详情内容"><button role="tab" aria-selected={tab === 'notes'} class:active={tab === 'notes'} onclick={() => tab = 'notes'}>更新说明</button><button role="tab" aria-selected={tab === 'assets'} class:active={tab === 'assets'} onclick={() => tab = 'assets'}>发行文件 <span>{project.release?.assets.length ?? 0}</span></button></div>
   <div class="detail-content">
     {#if tab === 'notes'}
       {#if project.release}<div class="release-title"><span>{project.release.name || project.release.tag}</span><button class="icon-button" title="在 GitHub 阅读完整说明" aria-label="在 GitHub 阅读完整说明" onclick={() => onopen(project.release!.url)}><Icon name="external" size={15} /></button></div><ReleaseNotes body={project.release.body} repositoryUrl={project.release.url} {onopen} />{:else}<div class="empty-state compact"><Icon name="notes" size={30} /><h3>{project.status === 'noRelease' ? '尚无发行版' : '暂无发行信息'}</h3>{#if !project.updatesMuted}<button class="button secondary small" disabled={busy} onclick={() => oncheck([project.id])}>检查更新</button>{/if}</div>{/if}
@@ -84,10 +84,12 @@
       </div>
     {/if}
   </div>
+  {:else}<p class="local-note">{project.repositoryMatch === 'pending' ? '正在后台识别 GitHub 仓库，你可以继续使用软件。' : '仅在本机管理。要检查更新，可在项目设置中填写 GitHub 仓库。'}</p>{/if}
   <div class="detail-footer"><button class="button secondary" onclick={() => onSettings(project)}><Icon name="settings" size={14} />项目设置</button></div>
 </aside>
 
 <style>
+  .local-note { margin: 12px 23px; color: var(--muted); line-height: 1.7; }
   .detail-topline { justify-content: flex-end; }
   .managed-entry { display: flex; flex-direction: column; gap: 6px; margin: 0 23px 14px; }
   .detail-footer { padding: 14px 23px; border-top: 1px solid var(--border); text-align: center; }

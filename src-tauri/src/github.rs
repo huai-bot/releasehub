@@ -1263,7 +1263,7 @@ fn repository_read_endpoint(
     let repository = RepositoryName::parse(&format!("{owner}/{repo}"))?;
     let allowed = match tail {
         [] | ["releases"] | ["releases", "latest"] => true,
-        ["commits", reference] => valid_git_reference(reference),
+        ["commits", reference] | ["releases", "tags", reference] => valid_git_reference(reference),
         ["compare", comparison] => comparison.split_once("...").is_some_and(|(base, head)| {
             valid_compare_reference(base) && valid_compare_reference(head)
         }),

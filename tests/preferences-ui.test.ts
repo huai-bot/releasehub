@@ -53,7 +53,8 @@ describe('startup and desktop navigation', () => {
     files.fileStatus = 'updateAvailable';
     const versions = snapshot.projects.filter(hasProjectUpdate).map(project => ({ projectId: project.id, tag: project.release!.tag }));
     mocks.dispatch.mockImplementation(async (action: string, payload) => {
-      if (action === 'snapshot') return snapshot;
+      // Native IPC returns a fresh value, never a mutable reference into the database fixture.
+      if (action === 'snapshot') return structuredClone(snapshot);
       if (action === 'mark_updates_read') { snapshot.readUpdateTags = Object.fromEntries(payload.versions.map((row: {projectId:string;tag:string}) => [row.projectId,row.tag])); return payload.versions.length; }
       if (action === 'update_project') { Object.assign(software, payload.changes); return software; }
       if (action === 'check_updates') return { checked: 1, updates: 1, unreadUpdates: 0, errors: 0 };
@@ -187,19 +188,19 @@ describe('startup and desktop navigation', () => {
   });
 
   it('keeps every workspace page once and persists keyboard and drag ordering', async () => {
-    expect(normalizeNavigation(['github', 'github', 'unknown'])).toEqual(['github', 'home', 'library', 'updates', 'downloads', 'agent']);
+    expect(normalizeNavigation(['github', 'github', 'unknown'])).toEqual(['github', 'home', 'library', 'updates', 'downloads', 'trainers', 'agent']);
     expect(moveNavigation(defaultNavigationOrder, 'github', 'home')[0]).toBe('github');
     const onreorder = vi.fn(async () => true);
     const instance = mount(Sidebar, { target, props: { snapshot: createPreviewSnapshot(), page: 'home', preview: false, onnavigate: vi.fn(), onadd: vi.fn(), ondata: vi.fn(), onreorder } });
     cleanup = async () => { await unmount(instance); }; await settle();
     const nav = (label: string) => [...target.querySelectorAll<HTMLButtonElement>('nav button')].find(item => item.querySelector('span')?.textContent === label)!;
     nav('GitHub').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true })); await settle();
-    expect(onreorder).toHaveBeenLastCalledWith(['home', 'library', 'updates', 'github', 'downloads', 'agent']);
+    expect(onreorder).toHaveBeenLastCalledWith(['home', 'library', 'updates', 'github', 'downloads', 'trainers', 'agent']);
     const start = new Event('dragstart', { bubbles: true, cancelable: true });
     Object.defineProperty(start, 'dataTransfer', { value: { effectAllowed: '', setData: vi.fn() } });
     nav('GitHub').dispatchEvent(start); await settle();
     nav('首页').dispatchEvent(new Event('drop', { bubbles: true, cancelable: true })); await settle();
-    expect(onreorder).toHaveBeenLastCalledWith(['github', 'home', 'library', 'updates', 'downloads', 'agent']);
+    expect(onreorder).toHaveBeenLastCalledWith(['github', 'home', 'library', 'updates', 'downloads', 'trainers', 'agent']);
     expect(target.querySelector('[aria-live]')?.textContent).toContain('已保存');
   });
 

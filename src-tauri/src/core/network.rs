@@ -140,7 +140,7 @@ impl Github {
     pub async fn api(&self, owner: &str, repo: &str, tail: &[&str], page: Option<u32>) -> Result<Value, String> {
         self.api_optional(owner,repo,tail,page).await?.ok_or_else(||"公开项目或指定版本不存在".into())
     }
-    async fn api_optional(&self, owner: &str, repo: &str, tail: &[&str], page: Option<u32>) -> Result<Option<Value>, String> {
+    pub(super) async fn api_optional(&self, owner: &str, repo: &str, tail: &[&str], page: Option<u32>) -> Result<Option<Value>, String> {
         let service = self.service.read().map_err(|_| "GitHub 连接暂时不可用".to_string())?.clone();
         if let Some(service) = service {
             let _slot = self.request_slots.acquire().await.map_err(|_| "网络队列已关闭".to_string())?;

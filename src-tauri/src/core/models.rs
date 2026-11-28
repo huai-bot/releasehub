@@ -25,6 +25,8 @@ pub struct Release {
 pub struct Project {
     pub id: String, pub owner: String, pub repo: String, pub name: String,
     pub description: String, pub url: String, pub avatar_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_match: Option<String>,
     pub channel: String, pub preference: String, pub asset_pattern: Option<String>,
     #[serde(default = "default_management_mode")]
     pub management_mode: String,
@@ -157,7 +159,20 @@ fn note_text(value: &str, max: usize, label: &str) -> Result<String, String> {
     }
     Ok(value.to_owned())
 }
-pub const NAVIGATION_PAGES: [&str; 6] = ["home", "library", "updates", "downloads", "github", "agent"];
+pub const NAVIGATION_PAGES: [&str; 7] = ["home", "library", "updates", "downloads", "github", "trainers", "agent"];
+fn default_library_sort() -> String { "added".into() }
+fn read_navigation_order<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Vec<String>, D::Error> {
+    let mut order = Vec::<String>::deserialize(de)?;
+    upgrade_navigation_order(&mut order);
+    Ok(order)
+}
+pub(super) fn upgrade_navigation_order(order: &mut Vec<String>) {
+    // Upgrade only a valid v0.6 list. Invalid/duplicate page IDs still fail validation.
+    if order.len() == 6 && NAVIGATION_PAGES.iter().filter(|&&p| p != "trainers").all(|p| order.iter().any(|id| id == p)) {
+        let pos = order.iter().position(|id| id == "github").unwrap() + 1;
+        order.insert(pos, "trainers".into());
+    }
+}
 pub fn default_management_mode() -> String { "software".into() }
 pub fn default_true() -> bool { true }
 pub fn default_download_connections() -> usize { 4 }
@@ -206,6 +221,8 @@ pub struct Settings {
     pub blur: bool,
     #[serde(default = "default_library_layout")]
     pub library_layout: String,
+    #[serde(default = "default_library_sort")]
+    pub library_sort: String,
     pub auto_download: bool, pub max_concurrent_downloads: usize, pub close_to_tray: bool,
     #[serde(default = "default_download_connections")]
     pub download_connections: usize,
@@ -218,14 +235,14 @@ pub struct Settings {
     pub startup_page: String,
     #[serde(default = "default_startup_github_tab")]
     pub startup_github_tab: String,
-    #[serde(default = "default_navigation_order")]
+    #[serde(default = "default_navigation_order", deserialize_with = "read_navigation_order")]
     pub navigation_order: Vec<String>,
     #[serde(default)]
     pub proxy: crate::proxy::ProxySettings,
 }
 impl Default for Settings {
     fn default() -> Self {
-        Self { theme: "system".into(), color_scheme: default_color_scheme(), material: default_material(), blur: default_blur(), library_layout: default_library_layout(), check_interval_minutes: 60, notifications: true,
+        Self { theme: "system".into(), color_scheme: default_color_scheme(), material: default_material(), blur: default_blur(), library_layout: default_library_layout(), library_sort: default_library_sort(), check_interval_minutes: 60, notifications: true,
             auto_download: false, max_concurrent_downloads: 2, close_to_tray: true,
             download_connections: default_download_connections(), use_external_downloader: false, external_downloader: ExternalDownloader::default(),
             agent_enabled: false, agent_port: 47831, startup_page: default_startup_page(),
@@ -239,6 +256,7 @@ impl Settings {
         if !["blue", "teal", "violet", "amber"].contains(&self.color_scheme.as_str()) { return Err("配色设置无效".into()); }
         if !["acrylic", "mica"].contains(&self.material.as_str()) { return Err("材质设置无效".into()); }
         if !["two", "three", "list"].contains(&self.library_layout.as_str()) { return Err("资源库布局无效".into()); }
+        if !["added", "name", "nameDesc", "released", "updated"].contains(&self.library_sort.as_str()) { return Err("资源排序方式无效".into()); }
         if self.check_interval_minutes != 0 && !(5..=10080).contains(&self.check_interval_minutes) { return Err("检查间隔须为0（仅手动检查）或5至10080分钟".into()); }
         if !(1..=4).contains(&self.max_concurrent_downloads) { return Err("同时下载数量须为1至4".into()); }
         if !(1..=8).contains(&self.download_connections) { return Err("单文件连接数须为1至8".into()); }
@@ -248,7 +266,7 @@ impl Settings {
         if !["explore", "owned", "starred", "activity", "feed"].contains(&self.startup_github_tab.as_str()) { return Err("GitHub 启动页面无效".into()); }
         if self.navigation_order.len() != NAVIGATION_PAGES.len()
             || NAVIGATION_PAGES.iter().any(|page| self.navigation_order.iter().filter(|item| item.as_str() == *page).count() != 1) {
-            return Err("导航顺序须包含全部六个页面，不能重复".into());
+            return Err("导航顺序须包含每个工作区页面，不能重复".into());
         }
         self.proxy.validate()?;
         Ok(())
@@ -333,7 +351,7 @@ pub fn validate_choices(channel: &str, preference: &str) -> Result<(), String> {
 #[cfg(test)]
 pub fn test_project(owner:&str,repo:&str)->Project {
     Project{id:uuid::Uuid::new_v4().to_string(),owner:owner.into(),repo:repo.into(),name:repo.into(),description:String::new(),
-        url:format!("https://github.com/{owner}/{repo}"),avatar_url:None,channel:"stable".into(),preference:"auto".into(),
+        url:format!("https://github.com/{owner}/{repo}"),avatar_url:None,repository_match:None,channel:"stable".into(),preference:"auto".into(),
         management_mode:default_management_mode(),file_status:None,asset_pattern:None,installed_version:None,installed_path:None,executable_path:None,
         backup_enabled:false,updates_muted:false,
         installed_source:None,release:None,
@@ -444,6 +462,15 @@ mod tests {
         for connections in [0,9,usize::MAX] { let mut invalid=settings.clone(); invalid.download_connections=connections; assert!(invalid.validate().is_err()); }
         assert_eq!(settings.navigation_order, default_navigation_order()); assert_eq!(settings.proxy.mode, "system");
         settings.validate().unwrap();
+    }
+    #[test] fn old_custom_navigation_preserves_order_and_defaults_sort() {
+        let mut value = serde_json::to_value(Settings::default()).unwrap();
+        value["navigationOrder"] = serde_json::json!(["agent","github","library","updates","downloads","home"]);
+        value.as_object_mut().unwrap().remove("librarySort");
+        let mut s: Settings = serde_json::from_value(value).unwrap();
+        assert_eq!(s.navigation_order, ["agent","github","trainers","library","updates","downloads","home"]);
+        assert_eq!(s.library_sort, "added"); s.validate().unwrap();
+        s.library_sort = "invalid".into(); assert!(s.validate().is_err());
     }
     #[test] fn startup_navigation_and_note_limits_are_validated() {
         let mut settings = Settings::default(); settings.startup_page = "github".into(); settings.startup_github_tab = "feed".into();

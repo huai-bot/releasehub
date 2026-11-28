@@ -17,6 +17,8 @@ describe('GitHub input and host-bound links', () => {
     expect(githubLinkTarget(file.url)).toMatchObject({ kind:'asset', releaseUrl:file.url.replace(/\/download\/(.+)\/[^/]+$/, '/tag/$1') });
     expect(trackedAsset(projects,file.url+'?download=1')?.asset.id).toBe(file.id);
     expect(trackedAsset(projects,file.url+'.other')).toBeNull();
+    expect(githubLinkTarget(`${origin}/demo/tool/releases/latest/download/readme.txt`)?.kind).toBe('asset');
+    expect(githubLinkTarget(`${origin}/demo/tool/releases/download/nightly/2026-01/readme.txt`)).toMatchObject({ kind:'asset', releaseUrl:`${origin}/demo/tool/releases/tag/nightly/2026-01` });
   });
   it('accepts a repository name and normalizes supported project links', () => {
     expect(parseRepository(' Lake1059/FFmpegFreeUI ')).toBe('Lake1059/FFmpegFreeUI');

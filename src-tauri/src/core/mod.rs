@@ -10,6 +10,8 @@ mod installation_checks;
 mod windows_probe;
 mod update;
 mod library;
+mod local_apps;
+pub(crate) mod release_links;
 mod tasks;
 
 use models::*;
@@ -31,6 +33,7 @@ pub struct Core {
     pub(crate) download_queue: Mutex<()>,
     pub(crate) installing: Mutex<std::collections::HashSet<String>>,
     pub(crate) checks: tokio::sync::Mutex<()>,
+    local_repository_worker: tokio::sync::Mutex<()>,
     installation_verification: tokio::sync::Mutex<()>,
     pub(crate) external_requests: tokio::sync::Mutex<()>,
     // Keep this last so the database and other fields close before the directory lock is released.
@@ -71,7 +74,7 @@ impl Core {
         let core=Arc::new(Self { store, data_dir, portable, events,
             github: network::Github::new(proxy.clone())?, proxy, active_downloads: Mutex::new(HashMap::new()),
             download_queue: Mutex::new(()), installing: Mutex::new(std::collections::HashSet::new()),
-            checks: tokio::sync::Mutex::new(()), installation_verification: tokio::sync::Mutex::new(()),
+            local_repository_worker: tokio::sync::Mutex::new(()), checks: tokio::sync::Mutex::new(()), installation_verification: tokio::sync::Mutex::new(()),
             external_requests: tokio::sync::Mutex::new(()), _data_lock: data_lock });
         core.repair_backup_paths()?;
         core.recover_installs()?;
@@ -93,14 +96,35 @@ impl Core {
         match action {
             "get_settings" => output(self.store.settings()?),
             "snapshot" => {
-                let downloads=self.store.downloads()?;let mut projects=self.store.projects()?;
-                for p in &mut projects { selection::update_file_status(p,&downloads,&self.data_dir); }
-                Ok(json!({"projects": projects, "readUpdateTags": self.store.current_read_tags()?, "downloads": downloads, "installations": self.store.installations(None)?,
-                    "buildTasks": self.store.tasks()?, "repositoryNotes": self.store.repository_notes()?, "settings": self.store.settings()?,
-                    "runtime": {"appVersion": env!("CARGO_PKG_VERSION"), "dataDir": self.data_dir.to_string_lossy(),
-                        "portable": self.portable, "githubTokenConfigured": self.github.token_configured(),
-                        "agent": {"enabled": false, "address": null, "tokenConfigured": false, "error": null}}}))
+                let core = self.clone();
+                tokio::task::spawn_blocking(move || {
+                    let downloads = core.store.downloads()?;
+                    let mut projects = core.store.projects()?;
+                    let mut by_project = HashMap::<&str, Vec<&DownloadRecord>>::new();
+                    for d in &downloads {
+                        if matches!(d.status.as_str(), "completed" | "installed") { by_project.entry(&d.project_id).or_default().push(d); }
+                    }
+                    for p in &mut projects {
+                        if p.management_mode == "files" {
+                            let records = by_project.get(p.id.as_str()).map(Vec::as_slice).unwrap_or_default();
+                            selection::update_indexed_file_status(p, records, &core.data_dir);
+                        } else { p.file_status = None; }
+                    }
+                    Ok(json!({"projects": projects, "readUpdateTags": core.store.current_read_tags()?, "downloads": downloads, "installations": core.store.installations(None)?,
+                        "buildTasks": core.store.tasks()?, "repositoryNotes": core.store.repository_notes()?, "settings": core.store.settings()?,
+                        "runtime": {"appVersion": env!("CARGO_PKG_VERSION"), "dataDir": core.data_dir.to_string_lossy(),
+                            "portable": core.portable, "githubTokenConfigured": core.github.token_configured(),
+                            "agent": {"enabled": false, "address": null, "tokenConfigured": false, "error": null}}}))
+                }).await.map_err(|_| "读取资源库的后台任务未能完成。")?
             },
+            "add_local_executables" => output(self.add_local_executables(decode(payload["paths"].clone())?).await?),
+            "set_project_repository" => {
+                let id = text(&payload, "id", 128)?;
+                let repository: Option<String> = decode(payload.get("repository").cloned().ok_or("缺少仓库链接")?)?;
+                output(self.set_project_repository(&id, repository.as_deref()).await?)
+            }
+            "github_release_assets" => self.public_release_assets(&text(&payload, "repository", 512)?).await,
+            "download_release_link" => output(self.queue_release_link(&text(&payload, "url", 4096)?).await?),
             "add_project" => {
                 let input: AddProjectInput = decode(payload.get("input").cloned().ok_or("缺少项目信息")?)?;
                 output(self.add_project(input).await?)
@@ -183,8 +207,11 @@ impl Core {
                 let mut value = output(self.store.settings()?)?;
                 for (k,v) in patch { value.as_object_mut().ok_or("设置内容无效")?.insert(k.clone(),v.clone()); }
                 let settings: Settings = decode(value)?; settings.validate()?;
-                self.proxy.persist_settings(settings.proxy.clone(), || self.store.save_settings(&settings))?;
-                self.pump_downloads(); self.changed(); output(settings)
+                if patch.contains_key("proxy") { self.proxy.persist_settings(settings.proxy.clone(), || self.store.save_settings(&settings))?; }
+                else { self.store.save_settings(&settings)?; }
+                if patch.contains_key("maxConcurrentDownloads") { self.pump_downloads(); }
+                if !patch.keys().all(|key| matches!(key.as_str(), "librarySort" | "libraryLayout")) { self.changed(); }
+                output(settings)
             }
             "export_library" => Ok(Value::String(self.export_library()?)),
             "import_library" => self.import_library(&text(&payload, "contents", 1024 * 1024)?),

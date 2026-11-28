@@ -118,6 +118,9 @@ pub fn choose(assets: &[ReleaseAsset]) -> Option<u64> {
 pub fn update_file_status(p:&mut Project,downloads:&[super::models::DownloadRecord],data:&std::path::Path) {
     if p.management_mode!="files" {p.file_status=None;return;}
     let completed:Vec<_>=downloads.iter().filter(|d|d.project_id==p.id&&["completed","installed"].contains(&d.status.as_str())).collect();
+    update_indexed_file_status(p, &completed, data);
+}
+pub fn update_indexed_file_status(p: &mut Project, completed: &[&super::models::DownloadRecord], data: &std::path::Path) {
     let latest:Vec<_>=completed.iter().copied().filter(|d|p.release.as_ref().is_some_and(|r|r.tag==d.tag&&r.assets.iter().any(|a|a.id==d.asset_id))).collect();
     p.file_status=Some(if latest.iter().any(|d|super::downloads::local_file_exists(data,d)){"downloaded"}
         else if !latest.is_empty(){"missing"}

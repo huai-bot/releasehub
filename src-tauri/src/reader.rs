@@ -1,7 +1,10 @@
+pub(crate) mod trainer;
+
+use crate::core::release_links::{credential_free_https, is_release_link};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use tauri::{webview::{Color, NewWindowResponse, PageLoadEvent, WebviewBuilder}, AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Rect, Theme, WebviewUrl};
+use tauri::{webview::{Color, DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewBuilder}, AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Rect, Theme, WebviewUrl};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 use uuid::Uuid;
@@ -23,7 +26,7 @@ impl Bounds {
 }
 
 fn website(url: &Url) -> bool {
-    url.scheme() == "https" && url.host_str() == Some("github.com") && url.port().is_none() && url.username().is_empty() && url.password().is_none()
+    credential_free_https(url, "github.com")
 }
 
 fn readable(url: &Url) -> bool {
@@ -34,7 +37,7 @@ fn readable(url: &Url) -> bool {
 }
 
 fn release_asset(url: &Url) -> bool {
-    website(url) && matches!(url.path().split('/').collect::<Vec<_>>().as_slice(), ["",owner,repo,"releases","download",tag,file] if [owner,repo,tag,file].iter().all(|part| !part.is_empty()))
+    is_release_link(url)
 }
 
 fn label(payload: &Value) -> Result<String,String> {
@@ -88,7 +91,12 @@ pub(crate) fn open(app: &AppHandle, input: Value, profile: PathBuf, mode: &str, 
             } else { send(&popup_app,&popup_label,"blocked",if website(&url) {url.as_str()} else {""}); }
             NewWindowResponse::Deny
         })
-        .on_download(|view,_| { send(view.app_handle(),view.label(),"download",""); false })
+        .on_download(|view,event| {
+            if let DownloadEvent::Requested { url, .. } = event {
+                send(view.app_handle(),view.label(),"download",if release_asset(&url) { url.as_str() } else { "" });
+            }
+            false
+        })
         .on_document_title_changed(|view,title| { send(view.app_handle(),view.label(),"title",&title.chars().take(160).collect::<String>()); })
         .on_page_load(|view,event| { if readable(event.url()) { send(view.app_handle(),view.label(),if event.event()==PageLoadEvent::Finished {"ready"} else {"loading"},event.url().as_str()); } });
     if let Some(proxy) = proxy { builder = builder.proxy_url(proxy); }

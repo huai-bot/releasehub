@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { dispatch, type Actions } from '../lib/bridge';
   import type { GithubRepository, GithubRepositoryDetail, RepositoryNote } from '../lib/types';
-  import { formatDate, safeGithubUrl } from '../lib/ui';
+  import { formatBytes, formatDate, readableError, safeGithubUrl } from '../lib/ui';
   import Icon from './Icon.svelte';
   import ReleaseNotes from './ReleaseNotes.svelte';
   let { name, detail, note, loading, error, connected, preview, pending, subscribed, adding, backLabel = '返回列表', onclose, onretry, onstar, onedit, onnote, onlists, onadd, onopen, onoriginal }: {
@@ -12,6 +13,39 @@
     onadd: (repository: GithubRepository) => void; onopen: (url: string) => void;
   } = $props();
   const repository = $derived(detail?.repository ?? null);
+  type ReleaseListing = NonNullable<Actions['github_release_assets']['result']>;
+  let listingFor = $state('');
+  let listing = $state<ReleaseListing | null>(null);
+  let listingBusy = $state(false);
+  let listingError = $state('');
+  let queueing = $state<number | null>(null);
+  let downloadMessage = $state('');
+  let listingRequest = 0;
+  const showListing = $derived(listingFor === name);
+
+  async function readAssets() {
+    if (!repository || repository.private || preview || (showListing && (listingBusy || queueing !== null))) return;
+    const requested = repository.fullName;
+    const request = ++listingRequest;
+    listingFor = name; listing = null; listingBusy = true; listingError = ''; queueing = null; downloadMessage = '';
+    try {
+      const result = await dispatch('github_release_assets', { repository: requested });
+      if (request === listingRequest) listing = result;
+    } catch (reason) { if (request === listingRequest) listingError = readableError(reason); }
+    finally { if (request === listingRequest) listingBusy = false; }
+  }
+
+  async function queueAsset(asset: ReleaseListing['assets'][number]) {
+    if (!showListing || queueing !== null) return;
+    const request = listingRequest;
+    queueing = asset.id;
+    downloadMessage = '';
+    try {
+      const record = await dispatch('download_release_link', { url: asset.url });
+      if (request === listingRequest) downloadMessage = record.status === 'completed' ? `${record.fileName} 已在下载中心。` : `${record.fileName} 已加入下载队列。`;
+    } catch (reason) { if (request === listingRequest) downloadMessage = readableError(reason); }
+    finally { if (request === listingRequest) queueing = null; }
+  }
 </script>
 
 <aside class="github-detail" aria-label={`${name} 仓库详情`} aria-busy={loading}>
@@ -39,11 +73,29 @@
       </div>
       {#if repository.private || (connected && repository.starred === null)}<p class="field-hint">{repository.private ? '私有仓库暂不加入软件库。' : ''}{#if connected && repository.starred === null} Star 状态未读到，请刷新详情后再操作。{/if}</p>{/if}
       <div class="repo-pages">
-        <button class="text-button" onclick={() => onopen(`${repository.url}/releases`)}>发行版</button>
+        {#if !repository.private && !preview}<button class="text-button" disabled={showListing && (listingBusy || queueing !== null)} onclick={() => void readAssets()}><Icon name={showListing && listingBusy ? 'loader' : 'package'} class={showListing && listingBusy ? 'spinning' : ''} size={15} />{showListing ? '刷新最新附件' : '查看最新附件'}</button>{/if}
+        <button class="text-button" onclick={() => onopen(`${repository.url}/releases`)}>发行版原文</button>
         {#if repository.hasIssues}<button class="text-button" onclick={() => onopen(`${repository.url}/issues`)}>问题</button>{/if}
         {#if repository.hasDiscussions}<button class="text-button" onclick={() => onopen(`${repository.url}/discussions`)}>讨论</button>{/if}
         <button class="text-button" onclick={() => (onoriginal ?? onopen)(repository.url)}>查看原页<Icon name="chevronRight" size={14} /></button>
       </div>
+      {#if showListing && !repository.private}
+        <section class="release-assets" aria-label="最新发行附件" aria-busy={listingBusy}>
+          {#if listingBusy}<p role="status">正在读取最新公开发行版…</p>
+          {:else if listingError}<p class="field-error" role="alert">无法读取附件：{listingError}。可刷新重试，或打开发行版原文。</p>
+          {:else if listing}
+            <div class="release-assets-heading"><h3>最新附件 · {listing.tag}</h3><button class="text-button" onclick={() => listing && onopen(listing.url)}>查看此发行版</button></div>
+            {#if listing.assets.length}
+              <ul>
+                {#each listing.assets as asset (asset.id)}
+                  <li><div><strong>{asset.name}</strong><span>{formatBytes(asset.size)}</span></div><button class="button secondary" aria-label={`下载 ${asset.name}`} disabled={queueing !== null} onclick={() => void queueAsset(asset)}><Icon name={queueing === asset.id ? 'loader' : 'download'} class={queueing === asset.id ? 'spinning' : ''} size={15} />{queueing === asset.id ? '正在核对' : '下载'}</button></li>
+                {/each}
+              </ul>
+            {:else}<p role="status">此发行版没有可下载的附件。</p>{/if}
+          {:else}<p role="status">未找到最新公开发行版。可打开原文查看其他版本。</p>{/if}
+          {#if downloadMessage}<p role="status">{downloadMessage}</p>{/if}
+        </section>
+      {/if}
       <div class="readme-heading"><Icon name="notes" size={16} /><h3>README</h3></div>
       {#if detail?.readme.trim()}<ReleaseNotes body={detail.readme} repositoryUrl={`${repository.url}/blob/${encodeURIComponent(repository.defaultBranch)}/README.md`} {onopen} />{:else}<p class="empty-readme">暂无 README</p>{/if}
     </div>
@@ -70,6 +122,16 @@
   .repo-topics span { padding: 2px 9px; border-radius: 10px; background: var(--surface-soft); border: 1px solid var(--hairline, var(--border)); color: var(--subtle); font-size: 11px; overflow-wrap: anywhere; }
   .repo-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 17px 0 8px; }
   .repo-pages { display:flex; flex-wrap:wrap; align-items:center; gap:8px 18px; margin-top:10px; }
+  .release-assets { margin-top:14px; padding:12px 0; border-block:1px solid var(--hairline, var(--border)); font-size:13px; color:var(--subtle); }
+  .release-assets-heading { display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:4px 12px; }
+  .release-assets-heading h3 { color:var(--heading); font-size:14px; font-weight:650; overflow-wrap:anywhere; }
+  .release-assets p { overflow-wrap:anywhere; }
+  .release-assets ul { margin:6px 0 0; padding:0; list-style:none; }
+  .release-assets li { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0; }
+  .release-assets li + li { border-top:1px solid var(--hairline, var(--border)); }
+  .release-assets li > div { min-width:0; overflow-wrap:anywhere; }
+  .release-assets li strong { display:block; color:var(--text); font-weight:600; }
+  .release-assets li button { flex:none; }
   .readme-heading { display: flex; align-items: center; gap: 7px; margin: 24px 0 13px; padding-bottom: 10px; border-bottom: 1px solid var(--border); color: var(--muted); }
   .readme-heading h3 { font-size: 12px; font-weight: 600; }
   .empty-readme { color: var(--muted); font-size: 12px; }

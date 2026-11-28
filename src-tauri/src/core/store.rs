@@ -75,6 +75,31 @@ fn migrate(db:&mut Connection)->Result<(),String> {
 }
 pub struct Store { db: Mutex<Connection> }
 fn storage_error(_: impl std::fmt::Display) -> String { "本地数据读写失败，请检查数据目录权限和空间".into() }
+
+fn read_project(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<Option<Project>, String> {
+    let json: Option<String> = tx.query_row("SELECT json FROM projects WHERE id=?1", [id], |row| row.get(0)).optional().map_err(storage_error)?;
+    json.map(|json| serde_json::from_str(&json).map_err(storage_error)).transpose()
+}
+
+fn save_project(tx: &rusqlite::Transaction<'_>, p: &Project) -> Result<(), String> {
+    tx.execute("UPDATE projects SET json=?1 WHERE id=?2", params![serde_json::to_string(p).map_err(storage_error)?, p.id]).map_err(storage_error)?;
+    Ok(())
+}
+
+fn detach_repository_downloads(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<Vec<String>, String> {
+    let download_ids = {
+        let mut query = tx.prepare("SELECT id FROM downloads WHERE json_extract(json,'$.projectId')=?1").map_err(storage_error)?;
+        let result = query.query_map([id], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<String>, _>>().map_err(storage_error)?;
+        result
+    };
+    // Completed files are retained as history, but no previous asset can be retried, imported or installed for the new repository.
+    tx.execute("UPDATE downloads SET json=json_set(json,'$.projectId','','$.installable',json('false'),'$.updatedAt',?2,
+        '$.status',CASE WHEN json_extract(json,'$.status') IN ('queued','downloading','external') THEN 'cancelled' ELSE json_extract(json,'$.status') END,
+        '$.error',CASE WHEN json_extract(json,'$.status') IN ('queued','downloading','external') THEN '仓库已更改，旧下载已停止' ELSE json_extract(json,'$.error') END)
+        WHERE json_extract(json,'$.projectId')=?1", params![id, now()]).map_err(storage_error)?;
+    Ok(download_ids)
+}
+
 impl Store {
     pub fn new(path: &Path) -> Result<Self, String> {
         let mut db = Connection::open(path).map_err(storage_error)?;
@@ -95,7 +120,8 @@ impl Store {
         }
         for mut p in store.projects()? {
             if p.status == "checking" {
-                p.status = "notChecked".into(); p.error = None; store.put_project(&p)?;
+                p.status = if super::local_apps::has_repository(&p) { "notChecked" } else { "local" }.into();
+                p.error = None; store.put_project(&p)?;
             }
         }
         Ok(store)
@@ -145,6 +171,94 @@ impl Store {
         tx.commit().map_err(storage_error)?;
         Ok(value)
     }
+    pub(super) fn mutate_project_if<T>(&self, id: &str, f: impl FnOnce(&mut Project) -> Option<T>) -> Result<Option<(Project, T)>, String> {
+        let mut db = self.db.lock().map_err(storage_error)?;
+        let tx = db.transaction().map_err(storage_error)?;
+        let Some(mut p) = read_project(&tx, id)? else { return Ok(None); };
+        let Some(value) = f(&mut p) else { return Ok(None); };
+        save_project(&tx, &p)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(Some((p, value)))
+    }
+
+    pub(super) fn insert_local_project(&self, p: &Project) -> Result<bool, String> {
+        let executable = p.executable_path.as_deref().ok_or("本地程序路径为空")?;
+        let mut db = self.db.lock().map_err(storage_error)?;
+        let tx = db.transaction().map_err(storage_error)?;
+        {
+            let mut query = tx.prepare("SELECT json_extract(json,'$.executablePath') FROM projects WHERE json_type(json,'$.executablePath')='text'").map_err(storage_error)?;
+            let paths = query.query_map([], |r| r.get::<_, String>(0)).map_err(storage_error)?;
+            for path in paths {
+                if super::local_apps::same_executable_path(executable, &path.map_err(storage_error)?) { return Ok(false); }
+            }
+        }
+        tx.execute("INSERT INTO projects(id,json) VALUES(?1,?2)", params![p.id, serde_json::to_string(p).map_err(storage_error)?]).map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(true)
+    }
+
+    // The expected snapshot denotes an automatic match, which may only consume that pending EXE.
+    // A manual decision is final even if a repository lookup has already started in the background.
+    pub(super) fn bind_project_repository(&self, id: &str, expected: Option<&Project>, mut matched: Option<&Project>, version: Option<String>)
+        -> Result<Option<(Project, Vec<String>)>, String>
+    {
+        let mut db = self.db.lock().map_err(storage_error)?;
+        let tx = db.transaction().map_err(storage_error)?;
+        let Some(mut p) = read_project(&tx, id)? else {
+            return if expected.is_some() { Ok(None) } else { Err("项目已删除".into()) };
+        };
+        if let Some(old) = expected {
+            if !super::local_apps::same_pending_executable(&p, old) { return Ok(None); }
+            if p.installed_version.is_none() && p.installed_source.is_none() {
+                p.installed_version = version;
+                if p.installed_version.is_some() { p.installed_source = Some("executable".into()); }
+            }
+        }
+        if let Some(repo) = matched {
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id<>?1
+                AND json_extract(json,'$.owner')=?2 COLLATE NOCASE AND json_extract(json,'$.repo')=?3 COLLATE NOCASE)",
+                params![id, repo.owner, repo.repo], |r| r.get(0)).map_err(storage_error)?;
+            if exists {
+                if expected.is_none() { return Err("这个 GitHub 仓库已在软件库中".into()); }
+                matched = None;
+            }
+        }
+        let linked = super::local_apps::has_repository(&p);
+        if matched.is_none() && p.management_mode == "files" { return Err("文件项目必须保留一个 GitHub 仓库".into()); }
+        let changed = match matched {
+            Some(repo) => !super::local_apps::same_repository(&p, repo),
+            None => linked,
+        };
+        let mut detached = Vec::new();
+        if changed {
+            p.release = None; p.selected_asset_id = None; p.checked_at = None;
+            p.source_head_sha = None; p.source_ahead = None; p.error = None;
+            if linked { p.asset_pattern = None; }
+            p.file_status = (p.management_mode == "files" && matched.is_some()).then(|| "notDownloaded".into());
+            tx.execute("DELETE FROM update_reads WHERE project_id=?1", [id]).map_err(storage_error)?;
+            installation_checks_store::invalidate_project(&tx, id)?;
+            detached = detach_repository_downloads(&tx, id)?;
+        }
+        if let Some(repo) = matched {
+            p.owner.clone_from(&repo.owner); p.repo.clone_from(&repo.repo); p.url.clone_from(&repo.url);
+            p.name.clone_from(&repo.name); p.description.clone_from(&repo.description);
+            p.avatar_url.clone_from(&repo.avatar_url); p.default_branch.clone_from(&repo.default_branch);
+            if changed { p.status = "notChecked".into(); }
+        } else {
+            p.owner.clear(); p.repo.clear(); p.url.clear(); p.description.clear(); p.avatar_url = None;
+            p.default_branch.clear(); p.status = "local".into(); p.error = None;
+            if let Some(name) = p.executable_path.as_deref().and_then(|path| super::local_apps::executable_name(Path::new(path))) {
+                p.name = name;
+            }
+        }
+        p.repository_match = Some(match (expected.is_some(), matched.is_some()) {
+            (true, true) => "auto", (true, false) => "unmatched", (false, _) => "manual",
+        }.into());
+        save_project(&tx, &p)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(Some((p, detached)))
+    }
+
     pub fn projects(&self) -> Result<Vec<Project>, String> { self.list("projects") }
     pub fn current_read_tags(&self) -> Result<std::collections::HashMap<String,String>, String> {
         let db=self.db.lock().map_err(storage_error)?;

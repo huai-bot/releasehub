@@ -21,6 +21,22 @@ pub(super) fn launch(_: &std::path::Path) -> Result<Option<InstallerProcess>, La
     Err(LaunchError::new("安装器只能在 Windows 上启动", false))
 }
 
+#[derive(Default)]
+pub(super) struct LocalAppMetadata {
+    pub version: Option<String>,
+    pub repository_urls: Vec<String>,
+    pub product: Option<String>,
+    pub publisher: Option<String>,
+    pub original_filename: Option<String>,
+}
+
+#[cfg(not(windows))]
+pub(super) fn local_executable_path(path: &std::path::Path) -> bool { path.is_absolute() }
+#[cfg(not(windows))]
+pub(super) fn local_app_metadata(_: &std::path::Path) -> LocalAppMetadata { LocalAppMetadata::default() }
+#[cfg(not(windows))]
+pub(super) fn local_app_version(_: &std::path::Path) -> Option<String> { None }
+
 #[cfg(windows)]
 mod native {
     use super::*;
@@ -231,7 +247,7 @@ mod native {
         let value = String::from_utf16(&chars).ok()?.trim().to_owned();
         (!value.is_empty()).then_some(value)
     }
-    fn file_version(path: &Path) -> Option<String> {
+    fn version_resource(path: &Path) -> Option<(Vec<u8>, Vec<u32>)> {
         let filename = wide(path.as_os_str());
         let mut ignored = 0;
         const NEUTRAL: u32 = 2;
@@ -239,10 +255,6 @@ mod native {
         if !(52..=1_048_576).contains(&size) { return None; }
         let mut data = vec![0; size as usize];
         if unsafe { GetFileVersionInfoExW(NEUTRAL, filename.as_ptr(), 0, size, data.as_mut_ptr().cast()) } == 0 { return None; }
-        let (ptr, len) = query(&data, "\\", 1)?;
-        if len < 52 { return None; }
-        let word = |i: usize| unsafe { ptr.add(i * 4).cast::<u32>().read_unaligned() };
-        if word(0) != 0xFEEF04BD { return None; }
         let mut translations = Vec::new();
         if let Some((ptr, bytes)) = query(&data, "\\VarFileInfo\\Translation", 1) {
             for i in (0..bytes / 4).take(64) {
@@ -253,12 +265,19 @@ mod native {
         for translation in [0x040904b0, 0x040904e4, 0x000004b0] {
             if !translations.contains(&translation) { translations.push(translation); }
         }
+        Some((data, translations))
+    }
+    fn version_from_resource(data: &[u8], translations: &[u32], normalize: bool) -> Option<String> {
+        let (ptr, len) = query(data, "\\", 1)?;
+        if len < 52 { return None; }
+        let word = |i: usize| unsafe { ptr.add(i * 4).cast::<u32>().read_unaligned() };
+        if word(0) != 0xFEEF04BD { return None; }
         let flags = word(6) & word(7);
         let mut values = Vec::new();
         for field in ["ProductVersion", "FileVersion"] {
             let mut found = Vec::new();
-            for trans in &translations {
-                if let Some(s) = version_string(&data, *trans, field) {
+            for &trans in translations {
+                if let Some(s) = version_string(data, trans, field) {
                     if !found.contains(&s) { found.push(s); }
                 }
             }
@@ -268,14 +287,90 @@ mod native {
         let mut prereleases = values.iter().filter(|s| s.split('+').next().is_some_and(|v| v.contains('-')));
         if let Some(pre) = prereleases.next() {
             if prereleases.any(|other| other != pre) { return None; }
-            return recognizable_version(pre).then(|| pre.clone());
+            return if normalize { normalize_local_version(pre) } else { recognizable_version(pre).then(|| pre.clone()) };
         }
         if flags & (0x1 | 0x2 | 0x8 | 0x20) != 0 { return None; }
-        if let Some(v) = values.first() { return recognizable_version(v).then(|| v.clone()); }
+        if let Some(v) = values.first() {
+            return if normalize { normalize_local_version(v) } else { recognizable_version(v).then(|| v.clone()) };
+        }
         let (mut ms, mut ls) = (word(4), word(5));
         if ms == 0 && ls == 0 { (ms, ls) = (word(2), word(3)); }
         if ms == 0 && ls == 0 { return None; }
-        Some(format!("{}.{}.{}.{}", ms >> 16, ms & 0xffff, ls >> 16, ls & 0xffff))
+        let fixed = format!("{}.{}.{}.{}", ms >> 16, ms & 0xffff, ls >> 16, ls & 0xffff);
+        if normalize { normalize_local_version(&fixed) } else { Some(fixed) }
+    }
+    fn file_version(path: &Path) -> Option<String> {
+        let (data, translations) = version_resource(path)?;
+        version_from_resource(&data, &translations, false)
+    }
+    fn normalize_local_version(value: &str) -> Option<String> {
+        use crate::core::selection::version;
+        if version(value).is_some() { return Some(value.into()); }
+        // Win32 often supplies 1.2.3.0 when the release is 1.2.3. A nonzero revision is not equivalent.
+        let (numeric, suffix) = value.split_at(value.find(['-', '+']).unwrap_or(value.len()));
+        let (base, revision) = numeric.rsplit_once('.')?;
+        if base.split('.').count() != 3 || revision != "0" { return None; }
+        let normalized = format!("{base}{suffix}");
+        version(&normalized).map(|_| normalized)
+    }
+    #[cfg(test)]
+    #[test]
+    fn local_resource_version_preserves_prereleases_and_only_discards_zero_revision() {
+        assert_eq!(normalize_local_version("1.2.3.0").as_deref(), Some("1.2.3"));
+        assert_eq!(normalize_local_version("1.2.3.0-beta.1").as_deref(), Some("1.2.3-beta.1"));
+        assert_eq!(normalize_local_version("1.2.3.7"), None);
+        assert_eq!(normalize_local_version("nightly"), None);
+    }
+    fn unique_version_field(data: &[u8], translations: &[u32], field: &str) -> Option<String> {
+        let mut fields = translations.iter().filter_map(|&t| version_string(data, t, field));
+        let first = fields.next()?;
+        (!fields.any(|value| !first.eq_ignore_ascii_case(&value))).then_some(first)
+    }
+    pub(in crate::core) fn local_executable_path(path: &Path) -> bool {
+        local_path(path.to_str().unwrap_or_default()).is_some_and(|(_, id)| {
+            // Include removable disks for portable EXEs; exclude mapped network drives.
+            matches!(unsafe { GetDriveTypeW(wide(&id[..3]).as_ptr()) }, 2 | 3)
+        })
+    }
+    pub(in crate::core) fn local_app_version(path: &Path) -> Option<String> {
+        let (data, translations) = version_resource(path)?;
+        version_from_resource(&data, &translations, true)
+    }
+    pub(in crate::core) fn local_app_metadata(path: &Path) -> LocalAppMetadata {
+        let mut result = LocalAppMetadata::default();
+        if let Some((data, translations)) = version_resource(path) {
+            result.version = version_from_resource(&data, &translations, true);
+            result.product = unique_version_field(&data, &translations, "ProductName");
+            result.publisher = unique_version_field(&data, &translations, "CompanyName");
+            result.original_filename = unique_version_field(&data, &translations, "OriginalFilename");
+            for field in ["RepositoryUrl", "RepositoryURL", "ProjectUrl", "SourceUrl", "Homepage", "Website", "Comments"] {
+                for &t in &translations {
+                    if let Some(hint) = version_string(&data, t, field) {
+                        if !result.repository_urls.contains(&hint) { result.repository_urls.push(hint); }
+                    }
+                }
+            }
+        }
+        if let Some((_, identity)) = path.to_str().and_then(local_path) {
+            collect_uninstall_repository_urls(&identity, &mut result.repository_urls);
+        }
+        result
+    }
+    fn collect_uninstall_repository_urls(exe: &str, urls: &mut Vec<String>) {
+        const UNINSTALL: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
+        for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+            for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+                let Ok(uninstall) = RegKey::predef(hive).open_subkey_with_flags(UNINSTALL, KEY_READ | view) else { continue; };
+                for key in uninstall.enum_keys().take(4096).flatten() {
+                    let Ok(entry) = uninstall.open_subkey_with_flags(key, KEY_READ | view) else { continue; };
+                    if display_icon(&field(&entry, "DisplayIcon", 4096)).as_deref() != Some(exe) { continue; }
+                    for key in ["URLInfoAbout", "URLUpdateInfo"] {
+                        let url = field(&entry, key, 2048);
+                        if !url.is_empty() && !urls.contains(&url) { urls.push(url); }
+                    }
+                }
+            }
+        }
     }
     #[cfg(test)]
     #[test]
@@ -314,4 +409,4 @@ mod native {
     }
 }
 #[cfg(windows)]
-pub(super) use native::{boot_id, launch, probe, InstallerProcess};
+pub(super) use native::{boot_id, launch, local_app_metadata, local_app_version, local_executable_path, probe, InstallerProcess};

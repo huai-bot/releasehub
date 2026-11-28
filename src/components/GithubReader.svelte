@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { dispatch, watchReader, type ReaderBounds } from '../lib/bridge';
-  import { readableError, safeGithubUrl, trackedAsset } from '../lib/ui';
-  import type { Project, Theme } from '../lib/types';
+  import { readableError, safeGithubUrl } from '../lib/ui';
+  import type { Theme } from '../lib/types';
   import Icon from './Icon.svelte';
 
-  let { url, theme, preview, projects, ondownload, onclose }: { url: string; theme: Theme; preview: boolean; projects: Project[]; ondownload: (project: Project) => void; onclose: () => void } = $props();
+  let { url, theme, preview, onclose }: { url: string; theme: Theme; preview: boolean; onclose: () => void } = $props();
   let dialog: HTMLDialogElement;
   let viewport: HTMLDivElement;
   let title = $state('GitHub 原文');
@@ -15,7 +15,12 @@
   let externalUrl = $state('');
   const id = crypto.randomUUID();
   let downloadUrl = $state('');
-  const download = $derived(downloadUrl ? trackedAsset(projects, downloadUrl) : null);
+  let queueing = $state(false);
+
+  function attachmentName(address: string): string {
+    try { return decodeURIComponent(new URL(address).pathname.split('/').at(-1) ?? '') || '发行附件'; }
+    catch { return '发行附件'; }
+  }
   let disposed = false;
   let opened = false;
   let opening: Promise<void> = Promise.resolve();
@@ -48,9 +53,18 @@
     } catch (reason) { notice = readableError(reason); closing = false; return false; }
   }
   async function queueAsset() {
-    if (!download) return;
-    const choice = { ...download.project, selectedAssetId: download.asset.id };
-    if (await leave()) ondownload(choice);
+    if (!downloadUrl || queueing) return;
+    const selected = downloadUrl;
+    queueing = true;
+    notice = '正在核对 GitHub 发行附件…';
+    try {
+      const record = await dispatch('download_release_link', { url: selected });
+      if (!disposed && downloadUrl === selected) {
+        downloadUrl = '';
+        notice = record.status === 'completed' ? `${record.fileName} 已在下载中心。` : `${record.fileName} 已加入下载队列，可在下载中心查看。`;
+      }
+    } catch (reason) { if (!disposed && downloadUrl === selected) notice = readableError(reason); }
+    finally { queueing = false; }
   }
   async function external() {
     if (preview) return;
@@ -77,7 +91,10 @@
           if (event.phase === 'loading') { notice = ''; externalUrl = ''; downloadUrl = ''; waitForPage(); }
           if (event.phase === 'ready') { clearTimeout(timeout); loading = false; }
           if (event.phase === 'blocked') { downloadUrl = ''; externalUrl = safeGithubUrl(event.value) || ''; notice = externalUrl ? '此账号操作请在浏览器中继续。' : '此链接不属于 GitHub，可从浏览器中的原页继续。'; }
-          if (event.phase === 'download') { downloadUrl = safeGithubUrl(event.value) || ''; externalUrl = downloadUrl; notice = trackedAsset(projects, downloadUrl)?.asset.name ?? '此文件不在已订阅的发行文件中，可在浏览器中下载。'; }
+          if (event.phase === 'download') {
+            downloadUrl = safeGithubUrl(event.value) || ''; externalUrl = downloadUrl;
+            notice = downloadUrl ? `发行附件：${attachmentName(downloadUrl)}` : '此下载不是可识别的 GitHub 发行附件，请在浏览器中继续。';
+          }
           if (event.phase === 'closed') { opened = false; onclose(); }
         });
       }
@@ -102,7 +119,7 @@
     {#if loading}<span class="reader-light" role="status" aria-label="正在加载"></span>{/if}
     <button class="reader-key" disabled={preview} onclick={() => void external()}><Icon name="external" size={15} />在浏览器打开</button>
   </header>
-  {#if notice}<div class="reader-notice" role="status"><span>{notice}</span>{#if download}<button class="reader-key" onclick={() => void queueAsset()}><Icon name="download" size={14} />在追新下载</button>{/if}</div>{/if}
+  {#if notice}<div class="reader-notice"><span role="status">{notice}</span>{#if downloadUrl}<button class="reader-key" disabled={queueing} onclick={() => void queueAsset()}><Icon name={queueing ? 'loader' : 'download'} class={queueing ? 'spinning' : ''} size={14} />{queueing ? '正在核对' : '在追新下载'}</button>{/if}</div>{/if}
   <div class="reader-body" bind:this={viewport} aria-busy={loading}>
     {#if error}<div class="empty-state"><p role="alert">{error}</p><button class="reader-key" onclick={() => { opening = open(); }}>重试</button></div>
     {:else if preview}<div class="empty-state"><p>桌面版会在这里显示 GitHub 原文。</p></div>{/if}

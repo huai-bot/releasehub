@@ -5,7 +5,8 @@ export type ColorScheme = 'blue' | 'teal' | 'violet' | 'amber';
 export type Material = 'acrylic' | 'mica';
 export type ManagementMode = 'software' | 'files';
 export type FileStatus = 'notDownloaded' | 'downloaded' | 'updateAvailable' | 'missing';
-export type ProjectStatus = 'notChecked' | 'checking' | 'upToDate' | 'updateAvailable' | 'versionUnknown' | 'noRelease' | 'noCompatibleAsset' | 'error';
+export type LibrarySort = 'added' | 'name' | 'nameDesc' | 'released' | 'updated';
+export type ProjectStatus = 'local' | 'notChecked' | 'checking' | 'upToDate' | 'updateAvailable' | 'versionUnknown' | 'noRelease' | 'noCompatibleAsset' | 'error';
 export type AssetKind = 'installer' | 'portable' | 'other';
 
 export interface ReleaseAsset {
@@ -43,6 +44,7 @@ export interface Project {
   id: string;
   owner: string;
   repo: string;
+  repositoryMatch?: string | null;
   name: string;
   description: string;
   url: string;
@@ -53,7 +55,7 @@ export interface Project {
   installedVersion: string | null;
   installedPath: string | null;
   executablePath?: string | null;
-  installedSource: 'manual' | 'managed' | 'installer' | null;
+  installedSource: 'manual' | 'managed' | 'installer' | 'executable' | null;
   release: Release | null;
   selectedAssetId: number | null;
   status: ProjectStatus;
@@ -108,7 +110,7 @@ export interface BuildTask {
 }
 
 export type LibraryLayout = 'two' | 'three' | 'list';
-export type WorkspacePage = 'home' | 'library' | 'updates' | 'downloads' | 'github' | 'agent';
+export type WorkspacePage = 'home' | 'library' | 'updates' | 'downloads' | 'github' | 'trainers' | 'agent';
 export type GithubTab = 'explore' | 'owned' | 'starred' | 'activity' | 'feed';
 export interface ProxySettings {
   mode: 'system' | 'manual' | 'direct';
@@ -145,6 +147,7 @@ export interface Settings {
   material?: Material;
   blur?: boolean;
   libraryLayout?: LibraryLayout;
+  librarySort?: LibrarySort;
   startupPage: WorkspacePage;
   startupGithubTab: GithubTab;
   navigationOrder: WorkspacePage[];
@@ -238,7 +241,7 @@ export interface BackupRecord {
   projectId: string;
   downloadId: string;
   version: string | null;
-  installedSource: 'manual' | 'managed' | 'installer' | null;
+  installedSource: 'manual' | 'managed' | 'installer' | 'executable' | null;
   targetPath: string;
   path: string;
   createdAt: string;

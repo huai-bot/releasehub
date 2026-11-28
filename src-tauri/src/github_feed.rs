@@ -186,7 +186,7 @@ impl GitHubFeedService {
         crate::reader::open(app, input, self.profile(&proxy_fingerprint(&settings))?, &settings.mode, proxy)
     }
 
-    fn website_proxy(&self) -> Result<Url,String> {
+    pub(crate) fn website_proxy(&self) -> Result<Url,String> {
         let mut url = self.proxy.webview_proxy_url()?.ok_or("手动代理地址不存在。")?;
         if url.scheme() == "socks5h" { url.set_scheme("socks5").map_err(|_| "代理格式无效。")?; }
         if !matches!(url.scheme(), "http" | "socks5") { return Err("网页登录的手动代理只支持 HTTP 或 SOCKS5，请选择系统代理或调整地址。".into()); }

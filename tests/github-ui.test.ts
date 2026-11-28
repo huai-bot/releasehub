@@ -63,6 +63,16 @@ afterEach(async () => { await cleanup?.(); target.remove(); vi.useRealTimers(); 
 
 describe('GitHub scoped UI, synthetic accounts only', () => {
   const listsFixture = () => [{ id: 'one', name: '工具', description: null, url: 'https://github.com/stars/fixture/lists/one', itemCount: 1 }, { id: 'two', name: '阅读', description: null, url: 'https://github.com/stars/fixture/lists/two', itemCount: 1 }];
+  it('loads public attachments on demand and downloads the selected file without subscribing', async () => {
+    const url = 'https://github.com/demo/alpha/releases/download/v2/checksums.txt';
+    dispatchMock.mockImplementation(async (action: string) => action === 'github_release_assets' ? { tag: 'v2', url: 'https://github.com/demo/alpha/releases/tag/v2', assets: [{ id: 17, name: 'checksums.txt', size: 64, url }] } : action === 'download_release_link' ? { status: 'queued', fileName: 'checksums.txt' } : base(action));
+    showGithub(); await settle(); await click('查看 demo/alpha 详情');
+    expect(dispatchMock.mock.calls.some(([action]) => action === 'github_release_assets')).toBe(false);
+    await click('查看最新附件'); await click('下载 checksums.txt');
+    expect(dispatchMock).toHaveBeenCalledWith('github_release_assets', { repository: 'demo/alpha' });
+    expect(dispatchMock).toHaveBeenCalledWith('download_release_link', { url });
+    expect(target.textContent).toContain('checksums.txt 已加入下载队列'); expect(onadd).not.toHaveBeenCalled();
+  });
   it('preloads visible Stars membership and opens assignment without another forced request', async () => {
     dispatchMock.mockImplementation(async (action: string) => action === 'github_status' ? connected() : action === 'github_lists' ? listsFixture() : action === 'github_repository_lists' ? { listIds: ['one', 'two'] } : action === 'github_list_repositories' ? { items: [repo('demo/alpha')], endCursor: null, hasMore: false, totalCount: 1 } : base(action));
     showGithub(); await settle(); await click('Stars');

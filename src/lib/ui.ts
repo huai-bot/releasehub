@@ -1,10 +1,11 @@
 import type { BuildTaskStatus, DownloadRecord, DownloadStatus, FileStatus, ManagedVersion, Project, ProjectStatus, ReleaseAsset, RepositoryNote } from './types';
 
-export type Page = 'home' | 'library' | 'updates' | 'downloads' | 'github' | 'agent' | 'settings';
+export type Page = import('./types').WorkspacePage | 'settings';
 export type Tone = 'neutral' | 'success' | 'warning' | 'danger' | 'accent';
 export interface StatusLabel { label: string; tone: Tone }
 
 export const projectStatus: Record<ProjectStatus, StatusLabel> = {
+  local: { label: '本地', tone: 'neutral' },
   notChecked: { label: '待检查', tone: 'neutral' },
   checking: { label: '检查中', tone: 'accent' },
   upToDate: { label: '已是最新', tone: 'success' },
@@ -98,11 +99,11 @@ export function formatBytes(bytes: number): string {
   return `${size >= 100 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
+const dayFormat = new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric' });
+const timeFormat = new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 export function formatDate(value: string | null, includeTime = false): string {
-  if (!value || Number.isNaN(Date.parse(value))) return '尚未记录';
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: 'short', day: 'numeric', ...(includeTime ? { hour: '2-digit', minute: '2-digit' } as const : {}),
-  }).format(new Date(value));
+  const stamp = value ? Date.parse(value) : NaN;
+  return Number.isFinite(stamp) ? (includeTime ? timeFormat : dayFormat).format(stamp) : '尚未记录';
 }
 
 export function downloadPercent(download: Pick<DownloadRecord, 'receivedBytes' | 'totalBytes'>): number {
@@ -122,6 +123,7 @@ export function projectPresentation(project: Pick<Project, 'name' | 'description
 }
 
 export function matchesProject(project: Project, query: string, note?: RepositoryNote | null): boolean {
+  if (!query.trim()) return true;
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   const haystack = `${project.name} ${project.owner}/${project.repo} ${project.description} ${note?.name ?? ''} ${note?.description ?? ''}`.toLocaleLowerCase();
   return terms.every((term) => haystack.includes(term));
@@ -161,7 +163,9 @@ export function githubLinkTarget(value: string): { kind: 'repository'; url: stri
   const url = new URL(safe);
   const [owner, repo, section] = url.pathname.split('/').filter(Boolean);
   if (['login','logout','session','sessions','settings','signup','account','password_reset'].includes(owner) || (owner === 'orgs' && section === 'sso')) return { kind: 'browser', url: safe };
-  const attachment = /^\/(\w[\w.-]*\/[\w.-]+)\/releases\/download\/([^/]+)\/[^/]+$/.exec(url.pathname);
+  const latest = /^\/([\w.-]+\/[\w.-]+)\/releases\/latest\/download\/[^/]+$/.exec(url.pathname);
+  if (latest) return { kind: 'asset', url: safe, releaseUrl: `https://github.com/${latest[1]}/releases/latest` };
+  const attachment = /^\/([\w.-]+\/[\w.-]+)\/releases\/download\/(.+)\/[^/]+$/.exec(url.pathname);
   if (attachment) return { kind: 'asset', url: safe, releaseUrl: `https://github.com/${attachment[1]}/releases/tag/${attachment[2]}` };
   const reserved = ['orgs','users','topics','collections','marketplace','sponsors','features','enterprise','organizations','site','contact','search','stars','events','notifications','explore','apps','about','new','dashboard','trending','discussions','pulls','issues','codespaces','copilot','security'];
   const name = owner && repo && !section && !url.hash && !url.search && !reserved.includes(owner) ? parseRepository(`${owner}/${repo}`) : null;

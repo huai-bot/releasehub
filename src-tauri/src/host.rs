@@ -84,8 +84,7 @@ impl HostState {
         let _serial = self.settings_lock.lock().await;
         if !changes.is_object() { return Err("设置格式不正确。".into()); }
         if changes.get("proxy").is_some() { return Err("请从网络代理区保存连接设置。".into()); }
-        let snapshot = self.core.handle("snapshot", json!({})).await?;
-        let previous = snapshot["settings"].clone();
+        let previous = self.core.handle("get_settings", json!({})).await?;
         let enabled = changes["agentEnabled"].as_bool().unwrap_or(previous["agentEnabled"].as_bool().unwrap_or(false));
         let port = changes.get("agentPort").unwrap_or(&previous["agentPort"]).as_u64().unwrap_or(47831);
         if !(1024..=65535).contains(&port) { return Err("本机端口应在 1024 到 65535 之间。".into()); }
@@ -126,6 +125,7 @@ impl HostState {
         }
         self.proxy_password_configured.store(password.is_some(), Ordering::Relaxed);
         // The service retains its own actionable error if the website window cannot close.
+        let _ = crate::reader::trainer::close_active(app);
         let _ = self.feed.restart_for_proxy_change(app).await;
         Ok(result)
     }
@@ -207,7 +207,10 @@ async fn dispatch(webview: tauri::Webview, app: tauri::AppHandle, state: tauri::
         "snapshot" => host.snapshot().await,
         "save_settings" => {
             let value = host.save_settings(payload["settings"].clone()).await?;
-            let _ = app.emit("releasehub:changed", json!({}));
+            // A layout/sort preference is returned directly; it doesn't change any library records.
+            if !payload["settings"].as_object().is_some_and(|patch| patch.keys().all(|k| matches!(k.as_str(), "libraryLayout" | "librarySort"))) {
+                let _ = app.emit("releasehub:changed", json!({}));
+            }
             Ok(value)
         }
         "save_proxy" => {
@@ -261,6 +264,7 @@ async fn dispatch(webview: tauri::Webview, app: tauri::AppHandle, state: tauri::
             let _ = app.emit("releasehub:changed", json!({}));
             Ok(value)
         }
+        "github_release_assets" => host.core.handle(&action, payload).await,
         action if action.starts_with("github_") => host.github.handle(action, payload).await,
         "reveal_agent_connection" => host.connection().await,
         "rotate_agent_token" => {
@@ -271,6 +275,14 @@ async fn dispatch(webview: tauri::Webview, app: tauri::AppHandle, state: tauri::
             host.secrets.set("agent", Some(&token))?;
             agent.rotate_token(token.clone())?;
             Ok(json!({"address": agent.address, "token": token}))
+        }
+        "pick_local_executables" => {
+            let files = tauri::async_runtime::spawn_blocking(move || app.dialog().file()
+                .add_filter("Windows 主程序", &["exe"]).blocking_pick_files())
+                .await.map_err(|_| "无法打开程序选择窗口。")?.unwrap_or_default();
+            let paths: Vec<_> = files.into_iter().map(|f| f.into_path().map_err(|_| "请选择本机 EXE 文件。"))
+                .collect::<Result<_, _>>()?;
+            Ok(json!(paths))
         }
         "pick_project_executable" | "pick_executable" => {
             let project_id = object_string(&payload, "projectId")?.to_owned();
@@ -332,7 +344,15 @@ async fn dispatch(webview: tauri::Webview, app: tauri::AppHandle, state: tauri::
             let contents = tokio::fs::read_to_string(path).await.map_err(|_| "文件不是有效的 UTF-8 软件列表。")?;
             host.core.handle("import_library", json!({"contents": contents})).await
         }
-        "reader_open" => host.feed.open_reader(&app, payload).await,
+        "trainer_open" => {
+            let settings = host.core.proxy.settings()?;
+            if settings.mode == "manual" && !settings.username.is_empty() { return Err("内置网页暂不支持带账号密码的代理，请改用系统代理。".into()); }
+            let proxy = if settings.mode == "manual" { Some(host.feed.website_proxy()?) } else { None };
+            crate::reader::trainer::open(&app, payload, &settings.mode, proxy)
+        }
+        "trainer_resize" | "trainer_close" | "trainer_external" | "trainer_navigate" | "trainer_reveal" => crate::reader::trainer::control(&app, &action, payload),
+        "trainer_save" => crate::reader::trainer::save(&app, payload, &host.core.proxy).await,
+        "reader_open" => { crate::reader::trainer::close_active(&app)?; host.feed.open_reader(&app, payload).await },
         "reader_resize" | "reader_close" | "reader_external" => crate::reader::control(&app, &action, payload),
         "open_url" => {
             let url = safe_browser_url(object_string(&payload, "url")?)?;
@@ -590,10 +610,11 @@ pub fn run() {
             tauri::async_runtime::spawn(scheduled_installation_checks(install_core));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Ok(snapshot) = host.core.handle("snapshot", json!({})).await {
-                    host.close_to_tray.store(snapshot["settings"]["closeToTray"].as_bool().unwrap_or(false), Ordering::Relaxed);
-                    if snapshot["settings"]["agentEnabled"].as_bool().unwrap_or(false) {
-                        let port = snapshot["settings"]["agentPort"].as_u64().unwrap_or(47831) as u16;
+                host.core.resume_local_repository_matches();
+                if let Ok(settings) = host.core.handle("get_settings", json!({})).await {
+                    host.close_to_tray.store(settings["closeToTray"].as_bool().unwrap_or(false), Ordering::Relaxed);
+                    if settings["agentEnabled"].as_bool().unwrap_or(false) {
+                        let port = settings["agentPort"].as_u64().unwrap_or(47831) as u16;
                         if let Err(error) = host.configure_agent(true, port, false).await {
                             let _ = host.core.handle("save_settings", json!({"settings":{"agentEnabled":false}})).await;
                             *host.agent_error.lock().await = Some(error);

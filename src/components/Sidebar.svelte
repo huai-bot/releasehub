@@ -31,6 +31,26 @@
     event.preventDefault(); const from = dragging; dragging = null; dropTarget = null;
     if (from) void reorder(from, id);
   }
+  // WebView2 reserves native drag-and-drop for files. Use pointer gestures for the sidebar there.
+  const nativeDrop = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+  let pointer: { id: WorkspacePage; number: number; x: number; y: number } | null = null;
+  let blockClick = false;
+  function pointerStart(e: PointerEvent, id: WorkspacePage) {
+    if (!nativeDrop || busy || sorting || e.button !== 0) return;
+    blockClick = false; pointer = { id, number: e.pointerId, x: e.clientX, y: e.clientY };
+  }
+  function pointerMove(e: PointerEvent) {
+    if (!pointer || e.pointerId !== pointer.number) return;
+    if (!dragging && Math.hypot(e.clientX - pointer.x, e.clientY - pointer.y) < 6) return;
+    dragging = pointer.id; blockClick = true;
+    const id = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('nav [data-page]')?.dataset.page;
+    dropTarget = order.find(page => page === id) ?? null;
+  }
+  function pointerEnd(e: PointerEvent) {
+    if (!pointer || e.pointerId !== pointer.number) return;
+    const from = dragging, to = dropTarget; pointer = null; dragging = null; dropTarget = null;
+    if (from && to && e.type === 'pointerup') void reorder(from, to);
+  }
   function keyboardOrder(event: KeyboardEvent, id: WorkspacePage) {
     if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
     event.preventDefault(); const index = order.indexOf(id) + (event.key === 'ArrowUp' ? -1 : 1);
@@ -38,11 +58,12 @@
   }
 </script>
 
+<svelte:window onpointermove={pointerMove} onpointerup={pointerEnd} onpointercancel={pointerEnd} />
 <aside class="sidebar">
   <button class="brand" onclick={() => onnavigate('home')} aria-label="ReleaseHub 首页"><BrandMark /><strong>ReleaseHub</strong></button>
   <nav aria-label="主导航">
     {#each pages as item (item.id)}
-      <button class:active={page === item.id} class:dragging={dragging === item.id} class:drop-target={dropTarget === item.id && dragging !== item.id} class="nav-item" aria-current={page === item.id ? 'page' : undefined} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" draggable={!busy && !sorting} ondragstart={(event) => startDrag(event, item.id)} ondragend={() => { dragging = null; dropTarget = null; }} ondragover={(event) => { if (dragging) { event.preventDefault(); dropTarget = item.id; } }} ondragleave={() => { if (dropTarget === item.id) dropTarget = null; }} ondrop={(event) => drop(event, item.id)} onkeydown={(event) => keyboardOrder(event, item.id)} onclick={() => { if (!dragging) onnavigate(item.id); }}>
+      <button class:active={page === item.id} class:dragging={dragging === item.id} class:drop-target={dropTarget === item.id && dragging !== item.id} class="nav-item" aria-current={page === item.id ? 'page' : undefined} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" data-page={item.id} draggable={!nativeDrop && !busy && !sorting} onpointerdown={event => pointerStart(event, item.id)} ondragstart={(event) => startDrag(event, item.id)} ondragend={() => { dragging = null; dropTarget = null; }} ondragover={(event) => { if (dragging) { event.preventDefault(); dropTarget = item.id; } }} ondragleave={() => { if (dropTarget === item.id) dropTarget = null; }} ondrop={(event) => drop(event, item.id)} onkeydown={(event) => keyboardOrder(event, item.id)} onclick={(event) => { if (event.detail && blockClick) { blockClick = false; return; } if (!dragging) onnavigate(item.id); }}>
         <Icon name={item.icon} size={19} /><span>{item.label}</span>
         {#if item.id === 'updates' && updateCount}<span class="nav-count">{updateCount}</span>{/if}
         {#if item.id === 'downloads' && downloadCount}<span class="nav-dot" aria-label={`${downloadCount} 项进行中`}></span>{/if}

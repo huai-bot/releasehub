@@ -515,7 +515,7 @@ impl Core {
             project.installed_source=j.original_project.installed_source.clone();
             project.executable_path=j.original_project.executable_path.clone();
             project.error=None;
-            super::selection::update_status(&mut project);
+            super::library::update_project_status(&mut project);
             let mut download=self.store.optional_download(&j.previous_download.id)?;
             // A removed download is independent of the backup and must never be recreated by restore.
             if let Some(download)=download.as_mut() { download.status=j.previous_download.status.clone();download.error=Some("已恢复安装前的文件与版本".into());download.updated_at=now(); }
