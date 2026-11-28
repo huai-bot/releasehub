@@ -1,5 +1,5 @@
 //! Resolve a clicked public GitHub attachment using the release that owns it.
-use super::{models::DownloadRecord, network, Core};
+use super::{downloads::safe_name, models::DownloadRecord, network, Core, ExternalSendOutcome, PublicDownload};
 use serde_json::{json, Value};
 use std::{collections::HashSet, sync::Arc};
 use url::Url;
@@ -58,10 +58,16 @@ impl ReleaseLink {
         Some(Self { owner: parsed_owner, repo: parsed_repo, tag, file })
     }
 
-    fn from_asset(asset: &Value) -> Option<Self> {
-        let address = asset["browser_download_url"].as_str()?;
-        if address.contains('\\') || address.chars().any(char::is_control) { return None; }
+    fn from_address(address: &str) -> Option<Self> {
+        let (_, tail) = address.split_once("://")?;
+        let authority = tail.split('/').next()?;
+        if address.len() > 4096 || address.contains('\\') || address.chars().any(char::is_control)
+            || authority.is_empty() || authority.contains('@') { return None; }
         Self::from_url(&Url::parse(address).ok()?)
+    }
+
+    fn from_asset(asset: &Value) -> Option<Self> {
+        Self::from_address(asset["browser_download_url"].as_str()?)
     }
 
     fn names_release(&self, owner: &str, repo: &str, tag: &str) -> bool {
@@ -93,10 +99,15 @@ fn asset_id(asset: &Value) -> Option<u64> {
     asset["id"].as_u64().filter(|id| (1..=9_007_199_254_740_991).contains(id))
 }
 
-fn release_listing(release: &Value, owner: &str, repo: &str) -> Result<Value, String> {
-    let tag = published_tag(release)?;
+fn release_page(owner: &str, repo: &str, tag: &str) -> Url {
     let mut url = Url::parse("https://github.com/").expect("static GitHub origin");
     url.path_segments_mut().expect("hierarchical GitHub origin").pop_if_empty().extend([owner, repo, "releases", "tag", tag]);
+    url
+}
+
+fn release_listing(release: &Value, owner: &str, repo: &str) -> Result<Value, String> {
+    let tag = published_tag(release)?;
+    let url = release_page(owner, repo, tag);
     let mut seen = HashSet::new();
     let assets: Vec<_> = release["assets"].as_array().ok_or("GitHub 附件列表格式无效。")?.iter().filter_map(|asset| {
         if !ReleaseLink::from_asset(asset)?.names_release(owner, repo, tag) { return None; }
@@ -111,6 +122,40 @@ fn release_listing(release: &Value, owner: &str, repo: &str) -> Result<Value, St
 }
 
 pub(crate) fn is_release_link(url: &Url) -> bool { ReleaseLink::from_url(url).is_some() }
+
+struct ResolvedReleaseAsset {
+    repository: String,
+    page_url: Url,
+    tag: String,
+    id: u64,
+    name: String,
+    url: String,
+    size: u64,
+    digest: Option<String>,
+}
+
+impl ResolvedReleaseAsset {
+    fn from_release(link: &ReleaseLink, release: &Value) -> Result<Self, String> {
+        let (tag, asset) = link.matching_asset(release)?;
+        let id = asset_id(asset).ok_or("GitHub 附件编号无效。")?;
+        let size = asset["size"].as_u64().filter(|size| (1..=network::MAX_DOWNLOAD_BYTES).contains(size)).ok_or("发行附件大小无效或超过4GB限制")?;
+        let name = network::field(asset, "name", 512)?;
+        let url = network::field(asset, "browser_download_url", 4096)?;
+        let digest = asset["digest"].as_str().map(str::to_owned);
+        Ok(Self {
+            repository: format!("{}/{}", link.owner, link.repo),
+            page_url: release_page(&link.owner, &link.repo, tag),
+            tag: tag.to_owned(), id, name, url, size, digest,
+        })
+    }
+
+    fn handoff<'a>(&'a self, file_name: &'a str) -> PublicDownload<'a> {
+        PublicDownload {
+            url: &self.url, page_url: self.page_url.as_str(), file_name,
+            project_name: &self.repository, tag: &self.tag, referer: None,
+        }
+    }
+}
 
 impl Core {
     async fn require_public_release_repository(&self, owner: &str, repo: &str) -> Result<(), String> {
@@ -129,28 +174,27 @@ impl Core {
         }
     }
 
-    pub(crate) async fn queue_release_link(self: &Arc<Self>, address: &str) -> Result<DownloadRecord, String> {
-        let bad_link = "这里只能下载 GitHub 公开发行版的附件。";
-        if address.contains('\\') || address.chars().any(char::is_control)
-            || address.split_once("://").is_none_or(|(_, tail)| tail.split('/').next().is_some_and(|host| host.contains('@'))) {
-            return Err(bad_link.into());
-        }
-        let url = Url::parse(address).map_err(|_| bad_link.to_owned())?;
-        let link = ReleaseLink::from_url(&url).ok_or(bad_link)?;
+    async fn resolve_public_release_asset(&self, address: &str) -> Result<ResolvedReleaseAsset, String> {
+        let link = ReleaseLink::from_address(address).ok_or("这里只能下载 GitHub 公开发行版的附件。")?;
         self.require_public_release_repository(&link.owner, &link.repo).await?;
         let release = if let Some(tag) = link.tag.as_deref() {
             self.github.api(&link.owner, &link.repo, &["releases", "tags", tag], None).await?
         } else {
             self.github.api(&link.owner, &link.repo, &["releases", "latest"], None).await?
         };
-        let (tag, asset) = link.matching_asset(&release)?;
-        let id = asset_id(asset).ok_or("GitHub 附件编号无效。")?;
-        let size = asset["size"].as_u64().ok_or("GitHub 附件大小无效。")?;
-        let name = network::field(asset, "name", 512)?;
-        let url = network::field(asset, "browser_download_url", 4096)?;
-        let digest = asset["digest"].as_str();
-        let repository = format!("{}/{}", link.owner, link.repo);
-        self.enqueue_release_file(&repository, tag, id, &name, &url, size, digest)
+        ResolvedReleaseAsset::from_release(&link, &release)
+    }
+
+    pub(crate) async fn queue_release_link(self: &Arc<Self>, address: &str) -> Result<DownloadRecord, String> {
+        let asset = self.resolve_public_release_asset(address).await?;
+        self.enqueue_release_file(&asset.repository, &asset.tag, asset.id, &asset.name, &asset.url, asset.size, asset.digest.as_deref())
+    }
+
+    pub(crate) async fn send_external_release_link(&self, address: &str) -> Result<ExternalSendOutcome, String> {
+        self.ensure_external_download_enabled()?;
+        let asset = self.resolve_public_release_asset(address).await?;
+        let name = safe_name(&asset.name);
+        self.send_public_download(asset.handoff(&name)).await
     }
 }
 
@@ -192,6 +236,44 @@ mod tests {
         assert!(link.matching_asset(&release).is_err());
         release["draft"] = json!(true);
         assert!(parse("https://github.com/owner/tool/releases/download/v1/file.zip").unwrap().matching_asset(&release).is_err());
+    }
+
+    #[test]
+    fn external_handoff_uses_only_metadata_matching_the_clicked_release_asset() {
+        let canonical = "https://github.com/Owner/tool/releases/download/legacy%2Fv1/my%20file.zip";
+        let mut release = json!({"draft":false,"tag_name":"legacy/v1","published_at":"2024-01-01T00:00:00Z", "assets":[
+            {"id":1,"name":"misleading.zip","size":1,"browser_download_url":"https://github.com/owner/tool/releases/download/legacy%2Fv1/my%20file.zip?token=fixture"},
+            {"id":2,"name":"my file.zip","size":64,"browser_download_url":canonical}
+        ]});
+        for selected in ["https://github.com/owner/tool/releases/download/legacy/v1/my%20file.zip", "https://github.com/owner/tool/releases/latest/download/my%20file.zip"] {
+            let link = ReleaseLink::from_address(selected).unwrap();
+            let asset = ResolvedReleaseAsset::from_release(&link, &release).unwrap();
+            let name = safe_name(&asset.name);
+            let handoff = asset.handoff(&name);
+            assert_eq!(asset.id, 2);
+            assert_eq!(handoff.url, canonical);
+            assert_eq!(handoff.page_url, "https://github.com/owner/tool/releases/tag/legacy%2Fv1");
+            assert_eq!(handoff.project_name, "owner/tool");
+            assert_eq!(handoff.tag, "legacy/v1");
+            assert_eq!(handoff.file_name, "my file.zip");
+            assert_eq!(handoff.referer, None);
+        }
+        let link = ReleaseLink::from_address(canonical).unwrap();
+        release["assets"][1]["size"] = json!(network::MAX_DOWNLOAD_BYTES + 1);
+        assert!(ResolvedReleaseAsset::from_release(&link, &release).is_err());
+        release["assets"][1]["size"] = json!(64);
+        release["draft"] = json!(true);
+        assert!(ResolvedReleaseAsset::from_release(&link, &release).is_err());
+        assert!(ReleaseLink::from_address("https://@github.com/owner/tool/releases/download/v1/my.zip").is_none());
+    }
+
+    #[tokio::test]
+    async fn external_handoff_when_disabled_leaves_no_download_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Core::new(dir.path().into(), true, Arc::new(|_, _| {})).unwrap();
+        let result = core.send_external_release_link("https://github.com/owner/tool/releases/download/v1/my.zip").await;
+        assert!(result.unwrap_err().contains("未启用"));
+        assert!(core.store.downloads().unwrap().is_empty());
     }
 
     #[test]

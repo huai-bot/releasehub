@@ -15,6 +15,7 @@ struct HostState {
     github_configured: AtomicBool,
     github: Arc<GithubService>,
     feed: Arc<GitHubFeedService>,
+    trainer_catalog: crate::reader::catalog::Catalog,
     proxy_password_configured: AtomicBool,
     close_to_tray: AtomicBool,
     agent: Mutex<Option<RunningAgent>>,
@@ -207,8 +208,9 @@ async fn dispatch(webview: tauri::Webview, app: tauri::AppHandle, state: tauri::
         "snapshot" => host.snapshot().await,
         "save_settings" => {
             let value = host.save_settings(payload["settings"].clone()).await?;
-            // A layout/sort preference is returned directly; it doesn't change any library records.
-            if !payload["settings"].as_object().is_some_and(|patch| patch.keys().all(|k| matches!(k.as_str(), "libraryLayout" | "librarySort"))) {
+            // The caller applies display-only preferences directly, without rebuilding the library snapshot.
+            if !payload["settings"].as_object().is_some_and(|patch| patch.keys().all(|k| matches!(k.as_str(),
+                "libraryLayout" | "librarySort" | "librarySoftwareOrder" | "libraryFilesOrder"))) {
                 let _ = app.emit("releasehub:changed", json!({}));
             }
             Ok(value)
@@ -352,6 +354,20 @@ async fn dispatch(webview: tauri::Webview, app: tauri::AppHandle, state: tauri::
         }
         "trainer_resize" | "trainer_close" | "trainer_external" | "trainer_navigate" | "trainer_reveal" => crate::reader::trainer::control(&app, &action, payload),
         "trainer_save" => crate::reader::trainer::save(&app, payload, &host.core.proxy).await,
+        "trainer_catalog_list" => crate::core::output(host.trainer_catalog.list(&host.core.proxy, payload).await?),
+        "trainer_catalog_detail" => crate::core::output(host.trainer_catalog.detail(&host.core.proxy, payload).await?),
+        "trainer_catalog_save" => crate::core::output(host.trainer_catalog.save(&app, &host.core.proxy,
+            object_string(&payload, "detailUrl")?, object_string(&payload, "attachmentUrl")?).await?),
+        "trainer_catalog_send_external" => crate::core::output(host.trainer_catalog.send_external(&host.core,
+            object_string(&payload, "detailUrl")?, object_string(&payload, "attachmentUrl")?).await?),
+        "trainer_catalog_original" => {
+            crate::reader::catalog::open_original(&app, object_string(&payload, "url")?)?;
+            Ok(Value::Null)
+        }
+        "trainer_catalog_reveal" => {
+            host.trainer_catalog.reveal(&app, object_string(&payload, "path")?)?;
+            Ok(Value::Null)
+        }
         "reader_open" => { crate::reader::trainer::close_active(&app)?; host.feed.open_reader(&app, payload).await },
         "reader_resize" | "reader_close" | "reader_external" => crate::reader::control(&app, &action, payload),
         "open_url" => {
@@ -591,6 +607,7 @@ pub fn run() {
             core.set_github_service(github.clone());
             let host = Arc::new(HostState {
                 core, data_dir, portable, secrets, github, feed,
+                trainer_catalog: crate::reader::catalog::Catalog::default(),
                 proxy_password_configured: AtomicBool::new(proxy_password_configured),
                 github_configured: AtomicBool::new(github_configured),
                 close_to_tray: AtomicBool::new(false),

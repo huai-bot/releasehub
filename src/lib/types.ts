@@ -5,7 +5,7 @@ export type ColorScheme = 'blue' | 'teal' | 'violet' | 'amber';
 export type Material = 'acrylic' | 'mica';
 export type ManagementMode = 'software' | 'files';
 export type FileStatus = 'notDownloaded' | 'downloaded' | 'updateAvailable' | 'missing';
-export type LibrarySort = 'added' | 'name' | 'nameDesc' | 'released' | 'updated';
+export type LibrarySort = 'manual' | 'added' | 'name' | 'nameDesc' | 'released' | 'updated';
 export type ProjectStatus = 'local' | 'notChecked' | 'checking' | 'upToDate' | 'updateAvailable' | 'versionUnknown' | 'noRelease' | 'noCompatibleAsset' | 'error';
 export type AssetKind = 'installer' | 'portable' | 'other';
 
@@ -148,6 +148,8 @@ export interface Settings {
   blur?: boolean;
   libraryLayout?: LibraryLayout;
   librarySort?: LibrarySort;
+  librarySoftwareOrder?: string[];
+  libraryFilesOrder?: string[];
   startupPage: WorkspacePage;
   startupGithubTab: GithubTab;
   navigationOrder: WorkspacePage[];

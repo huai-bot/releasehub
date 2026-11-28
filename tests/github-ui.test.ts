@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
 import Github from '../src/pages/Github.svelte';
+import GithubReader from '../src/components/GithubReader.svelte';
+import type { ReaderEvent } from '../src/lib/bridge';
 import { feedState } from '../src/lib/feed-state';
 import AiConnection from '../src/components/AiConnection.svelte';
 import App from '../src/App.svelte';
@@ -10,8 +12,8 @@ import { previewFeed } from '../src/lib/feed/preview';
 import { GITHUB_DEVICE_URL, githubAvatarUrl, isSubscribed, repositoryEditError } from '../src/lib/github';
 import type { GithubRepository, GithubRepositoryDetail, GithubRepositoryPage, GithubStatus } from '../src/lib/types';
 
-const { dispatchMock } = vi.hoisted(() => ({ dispatchMock: vi.fn() }));
-vi.mock('../src/lib/bridge', () => ({ dispatch: dispatchMock, desktopAvailable: () => true, watchChanges: async () => () => {} }));
+const { dispatchMock, watchReaderMock } = vi.hoisted(() => ({ dispatchMock: vi.fn(), watchReaderMock: vi.fn() }));
+vi.mock('../src/lib/bridge', () => ({ dispatch: dispatchMock, desktopAvailable: () => true, watchChanges: async () => () => {}, watchReader: watchReaderMock }));
 vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({
   isMaximized: async () => false, onResized: async () => () => {}, setTheme: async () => {},
   minimize: async () => {}, toggleMaximize: async () => {}, close: async () => {},
@@ -38,7 +40,7 @@ async function navigate(label: string) {
 }
 async function input(selector: string, value: string) { const field = target.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!; field.value = value; field.dispatchEvent(new Event('input', { bubbles: true })); await settle(); }
 async function search(value: string) { await input('#github-search', value); target.querySelector('.github-search')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await settle(); }
-function showGithub(mountTarget: HTMLElement = target) { const instance = mount(Github, { target: mountTarget, props: { projects: [], preview: false, onadd, onopen, oncopy, onnotice } }); cleanup = async () => { await unmount(instance); }; flushSync(); }
+function showGithub(mountTarget: HTMLElement = target, externalDownloaderName?: string) { const instance = mount(Github, { target: mountTarget, props: { projects: [], preview: false, externalDownloaderName, onadd, onopen, oncopy, onnotice } }); cleanup = async () => { await unmount(instance); }; flushSync(); }
 const base = (action: string): unknown => {
   if (action === 'github_status') return anonymous();
   if (action === 'feed_status') return previewFeed('login');
@@ -54,12 +56,13 @@ const base = (action: string): unknown => {
 beforeEach(() => {
   vi.clearAllMocks(); cleanup = null; feedState.clear();
   dispatchMock.mockImplementation(async (action: string) => base(action));
+  watchReaderMock.mockResolvedValue(() => {});
   target = document.createElement('div'); document.body.append(target);
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value() { this.setAttribute('open', ''); } });
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value() { this.removeAttribute('open'); } });
   Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) });
 });
-afterEach(async () => { await cleanup?.(); target.remove(); vi.useRealTimers(); });
+afterEach(async () => { await cleanup?.(); target.remove(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('GitHub scoped UI, synthetic accounts only', () => {
   const listsFixture = () => [{ id: 'one', name: '工具', description: null, url: 'https://github.com/stars/fixture/lists/one', itemCount: 1 }, { id: 'two', name: '阅读', description: null, url: 'https://github.com/stars/fixture/lists/two', itemCount: 1 }];
@@ -72,6 +75,54 @@ describe('GitHub scoped UI, synthetic accounts only', () => {
     expect(dispatchMock).toHaveBeenCalledWith('github_release_assets', { repository: 'demo/alpha' });
     expect(dispatchMock).toHaveBeenCalledWith('download_release_link', { url });
     expect(target.textContent).toContain('checksums.txt 已加入下载队列'); expect(onadd).not.toHaveBeenCalled();
+  });
+  it.each(['sent', 'unknown'] as const)('reports a %s handoff for an unsubscribed attachment without automatically downloading or resending', async (status) => {
+    const url = 'https://github.com/demo/alpha/releases/download/v2/checksums.txt';
+    dispatchMock.mockImplementation(async (action: string) => action === 'github_release_assets' ? { tag: 'v2', url: 'https://github.com/demo/alpha/releases/tag/v2', assets: [{ id: 17, name: 'checksums.txt', size: 64, url }] } : action === 'send_external_release_link' ? { status } : base(action));
+    showGithub(target, 'AB Download Manager'); await settle(); await click('查看 demo/alpha 详情');
+    await click('查看最新附件');
+    expect(dispatchMock.mock.calls.some(([action]) => action === 'send_external_release_link')).toBe(false);
+    const sendLabel = '发送到 AB Download Manager：checksums.txt';
+    await click(sendLabel);
+    expect(dispatchMock).toHaveBeenCalledWith('send_external_release_link', { url, confirmed: true });
+    expect(target.textContent).toContain(status === 'sent' ? '已交给 AB Download Manager，请在下载器中查看进度。' : '未确认 AB Download Manager 是否接收，请先检查下载器队列，避免重复下载。');
+    await click('刷新最新附件');
+    expect(button(sendLabel).disabled).toBe(true);
+    await click(sendLabel);
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'send_external_release_link')).toHaveLength(1);
+    expect(button('内置下载 checksums.txt').disabled).toBe(false);
+    expect(dispatchMock.mock.calls.some(([action]) => action === 'download_release_link')).toBe(false);
+    expect(onadd).not.toHaveBeenCalled();
+  });
+  it('keeps the original historical asset and the built-in alternative in the reader', async () => {
+    const url = 'https://github.com/demo/alpha/releases/download/legacy%2Fv1/checksums.txt';
+    const releasePage = 'https://github.com/demo/alpha/releases/tag/legacy%2Fv1';
+    const notifyReader = vi.fn<(event: ReaderEvent) => void>();
+    watchReaderMock.mockImplementation(async (callback: (event: ReaderEvent) => void) => { notifyReader.mockImplementation(callback); return () => {}; });
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    dispatchMock.mockImplementation(async (action: string) => {
+      if (action.startsWith('reader_')) return null;
+      if (action === 'send_external_release_link') return { status: 'unknown' };
+      if (action === 'download_release_link') return { status: 'queued', fileName: 'checksums.txt' };
+      return base(action);
+    });
+    const instance = mount(GithubReader, { target, props: { url: releasePage, theme: 'light', preview: false, externalDownloaderName: 'AB', onclose: () => {} } });
+    cleanup = async () => { await unmount(instance); };
+    await settle();
+    const id = dispatchMock.mock.calls.find(([action]) => action === 'reader_open')?.[1]?.id;
+    expect(typeof id).toBe('string');
+    notifyReader({ id, phase: 'ready', value: releasePage });
+    notifyReader({ id, phase: 'download', value: url }); await settle();
+    expect(dispatchMock.mock.calls.some(([action]) => action === 'send_external_release_link')).toBe(false);
+    await click('发送到 AB');
+    expect(dispatchMock).toHaveBeenCalledWith('send_external_release_link', { url, confirmed: true });
+    expect(target.textContent).toContain('请先检查下载器队列');
+    notifyReader({ id, phase: 'download', value: url }); await settle();
+    expect(button('发送到 AB').disabled).toBe(true);
+    expect(dispatchMock.mock.calls.filter(([action]) => action === 'send_external_release_link')).toHaveLength(1);
+    await click('内置下载');
+    expect(dispatchMock).toHaveBeenCalledWith('download_release_link', { url });
+    expect(target.textContent).toContain('checksums.txt 已加入下载队列');
   });
   it('preloads visible Stars membership and opens assignment without another forced request', async () => {
     dispatchMock.mockImplementation(async (action: string) => action === 'github_status' ? connected() : action === 'github_lists' ? listsFixture() : action === 'github_repository_lists' ? { listIds: ['one', 'two'] } : action === 'github_list_repositories' ? { items: [repo('demo/alpha')], endCursor: null, hasMore: false, totalCount: 1 } : base(action));

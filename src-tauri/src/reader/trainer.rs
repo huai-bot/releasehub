@@ -3,7 +3,7 @@
 use super::bounds;
 use crate::{core::release_links::{credential_free_https, decode_path_segment}, proxy::ProxyState};
 use futures_util::StreamExt;
-use reqwest::{header, Client, Response, StatusCode};
+use reqwest::{header, Client, Method, Response, StatusCode};
 use serde_json::{json, Value};
 use std::{fs, io::ErrorKind, path::{Component, Path, PathBuf}, sync::Mutex, time::Duration};
 use tauri::{webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, PermissionResponse, WebviewBuilder}, AppHandle, Emitter, EventTarget, Manager, WebviewUrl};
@@ -14,12 +14,12 @@ use url::Url;
 use uuid::Uuid;
 
 const PREFIX: &str = "trainer-reader-";
-const HOME: &str = "https://flingtrainer.com/";
+pub(crate) const HOME: &str = "https://flingtrainer.com/";
 const HOST: &str = "flingtrainer.com";
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
 // FLiNG's file endpoint rejects requests without a browser agent and a same-site Referer.
-const DOWNLOAD_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";
-const BAD_LINK: &str = "这不是可在追新保存的风灵月影官网附件。";
+pub(crate) const DOWNLOAD_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36";
+pub(super) const BAD_LINK: &str = "这不是可在追新保存的风灵月影官网附件。";
 const CLOSED: &str = "官网视图已关闭，下载未保存。";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,12 +95,19 @@ fn attachment(url: &Url) -> Option<Attachment> {
     }
 }
 
-fn parse_url(raw: &str) -> Option<Url> {
-    if raw.len() > 4096 || raw.chars().any(|c| c == '\\' || c.is_control()) || raw.contains('\u{fffd}') { return None; }
+pub(super) fn is_attachment(url: &Url) -> bool { attachment(url).is_some() }
+
+pub(crate) fn is_resolved_attachment(url: &Url, file_name: &str) -> bool {
+    attachment(url).is_some_and(|target| target.file_name() == Some(file_name))
+}
+
+pub(super) fn parse_url(raw: &str) -> Option<Url> {
+    if !raw.starts_with(HOME) || raw.len() > 4096 || raw != raw.trim()
+        || raw.chars().any(|c| c == '\\' || c.is_control()) || raw.contains('\u{fffd}') { return None; }
     Url::parse(raw).ok().filter(official)
 }
 
-fn segment(value: &str) -> bool {
+pub(super) fn segment(value: &str) -> bool {
     decode_path_segment(value).is_some_and(|word| !matches!(word.as_str(), "." | "..") && word.len() <= 256 &&
         word.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '-')))
 }
@@ -250,12 +257,7 @@ pub(crate) fn control(app: &AppHandle, action: &str, input: Value) -> Result<Val
         }
         "trainer_reveal" => {
             let path = with_session(&label, |s| s.saved.clone()).flatten().ok_or("尚未保存附件。")?;
-            let parent = safe_parent(&path)?;
-            let metadata = fs::symlink_metadata(&path).map_err(|_| "该附件已移动或删除。")?;
-            if !metadata.is_file() || linked(&metadata) || path.canonicalize().ok().as_deref().and_then(Path::parent) != Some(parent.as_path()) {
-                return Err("该附件已移动或路径无效。".into());
-            }
-            app.opener().reveal_item_in_dir(path).map_err(|_| "无法在文件夹中显示该附件。")?;
+            reveal(app, &path)?;
         }
         "trainer_navigate" => {
             let mut url = Url::parse(HOME).expect("static homepage");
@@ -309,6 +311,15 @@ fn safe_parent(path: &Path) -> Result<PathBuf, String> {
     parent.canonicalize().map_err(|_| invalid.into())
 }
 
+pub(super) fn reveal(app: &AppHandle, path: &Path) -> Result<(), String> {
+    let parent = safe_parent(path)?;
+    let metadata = fs::symlink_metadata(path).map_err(|_| "该附件已移动或删除。")?;
+    if !metadata.is_file() || linked(&metadata) || path.canonicalize().ok().as_deref().and_then(Path::parent) != Some(parent.as_path()) {
+        return Err("该附件已移动或路径无效。".into());
+    }
+    app.opener().reveal_item_in_dir(path).map_err(|_| "无法在文件夹中显示该附件。".into())
+}
+
 fn destination(path: &Path, ext: &str) -> Result<PathBuf, String> {
     let file_name = path.file_name().and_then(|value| value.to_str()).filter(|name| plain_name(name) && extension(name, ext)).ok_or("文件名无效，必须保留官网附件的原扩展名。")?;
     let path = safe_parent(path)?.join(file_name);
@@ -326,16 +337,16 @@ fn single_header(response: &Response, name: header::HeaderName) -> Result<Option
     Ok(value)
 }
 
-async fn request(client: &Client, url: &Url) -> Result<Response, String> {
-    client.get(url.clone()).header(header::REFERER, HOME).header(header::ACCEPT_ENCODING, "identity").send().await
+async fn request(client: &Client, method: Method, url: &Url) -> Result<Response, String> {
+    client.request(method, url.clone()).header(header::REFERER, HOME).header(header::ACCEPT_ENCODING, "identity").send().await
         .map_err(|e| if e.is_timeout() { "连接风灵月影官网超时。" } else { "无法连接风灵月影官网，请检查网络或代理。" }.into())
 }
 
-async fn resolve(client: &Client, mut url: Url) -> Result<(Url, String), String> {
+async fn resolve(client: &Client, method: Method, mut url: Url) -> Result<(Url, String), String> {
     for _ in 0..3 {
         let current = attachment(&url).ok_or(BAD_LINK)?;
         if let Some(name) = current.file_name() { return Ok((url, name.to_owned())); }
-        let response = request(client, &url).await?;
+        let response = request(client, method.clone(), &url).await?;
         if !matches!(response.status(), StatusCode::MOVED_PERMANENTLY | StatusCode::FOUND | StatusCode::SEE_OTHER | StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT) {
             return Err("官网未返回有效的附件跳转，可在浏览器中重试。".into());
         }
@@ -369,19 +380,50 @@ impl Drop for Partial { fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
 struct SaveState(String);
 impl Drop for SaveState { fn drop(&mut self) { with_session(&self.0, |s| s.saving = false); } }
 
-async fn transfer(client: &Client, url: &Url, path: &Path, ext: &str, label: &str) -> Result<(), String> {
-    let response = request(client, url).await?;
+#[derive(Clone, Copy)]
+enum SaveOwner<'a> { Reader(&'a str), Catalog }
+
+impl SaveOwner<'_> {
+    fn check(self) -> Result<(), String> {
+        if let Self::Reader(label) = self {
+            with_session(label, |_| ()).ok_or(CLOSED)?;
+        }
+        Ok(())
+    }
+
+    fn publish(self, partial: &Path, path: &Path, parent: &Path) -> Result<(), String> {
+        let publish = || {
+            if safe_parent(path)? != parent { return Err("所选文件夹已改变，未保存附件。".into()); }
+            // No replacement, including existing links.
+            fs::hard_link(partial, path).map_err(|_| "无法保存附件，请确认目标未被占用，并使用本机 NTFS 文件夹。".into())
+        };
+        match self {
+            Self::Reader(label) => with_session(label, |s| {
+                publish()?;
+                s.saved = Some(path.to_owned());
+                s.pending = None;
+                Ok(())
+            }).ok_or(CLOSED)?,
+            Self::Catalog => publish(),
+        }
+    }
+}
+
+async fn transfer(client: &Client, url: &Url, path: &Path, ext: &str, owner: SaveOwner<'_>) -> Result<(), String> {
+    let response = request(client, Method::GET, url).await?;
     let length = expected_length(&response, ext)?;
     let parent = safe_parent(path)?;
-    if path.parent() != Some(parent.as_path()) || with_session(label, |_| ()).is_none() { return Err(CLOSED.into()); }
-    let partial = parent.join(format!(".releasehub-{}.part", Uuid::new_v4()));
-    let mut file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&partial).await.map_err(|_| "无法创建临时下载文件，请检查磁盘权限。")?;
-    let partial = Partial(partial);
+    if path.parent() != Some(parent.as_path()) { return Err("所选文件夹已改变，未保存附件。".into()); }
+    owner.check()?;
+    let partial;
+    let temp_path = parent.join(format!(".releasehub-{}.part", Uuid::new_v4()));
+    let mut file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&temp_path).await.map_err(|_| "无法创建临时下载文件，请检查磁盘权限。")?;
+    partial = Partial(temp_path);
     let mut stream = response.bytes_stream();
     let mut count = 0u64;
     let mut magic = Vec::with_capacity(4);
     while let Some(chunk) = stream.next().await {
-        if with_session(label, |_| ()).is_none() { return Err(CLOSED.into()); }
+        owner.check()?;
         let chunk = chunk.map_err(|_| "下载中断，未保存附件。")?;
         count = count.checked_add(chunk.len() as u64).filter(|n| *n <= length.unwrap_or(MAX_BYTES)).ok_or("下载内容超过允许的大小。")?;
         let needed = (4 - magic.len()).min(chunk.len());
@@ -396,7 +438,8 @@ async fn transfer(client: &Client, url: &Url, path: &Path, ext: &str, label: &st
     if count < 4 || length.is_some_and(|total| total != count) { return Err("下载不完整，未保存。".into()); }
     file.sync_all().await.map_err(|_| "无法保存附件，请检查磁盘空间。")?;
     drop(file);
-    if safe_parent(path)? != parent || with_session(label, |_| ()).is_none() { return Err(CLOSED.into()); }
+    if safe_parent(path)? != parent { return Err("所选文件夹已改变，未保存附件。".into()); }
+    owner.check()?;
     let metadata = fs::symlink_metadata(&partial.0).map_err(|_| "临时下载文件不可用。")?;
     if !metadata.is_file() || linked(&metadata) { return Err("临时下载文件路径不安全。".into()); }
     // Carry Windows' Internet-zone warning over to the finished file without running it.
@@ -407,15 +450,8 @@ async fn transfer(client: &Client, url: &Url, path: &Path, ext: &str, label: &st
         tag.write_all(b"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://flingtrainer.com/\r\n").await.map_err(|_| "无法标记附件的 Internet 来源。")?;
         tag.sync_all().await.map_err(|_| "无法标记附件的 Internet 来源。")?;
     }
-    // No replacement, including existing links. Publishing and recording the result are
-    // ordered with the view's close, so a closed page cannot finish an invisible download.
-    with_session(label, |s| {
-        if safe_parent(path)? != parent { return Err("所选文件夹已改变，未保存附件。".to_owned()); }
-        fs::hard_link(&partial.0, path).map_err(|_| "无法保存附件，请确认目标未被占用，并使用本机 NTFS 文件夹。".to_owned())?;
-        s.saved = Some(path.to_owned());
-        s.pending = None;
-        Ok(())
-    }).ok_or(CLOSED)?
+    // A legacy reader's publishing and state update are ordered with that view's close.
+    owner.publish(&partial.0, path, &parent)
 }
 
 pub(crate) async fn save(app: &AppHandle, input: Value, proxy: &ProxyState) -> Result<Value, String> {
@@ -428,23 +464,47 @@ pub(crate) async fn save(app: &AppHandle, input: Value, proxy: &ProxyState) -> R
         s.saving = true; Ok(())
     }).ok_or(CLOSED)??;
     let _saving = SaveState(label.clone());
-    let client = proxy.client_builder()?.https_only(true).redirect(reqwest::redirect::Policy::none()).referer(false)
-        .user_agent(DOWNLOAD_AGENT).connect_timeout(Duration::from_secs(15)).read_timeout(Duration::from_secs(30)).timeout(Duration::from_secs(600))
-        .build().map_err(|_| "无法创建官网下载连接。")?;
-    let (file_url, name) = resolve(&client, url).await?;
-    if with_session(&label, |_| ()).is_none() { return Err(CLOSED.into()); }
-    let ext = if extension(&name, "exe") { "exe" } else { "zip" };
-    let app = app.clone();
-    let suggested = name;
-    let chosen = tauri::async_runtime::spawn_blocking(move || {
-        let dialog = app.dialog().file().add_filter("风灵月影官网附件", &[ext]).set_file_name(suggested);
-        if let Some(parent) = app.get_window("main") { dialog.set_parent(&parent).blocking_save_file() }
-        else { None }
-    }).await.map_err(|_| "无法打开附件保存对话框。")?;
-    let Some(chosen) = chosen else { return Ok(Value::Null); };
-    let path = destination(&chosen.into_path().map_err(|_| "请选择本机保存位置。")?, ext)?;
-    transfer(&client, &file_url, &path, ext, &label).await?;
+    let Some(path) = save_attachment(app, proxy, url, SaveOwner::Reader(&label)).await? else { return Ok(Value::Null); };
     Ok(json!({"path":path,"fileName":path.file_name().and_then(|value| value.to_str()).unwrap_or_default()}))
+}
+
+pub(super) async fn save_from_catalog(app: &AppHandle, proxy: &ProxyState, url: Url) -> Result<Option<PathBuf>, String> {
+    save_attachment(app, proxy, url, SaveOwner::Catalog).await
+}
+
+fn download_client(proxy: &ProxyState, timeout: Duration) -> Result<Client, String> {
+    proxy.client_builder()?.https_only(true).redirect(reqwest::redirect::Policy::none()).referer(false)
+        .user_agent(DOWNLOAD_AGENT).connect_timeout(Duration::from_secs(15)).read_timeout(Duration::from_secs(30)).timeout(timeout)
+        .build().map_err(|_| "无法创建官网下载连接。".into())
+}
+
+fn file_extension(name: &str) -> &'static str { if extension(name, "exe") { "exe" } else { "zip" } }
+
+pub(super) async fn resolve_for_external(proxy: &ProxyState, url: Url) -> Result<(Url, String), String> {
+    let client = download_client(proxy, Duration::from_secs(12))?;
+    let (url, name) = resolve(&client, Method::HEAD, url).await?;
+    // Require an official attachment response; never download, save, or execute its body.
+    let response = request(&client, Method::HEAD, &url).await?;
+    expected_length(&response, file_extension(&name))?;
+    Ok((url, name))
+}
+
+async fn save_attachment(app: &AppHandle, proxy: &ProxyState, url: Url, owner: SaveOwner<'_>) -> Result<Option<PathBuf>, String> {
+    let client = download_client(proxy, Duration::from_secs(600))?;
+    let (file_url, name) = resolve(&client, Method::GET, url).await?;
+    owner.check()?;
+    let ext = file_extension(&name);
+    let parent = app.get_window("main").ok_or("主窗口已关闭，下载未保存。")?;
+    let app = app.clone();
+    let chosen = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().add_filter("风灵月影官网附件", &[ext]).set_file_name(name)
+            .set_parent(&parent).blocking_save_file()
+    }).await.map_err(|_| "无法打开附件保存对话框。")?;
+    let Some(chosen) = chosen else { return Ok(None); };
+    owner.check()?;
+    let path = destination(&chosen.into_path().map_err(|_| "请选择本机保存位置。")?, ext)?;
+    transfer(&client, &file_url, &path, ext, owner).await?;
+    Ok(Some(path))
 }
 
 #[cfg(test)]

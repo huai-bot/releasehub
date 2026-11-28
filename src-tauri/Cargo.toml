@@ -1,7 +1,7 @@
 [package]
 name = "releasehub"
 default-run = "releasehub"
-version = "0.7.0"
+version = "0.8.0"
 description = "A portable-first GitHub release center"
 authors = ["huai-bot"]
 license = "MIT"
@@ -27,6 +27,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+dom_query = { version = "0.28", default-features = false }
 sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 semver = "1"

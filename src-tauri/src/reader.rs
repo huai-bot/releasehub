@@ -1,3 +1,4 @@
+pub(crate) mod catalog;
 pub(crate) mod trainer;
 
 use crate::core::release_links::{credential_free_https, is_release_link};

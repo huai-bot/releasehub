@@ -280,7 +280,7 @@ impl Core {
         let library=Library {version:1,projects:self.store.projects()?.into_iter().filter(has_repository).map(|p|Subscription{
             repository:format!("{}/{}",p.owner,p.repo),channel:p.channel,preference:p.preference,asset_pattern:p.asset_pattern,backup_enabled:p.backup_enabled&&p.management_mode=="software",updates_muted:p.updates_muted,management_mode:p.management_mode}).collect(),
             repository_notes:self.store.repository_notes()?,
-            settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),material:Some(s.material),blur:Some(s.blur),library_layout:Some(s.library_layout),library_sort:Some(s.library_sort),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
+            settings:LibrarySettings{theme:s.theme,color_scheme:Some(s.color_scheme),material:Some(s.material),blur:Some(s.blur),library_layout:Some(s.library_layout),library_sort:(s.library_sort!="manual").then_some(s.library_sort),check_interval_minutes:s.check_interval_minutes,notifications:s.notifications,
                 auto_download:s.auto_download,max_concurrent_downloads:s.max_concurrent_downloads,close_to_tray:s.close_to_tray,download_connections:Some(s.download_connections),
                 startup_page:Some(s.startup_page),startup_github_tab:Some(s.startup_github_tab),navigation_order:Some(s.navigation_order)}};
         serde_json::to_string_pretty(&library).map_err(|_|"订阅导出失败".into())
@@ -409,6 +409,31 @@ mod tests {
         let imported=core.store.settings().unwrap();
         assert_eq!(imported.library_sort,"updated");
         assert_eq!(imported.navigation_order,["agent","github","trainers","library","updates","downloads","home"]);
+    }
+    #[tokio::test] async fn library_manual_order_is_local_and_survives_database_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let core = Core::new(data.clone(), true, Arc::new(|_, _| {})).unwrap();
+        let software = empty_project("fixture".into(), "software".into(), "stable".into(), "auto".into());
+        let mut file = empty_project("fixture".into(), "file".into(), "stable".into(), "auto".into());
+        file.management_mode = "files".into();
+        core.store.put_project(&software).unwrap();
+        core.store.put_project(&file).unwrap();
+        core.handle("save_settings", json!({"settings":{"librarySort":"manual", "librarySoftwareOrder":[software.id]}})).await.unwrap();
+        core.handle("save_settings", json!({"settings":{"libraryFilesOrder":[file.id]}})).await.unwrap();
+        let exported = core.export_library().unwrap();
+        assert!(!exported.contains(&software.id) && !exported.contains(&file.id));
+        let portable: Value = serde_json::from_str(&exported).unwrap();
+        for key in ["librarySort", "librarySoftwareOrder", "libraryFilesOrder"] { assert!(portable["settings"].get(key).is_none()); }
+        core.import_library(&exported).unwrap();
+        assert!(core.handle("save_settings", json!({"settings":{"librarySoftwareOrder":[software.id, software.id]}})).await.is_err());
+        assert!(core.handle("save_settings", json!({"settings":{"libraryFilesOrder":["fixture.exe"]}})).await.is_err());
+        drop(core);
+        let core = Core::new(data, true, Arc::new(|_, _| {})).unwrap();
+        let snapshot = core.handle("snapshot", json!({})).await.unwrap();
+        assert_eq!(snapshot["settings"]["librarySort"], "manual");
+        assert_eq!(snapshot["settings"]["librarySoftwareOrder"], json!([software.id]));
+        assert_eq!(snapshot["settings"]["libraryFilesOrder"], json!([file.id]));
     }
     #[test] fn exports_only_subscriptions() {
         let dir=tempfile::tempdir().unwrap(); let core=Core::new(dir.path().into(),true,Arc::new(|_,_|{})).unwrap();

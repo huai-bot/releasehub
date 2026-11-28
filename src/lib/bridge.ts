@@ -16,6 +16,7 @@ export interface Actions {
   set_project_repository: { payload: { id: string; repository: string | null }; result: Project };
   github_release_assets: { payload: { repository: string }; result: { tag: string; url: string; assets: { id: number; name: string; size: number; url: string }[] } | null };
   download_release_link: { payload: { url: string }; result: DownloadRecord };
+  send_external_release_link: { payload: { url: string; confirmed: true }; result: { status: 'sent' | 'unknown' } };
   trainer_open: { payload: { id: string; bounds: ReaderBounds }; result: null };
   trainer_resize: { payload: { id: string; bounds: ReaderBounds }; result: null };
   trainer_close: { payload: { id: string }; result: null };

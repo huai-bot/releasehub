@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import { dispatch, watchReader, type ReaderBounds } from '../lib/bridge';
-  import { readableError, safeGithubUrl } from '../lib/ui';
+  import { handoffMessage } from '../lib/external-handoff';
+  import { githubLinkTarget, readableError, safeGithubUrl } from '../lib/ui';
   import type { Theme } from '../lib/types';
   import Icon from './Icon.svelte';
 
-  let { url, theme, preview, onclose }: { url: string; theme: Theme; preview: boolean; onclose: () => void } = $props();
+  let { url, theme, preview, externalDownloaderName = null, onclose }: { url: string; theme: Theme; preview: boolean; externalDownloaderName?: string | null; onclose: () => void } = $props();
   let dialog: HTMLDialogElement;
   let viewport: HTMLDivElement;
   let title = $state('GitHub 原文');
@@ -15,7 +17,10 @@
   let externalUrl = $state('');
   const id = crypto.randomUUID();
   let downloadUrl = $state('');
-  let queueing = $state(false);
+  type DownloadMethod = 'internal' | 'external';
+  let downloading = $state<DownloadMethod | null>(null);
+  const externalReceipts = new SvelteMap<string, string>();
+  const externalReceipt = $derived(externalReceipts.get(downloadUrl));
 
   function attachmentName(address: string): string {
     try { return decodeURIComponent(new URL(address).pathname.split('/').at(-1) ?? '') || '发行附件'; }
@@ -52,19 +57,28 @@
       return true;
     } catch (reason) { notice = readableError(reason); closing = false; return false; }
   }
-  async function queueAsset() {
-    if (!downloadUrl || queueing) return;
+  async function downloadAsset(method: DownloadMethod) {
     const selected = downloadUrl;
-    queueing = true;
+    const downloader = externalDownloaderName;
+    if (!selected || downloading || (method === 'external' && (!downloader || externalReceipts.has(selected)))) return;
+    downloading = method;
     notice = '正在核对 GitHub 发行附件…';
     try {
-      const record = await dispatch('download_release_link', { url: selected });
-      if (!disposed && downloadUrl === selected) {
-        downloadUrl = '';
-        notice = record.status === 'completed' ? `${record.fileName} 已在下载中心。` : `${record.fileName} 已加入下载队列，可在下载中心查看。`;
+      if (method === 'external' && downloader) {
+        const receipt = await dispatch('send_external_release_link', { url: selected, confirmed: true });
+        if (!disposed) {
+          externalReceipts.set(selected, handoffMessage(downloader, receipt.status));
+          if (downloadUrl === selected) notice = `发行附件：${attachmentName(selected)}`;
+        }
+      } else {
+        const record = await dispatch('download_release_link', { url: selected });
+        if (!disposed && downloadUrl === selected) {
+          downloadUrl = '';
+          notice = record.status === 'completed' ? `${record.fileName} 已在下载中心。` : `${record.fileName} 已加入下载队列，可在下载中心查看。`;
+        }
       }
     } catch (reason) { if (!disposed && downloadUrl === selected) notice = readableError(reason); }
-    finally { queueing = false; }
+    finally { downloading = null; }
   }
   async function external() {
     if (preview) return;
@@ -92,7 +106,9 @@
           if (event.phase === 'ready') { clearTimeout(timeout); loading = false; }
           if (event.phase === 'blocked') { downloadUrl = ''; externalUrl = safeGithubUrl(event.value) || ''; notice = externalUrl ? '此账号操作请在浏览器中继续。' : '此链接不属于 GitHub，可从浏览器中的原页继续。'; }
           if (event.phase === 'download') {
-            downloadUrl = safeGithubUrl(event.value) || ''; externalUrl = downloadUrl;
+            const selected = githubLinkTarget(event.value);
+            downloadUrl = selected?.kind === 'asset' ? selected.url : '';
+            externalUrl = downloadUrl;
             notice = downloadUrl ? `发行附件：${attachmentName(downloadUrl)}` : '此下载不是可识别的 GitHub 发行附件，请在浏览器中继续。';
           }
           if (event.phase === 'closed') { opened = false; onclose(); }
@@ -119,7 +135,20 @@
     {#if loading}<span class="reader-light" role="status" aria-label="正在加载"></span>{/if}
     <button class="reader-key" disabled={preview} onclick={() => void external()}><Icon name="external" size={15} />在浏览器打开</button>
   </header>
-  {#if notice}<div class="reader-notice"><span role="status">{notice}</span>{#if downloadUrl}<button class="reader-key" disabled={queueing} onclick={() => void queueAsset()}><Icon name={queueing ? 'loader' : 'download'} class={queueing ? 'spinning' : ''} size={14} />{queueing ? '正在核对' : '在追新下载'}</button>{/if}</div>{/if}
+  {#if notice}
+    <div class="reader-notice">
+      <span role="status">{notice}</span>
+      {#if downloadUrl}
+        <div class="reader-notice-actions">
+          {#if externalDownloaderName}
+            <button class="reader-key" disabled={Boolean(downloading || externalReceipt)} onclick={() => void downloadAsset('external')}><Icon name={downloading === 'external' ? 'loader' : 'external'} class={downloading === 'external' ? 'spinning' : ''} size={14} />{downloading === 'external' ? '正在发送' : `发送到 ${externalDownloaderName}`}</button>
+          {/if}
+          <button class="reader-key" disabled={Boolean(downloading)} onclick={() => void downloadAsset('internal')}><Icon name={downloading === 'internal' ? 'loader' : 'download'} class={downloading === 'internal' ? 'spinning' : ''} size={14} />{downloading === 'internal' ? '正在核对' : externalDownloaderName ? '内置下载' : '在追新下载'}</button>
+        </div>
+        {#if externalReceipt}<p class="reader-receipt" role="status">{externalReceipt}</p>{/if}
+      {/if}
+    </div>
+  {/if}
   <div class="reader-body" bind:this={viewport} aria-busy={loading}>
     {#if error}<div class="empty-state"><p role="alert">{error}</p><button class="reader-key" onclick={() => { opening = open(); }}>重试</button></div>
     {:else if preview}<div class="empty-state"><p>桌面版会在这里显示 GitHub 原文。</p></div>{/if}
@@ -138,9 +167,12 @@
   .reader-key:disabled { color:var(--muted); box-shadow:none; }
   .reader-light { width:8px; height:8px; flex:none; border-radius:50%; background:var(--cobalt); }
   .reader-bar :global(.back) { transform:rotate(180deg); }
-  .reader-notice { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:4px 24px 14px; font-size:13px; color:var(--subtle); }
-  .reader-notice span { overflow-wrap:anywhere; }
-  .reader-notice button { flex:none; }
+  .reader-notice { display:flex; flex-wrap:wrap; align-items:center; gap:7px 12px; flex:none; padding:4px 24px 14px; font-size:13px; color:var(--subtle); }
+  .reader-notice > span { flex:1 1 180px; min-width:0; overflow-wrap:anywhere; }
+  .reader-notice-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px; min-width:0; max-width:100%; margin-inline-start:auto; }
+  .reader-notice-actions button { min-width:0; max-width:100%; white-space:normal; overflow-wrap:anywhere; }
+  .reader-notice-actions :global(svg) { flex:none; }
+  .reader-receipt { flex-basis:100%; margin:0; line-height:1.5; overflow-wrap:anywhere; }
   .reader-body { flex:1; min-height:0; margin:0 16px 18px; background:var(--neu-bg); border-radius:var(--r-card); }
   .reader-body .empty-state { height:100%; }
   .reader-body [role="alert"] { color:var(--danger); }

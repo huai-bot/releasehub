@@ -5,6 +5,7 @@
   import BrandMark from './components/BrandMark.svelte';
   import { desktopAvailable, dispatch, watchChanges, type Action, type Actions } from './lib/bridge';
   import { applyDownloadProgress, mergeSnapshotDownloads } from './lib/download-state';
+  import { handoffMessage, type HandoffStatus } from './lib/external-handoff';
   import type { AddProjectInput, AgentIntegration, AssetPreference, BackupRecord, Channel, DownloadRecord, GithubRepository, InstallPreview, ManagedVersion, ManagementMode, Project, ProjectChanges, ProxySettings, RepositoryNote, Settings, Snapshot, WorkspacePage } from './lib/types';
   import { canActivateManagedVersion, formatBytes, githubLinkTarget, parseRepository, projectPresentation, readableError, trackedAsset, type Page, type Tone } from './lib/ui';
   import ManagedVersions from './components/ManagedVersions.svelte';
@@ -26,7 +27,7 @@
   import SettingsPage from './pages/Settings.svelte';
   import { formatInterval } from './lib/motion';
 
-  type DialogState = { kind: 'add' } | { kind: 'install'; download: DownloadRecord; plan?: InstallPreview } | { kind: 'managed'; projectId: string } | { kind: 'mark'; project: Project } | { kind: 'note'; project: Project } | { kind: 'import' } | { kind: 'standaloneBackup'; project: Project } | { kind: 'settings'; project: Project };
+  type DialogState = { kind: 'publicDownload'; url: string; fileName: string } | { kind: 'add' } | { kind: 'install'; download: DownloadRecord; plan?: InstallPreview } | { kind: 'managed'; projectId: string } | { kind: 'mark'; project: Project } | { kind: 'note'; project: Project } | { kind: 'import' } | { kind: 'standaloneBackup'; project: Project } | { kind: 'settings'; project: Project };
   interface Toast { id: number; message: string; tone: Tone }
   // Snapshots and progress updates are immutable. Do not deep-proxy every release and attachment.
   let snapshot = $state.raw<Snapshot | null>(null);
@@ -58,9 +59,10 @@
   let startupDone = $state(false);
   $effect(() => {
     // Only real visits keep a page mounted: never the default page shown before startup.
-    if (startupDone && ['home', 'library', 'updates', 'downloads'].includes(page) && !visitedLocal.has(page)) visitedLocal = new Set([...visitedLocal, page]);
+    if (startupDone && ['home', 'library', 'updates', 'downloads', 'trainers'].includes(page) && !visitedLocal.has(page)) visitedLocal = new Set([...visitedLocal, page]);
   });
   $effect(() => { if (page === 'github') githubVisited = true; });
+  let libraryDisplayRevision = 0;
   let refreshRequested = false;
   let refreshPromise: Promise<void> | null = null;
   let unlisten: (() => void) | undefined;
@@ -70,6 +72,8 @@
   // Queueing and network checks do not lock unrelated controls; mutations retain their guard.
   const backgroundKeys = new Set(['check_updates', 'download_release_link', 'batch-download', 'add_local_executables']);
   const busy = $derived([...pending].some(key => !backgroundKeys.has(key) && !key.startsWith('download:') && !key.startsWith('asset:')));
+  const externalDownloaderName = $derived(snapshot?.settings.useExternalDownloader ? (snapshot.settings.externalDownloader?.name.trim() || '外部下载器') : null);
+  let publicReceipts = $state.raw<ReadonlyMap<string, HandoffStatus>>(new Map());
   const selectedProject = $derived(snapshot?.projects.find((project) => project.id === selectedId) ?? null);
   const managedProjectId = $derived(modal?.kind === 'managed' ? modal.projectId : null);
   const managedProject = $derived(snapshot?.projects.find((project) => project.id === managedProjectId) ?? null);
@@ -126,9 +130,16 @@
     refreshPromise = (async () => {
       while (refreshRequested && !destroyed) {
         refreshRequested = false;
-        const atRequestStart = snapshot;
+        const atRequestStart = snapshot, atLibraryRevision = libraryDisplayRevision;
         const next = await dispatch('snapshot', {});
-        if (!destroyed && !preview) snapshot = mergeSnapshotDownloads(snapshot, next, atRequestStart);
+        if (!destroyed && !preview) {
+          const merged = mergeSnapshotDownloads(snapshot, next, atRequestStart);
+          if (snapshot && atLibraryRevision !== libraryDisplayRevision) {
+            // A snapshot requested before the display-only write can arrive after it.
+            const { librarySort, libraryLayout, librarySoftwareOrder, libraryFilesOrder } = snapshot.settings;
+            snapshot = { ...merged, settings: { ...merged.settings, librarySort, libraryLayout, librarySoftwareOrder, libraryFilesOrder } };
+          } else snapshot = merged;
+        }
       }
     })();
     try { await refreshPromise; } finally { refreshPromise = null; refreshing = false; }
@@ -383,11 +394,22 @@
     if (result && result.repo && !result.updatesMuted && ('channel' in changes || 'preference' in changes || 'assetPattern' in changes || 'managementMode' in changes)) await checkUpdates([id]);
   }
   async function saveSettings(changes: Partial<Settings>): Promise<boolean> {
-    if (preview && snapshot) { snapshot = { ...snapshot, settings: { ...snapshot.settings, ...changes } }; notify('预览设置已更新。', 'neutral'); return true; }
-    const displayOnly = Object.keys(changes).every(key => key === 'librarySort' || key === 'libraryLayout');
-    const saved = await operate('save_settings', { settings: changes }, { refresh: !displayOnly, success: '设置已保存。' });
-    if (displayOnly && saved && snapshot) snapshot = { ...snapshot, settings: { ...snapshot.settings, ...changes } };
+    const orderOnly = 'librarySoftwareOrder' in changes || 'libraryFilesOrder' in changes;
+    if (preview && snapshot) {
+      snapshot = { ...snapshot, settings: { ...snapshot.settings, ...changes } };
+      if (!orderOnly) notify('预览设置已更新。', 'neutral');
+      return true;
+    }
+    const displayOnly = Object.keys(changes).every(key => ['librarySort', 'libraryLayout', 'librarySoftwareOrder', 'libraryFilesOrder'].includes(key));
+    const saved = await operate('save_settings', { settings: changes }, { refresh: !displayOnly, success: orderOnly ? undefined : '设置已保存。' });
+    if (displayOnly && saved && snapshot) {
+      libraryDisplayRevision++;
+      snapshot = { ...snapshot, settings: { ...snapshot.settings, ...changes } };
+    }
     return saved !== undefined;
+  }
+  function saveLibraryOrder(kind: ManagementMode, order: string[]) {
+    return saveSettings(kind === 'files' ? { libraryFilesOrder: order } : { librarySoftwareOrder: order });
   }
   async function saveInterval(minutes: number): Promise<boolean> {
     if (preview && snapshot) { snapshot = { ...snapshot, settings: { ...snapshot.settings, checkIntervalMinutes: minutes } }; return true; }
@@ -411,6 +433,24 @@
     if (project && snapshot && !snapshot.projects.some((item) => item.id === project.id)) snapshot = { ...snapshot, projects: [...snapshot.projects, project] };
     return project !== undefined;
   }
+  async function choosePublicDownload(external: boolean) {
+    if (modal?.kind !== 'publicDownload') return;
+    const { url } = modal, name = externalDownloaderName, key = `asset:${url}`;
+    if (pending.has(key) || (external && !name)) return;
+    if (external && name) {
+      const receiptKey = JSON.stringify([name, url]);
+      if (publicReceipts.has(receiptKey)) return;
+      const result = await operate('send_external_release_link', { url, confirmed: true }, { refresh: false, key });
+      if (!result) return;
+      publicReceipts = new Map(publicReceipts).set(receiptKey, result.status);
+      notify(handoffMessage(name, result.status), result.status === 'sent' ? 'success' : 'warning');
+    } else {
+      const result = await operate('download_release_link', { url }, { key });
+      if (!result) return;
+      notify('此附件已在追新的下载列表中，可到「下载」查看。');
+    }
+    if (modal?.kind === 'publicDownload' && modal.url === url) modal = null;
+  }
   async function openUrl(url: string, original = false) {
     const target = githubLinkTarget(url);
     if (!target) { notify('这个链接不是受支持的 GitHub 地址。', 'warning'); return; }
@@ -418,7 +458,12 @@
     if (target.kind === 'asset') {
       const download = trackedAsset(snapshot?.projects ?? [], target.url);
       if (download) { await downloadProject({ ...download.project, selectedAssetId: download.asset.id }); return; }
-      await operate('download_release_link', { url: target.url }, { key: `asset:${target.url}`, success: '附件已加入下载队列。' }); return;
+      if (externalDownloaderName) {
+        let fileName = new URL(target.url).pathname.split('/').at(-1) || 'GitHub 附件';
+        try { fileName = decodeURIComponent(fileName); } catch { /* Host validates the original URL. */ }
+        openDialog({ kind: 'publicDownload', url: target.url, fileName }); return;
+      }
+      await operate('download_release_link', { url: target.url }, { key: `asset:${target.url}`, success: '附件已加入下载列表。' }); return;
     }
     if (target.kind === 'repository' && target.repository && !original) {
       const origin = page;
@@ -534,17 +579,17 @@
         {:else if page === 'settings'}<SettingsPage settings={snapshot.settings} runtime={snapshot.runtime} {busy} {preview} onsave={saveSettings} onproxy={saveProxy} onproxytest={(proxy, password) => dispatch('test_proxy', { proxy, ...(password === undefined ? {} : { password }) })} onintegration={getIntegration} ongithub={() => navigate('github')} ondata={() => void operate('open_data_directory', {}, { refresh: false })} onexport={() => void exportFile()} onimport={() => void importFile()} ontextimport={() => { importContents = ''; openDialog({ kind: 'import' }); }} oncopyexport={() => void copyExport()} oncopy={(text) => void copy(text)} onopen={(url) => void openUrl(url)} />{/if}
       </main>{/if}
       {#each ['library', 'updates'] as localPage}
-         {#if visitedLocal.has(localPage as Page) || page === localPage}<main class="page-content" id={page === localPage ? 'main-content' : undefined} hidden={page !== localPage}><Library projects={snapshot.projects} readTags={snapshot.readUpdateTags} onMarkRead={markUpdatesRead} onToggleUpdates={toggleUpdates} notes={snapshot.repositoryNotes} sort={snapshot.settings.librarySort ?? 'added'} onsort={(librarySort) => void saveSettings({ librarySort })} onpicklocal={pickLocal} onlocal={addLocal} allowDrop={!modal && !readerUrl && !showingDetails} onsettings={project => openDialog({ kind: 'settings', project })} layout={snapshot.settings.libraryLayout ?? 'three'} onlayout={(libraryLayout) => void saveSettings({ libraryLayout })} onnote={showNote} updatesOnly={localPage === 'updates'} active={page === localPage} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} onOpen={(project) => void runProject(project)} onFiles={showProjectFiles} onBackup={showProjectBackup} onRepository={(project) => void openUrl(`https://github.com/${project.owner}/${project.repo}`)} /></main>{/if}
+         {#if visitedLocal.has(localPage as Page) || page === localPage}<main class="page-content" id={page === localPage ? 'main-content' : undefined} hidden={page !== localPage}><Library projects={snapshot.projects} readTags={snapshot.readUpdateTags} onMarkRead={markUpdatesRead} onToggleUpdates={toggleUpdates} notes={snapshot.repositoryNotes} sort={snapshot.settings.librarySort ?? 'added'} onsort={(librarySort) => void saveSettings({ librarySort })} softwareOrder={snapshot.settings.librarySoftwareOrder} filesOrder={snapshot.settings.libraryFilesOrder} onreorder={saveLibraryOrder} onpicklocal={pickLocal} onlocal={addLocal} allowDrop={!modal && !readerUrl && !showingDetails} onsettings={project => openDialog({ kind: 'settings', project })} layout={snapshot.settings.libraryLayout ?? 'three'} onlayout={(libraryLayout) => void saveSettings({ libraryLayout })} onnote={showNote} updatesOnly={localPage === 'updates'} active={page === localPage} {query} {selectedId} {busy} onadd={showAdd} onselect={chooseProject} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onbatchdownload={(projects) => void batchDownload(projects)} onOpen={(project) => void runProject(project)} onFiles={showProjectFiles} onBackup={showProjectBackup} onRepository={(project) => void openUrl(`https://github.com/${project.owner}/${project.repo}`)} /></main>{/if}
        {/each}
        {#if visitedLocal.has('downloads') || page === 'downloads'}<main class="page-content" id={page === 'downloads' ? 'main-content' : undefined} hidden={page !== 'downloads'}><Downloads installations={snapshot.installations ?? []} onVerify={(id) => void verifyInstallation(id)} onConfirmInstallation={(id) => void confirmInstallation(id)} downloads={snapshot.downloads} {query} {busy} onexternalretry={(download) => showExternalDownload([], download)} onexternalimport={(download) => void importExternalDownload(download)} onretry={(id) => void operate('retry_download', { id }, { success: '已重新加入下载队列。' })} oncancel={(id) => void operate('cancel_download', { id }, { success: '已请求取消下载。' })} oninstall={showInstall} onDelete={(download) => void directDeleteDownload(download)} onfolder={(id) => void operate('open_download', { id }, { refresh: false })} onmark={markDownloaded} onproject={openProject} oncopy={(text) => void copy(text)} onversions={showManagedVersions} /></main>{/if}
-       {#if page === 'trainers'}<main id="main-content" class="page-content trainer-workspace"><Trainers {preview} active={!modal && !readerUrl} /></main>{/if}
-       {#if githubVisited || page === 'github'}<main class="page-content github-workspace" id={page === 'github' ? 'main-content' : undefined} hidden={page !== 'github'}><Github bind:this={githubWorkspace} projects={snapshot.projects} repositoryNotes={snapshot.repositoryNotes} {preview} preload active={page === 'github'} initialTab={snapshot.settings.startupGithubTab} onadd={addGithubRepository} onopen={(url) => void openUrl(url)} onoriginal={(url) => void openUrl(url,true)} oncopy={(text) => void copy(text)} onnotice={notify} onnotes={(notes) => { if (snapshot) snapshot = { ...snapshot, repositoryNotes: notes }; }} /></main>{/if}
+       {#if visitedLocal.has('trainers') || page === 'trainers'}<main id={page === 'trainers' ? 'main-content' : undefined} class="page-content trainer-workspace" hidden={page !== 'trainers'}><Trainers {preview} {externalDownloaderName} active={page === 'trainers' && !modal && !readerUrl} /></main>{/if}
+       {#if githubVisited || page === 'github'}<main class="page-content github-workspace" id={page === 'github' ? 'main-content' : undefined} hidden={page !== 'github'}><Github bind:this={githubWorkspace} {externalDownloaderName} projects={snapshot.projects} repositoryNotes={snapshot.repositoryNotes} {preview} preload active={page === 'github'} initialTab={snapshot.settings.startupGithubTab} onadd={addGithubRepository} onopen={(url) => void openUrl(url)} onoriginal={(url) => void openUrl(url,true)} oncopy={(text) => void copy(text)} onnotice={notify} onnotes={(notes) => { if (snapshot) snapshot = { ...snapshot, repositoryNotes: notes }; }} /></main>{/if}
       {#if showingDetails && selectedProject}<button class="detail-backdrop" aria-label="关闭资源详情" onclick={() => selectedId = null}></button>{#key `${selectedProject.id}:${detailRevision}`}<ProjectDetail installations={snapshot.installations ?? []} onVerify={(id) => void verifyInstallation(id)} onConfirmInstallation={(id) => void confirmInstallation(id)} project={selectedProject} readTag={snapshot.readUpdateTags?.[selectedProject.id]} note={noteFor(selectedProject)} onnote={showNote} {busy} {preview} onexternal={(project) => showExternalDownload([project])} onrun={(project) => void runProject(project)} onexecutable={(project) => void chooseExecutable(project)} onrestore={(backup) => void directApplyBackup(backup, 'restore')} ondeletebackup={(backup) => void directApplyBackup(backup, 'delete')} onclose={() => selectedId = null} oncheck={(ids) => void checkUpdates(ids)} ondownload={(project) => void downloadProject(project)} onupdate={(id, changes) => void updateProject(id, changes)} onmark={showMark} onversions={showManagedVersions} ondiagnostic={(id) => void copyDiagnostic(id)} onremove={(project) => void removeProject(project)} onopen={(url) => void openUrl(url)} onSettings={(project) => openDialog({ kind: 'settings', project })} />{/key}{/if}</div>
     </div>
   </div>
 {/if}
 
-{#if readerUrl && snapshot}<GithubReader url={readerUrl} theme={snapshot.settings.theme} {preview} onclose={() => readerUrl = null} />{/if}
+{#if readerUrl && snapshot}<GithubReader url={readerUrl} theme={snapshot.settings.theme} {preview} {externalDownloaderName} onclose={() => readerUrl = null} />{/if}
 
 {#if modal?.kind === 'add'}
   <Modal title="添加资源" onclose={closeDialog}>
@@ -566,6 +611,16 @@
       {#if formError}<p class="field-error" role="alert">{formError}</p>{/if}
       <div class="modal-footer"><button type="button" class="button secondary" disabled={busy} onclick={closeDialog}>取消</button><button class="button primary" type="submit" disabled={busy || !parsedRepository}><Icon name={busy ? 'loader' : 'plus'} class={busy ? 'spinning' : ''} size={16} />{busy ? '正在添加' : '添加资源'}</button></div>
     </form>
+  </Modal>
+{:else if modal?.kind === 'publicDownload'}
+  {@const sending = pending.has(`asset:${modal.url}`)}
+  {@const prior = externalDownloaderName && publicReceipts.get(JSON.stringify([externalDownloaderName, modal.url]))}
+  <Modal title="下载公开附件" description={modal.fileName} onclose={closeDialog}>
+    <div class="modal-form"><p class="field-hint">{prior && externalDownloaderName ? handoffMessage(externalDownloaderName, prior) : '选择下载方式。外部下载的进度和保存位置在下载器中查看。'}</p>
+      {#if formError}<p class="field-error" role="alert">{formError}</p>{/if}
+      <div class="modal-footer"><button class="button secondary" disabled={sending} onclick={() => void choosePublicDownload(false)}>内置下载</button>
+        {#if externalDownloaderName}<button class="button primary" disabled={sending || !!prior} onclick={() => void choosePublicDownload(true)}><Icon name="external" size={16} />{prior === 'unknown' ? '请先检查队列' : prior ? '已发送' : `发送到 ${externalDownloaderName}`}</button>{/if}
+      </div></div>
   </Modal>
 {:else if modal?.kind === 'install'}
   <InstallConfirmation download={modal.download} initialPlan={modal.plan} actionError={formError} {preview} {busy} onclose={closeDialog} onconfirm={submitInstall} />

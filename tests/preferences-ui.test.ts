@@ -120,6 +120,31 @@ describe('startup and desktop navigation', () => {
     expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'snapshot')).toHaveLength(1);
   });
 
+  it.each([true, false])('keeps both download routes on untracked release-note links (external preference: %s)', async enabled => {
+    const snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'library'; snapshot.settings.useExternalDownloader = enabled;
+    snapshot.settings.externalDownloader = { name: 'AB Download Manager', endpoint: 'http://127.0.0.1:15151/add', requestTemplate: '{"url":"{url}"}' };
+    const url = 'https://github.com/example/docs/releases/download/v1/reference.pdf';
+    snapshot.projects = snapshot.projects.slice(0, 1); snapshot.projects[0].release!.body = `[参考资料](${url})`;
+    mocks.dispatch.mockImplementation(async (action: string) => {
+      if (action === 'snapshot') return structuredClone(snapshot);
+      if (action === 'send_external_release_link') return { status: 'unknown' };
+      if (action === 'download_release_link') return { fileName: 'reference.pdf', status: 'queued' };
+      throw new Error(`Unexpected action ${action}`);
+    });
+    const instance = mount(App, { target }); cleanup = () => unmount(instance); await settle();
+    target.querySelector<HTMLButtonElement>('.card-more')!.click(); await settle(); button('查看详情').click(); await settle();
+    const link = target.querySelector<HTMLAnchorElement>('.release-markdown a')!; link.click(); await settle();
+    if (enabled) {
+      expect(mocks.dispatch).not.toHaveBeenCalledWith('download_release_link', expect.anything());
+      const send = button('发送到 AB Download Manager'); send.click(); send.click(); await settle();
+      expect(mocks.dispatch).toHaveBeenCalledWith('send_external_release_link', { url, confirmed: true });
+      expect(target.textContent).toContain('请先检查下载器队列');
+      link.click(); await settle(); expect(button('请先检查队列').disabled).toBe(true); button('内置下载').click(); await settle();
+    } else expect(target.querySelector('dialog[open]')).toBeNull();
+    expect(mocks.dispatch.mock.calls.filter(([action]) => action === 'send_external_release_link')).toHaveLength(enabled ? 1 : 0);
+    expect(mocks.dispatch).toHaveBeenCalledWith('download_release_link', { url });
+  });
+
   it('uses one soft-UI material with the cobalt accent and clears only page cache', async () => {
     let snapshot = createPreviewSnapshot(); snapshot.settings.startupPage = 'home'; snapshot.settings.colorScheme = 'teal'; snapshot.settings.material = 'mica';
     mocks.dispatch.mockImplementation(async (action: string, payload: { settings?: Partial<Settings> }) => {

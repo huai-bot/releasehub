@@ -1,8 +1,9 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import type { Project, RepositoryNote, LibraryLayout } from '../lib/types';
   import { projectInitials, isFilesProject, projectPresentation } from '../lib/ui';
 
-  let { project, note = null, focused = false, busy = false, onselect, onOpen, onFiles, oncontext, layout = 'three' }: {
+  let { project, note = null, focused = false, busy = false, onselect, onOpen, onFiles, oncontext, layout = 'three', orderHandle }: {
     project: Project;
     note?: RepositoryNote | null;
     focused?: boolean;
@@ -12,6 +13,7 @@
     onOpen?: (project: Project) => void;
     onFiles?: (project: Project) => void;
     oncontext: (project: Project, anchor: HTMLElement, x?: number, y?: number) => void;
+    orderHandle?: Snippet<[label: string]>;
   } = $props();
 
   const presentation = $derived(projectPresentation(project, note));
@@ -40,6 +42,7 @@
 <article
   class="project-card"
   class:focused
+  class:ordering={!!orderHandle}
   class:layout-two={layout === 'two'}
   class:layout-three={layout === 'three'}
   class:layout-list={layout === 'list'}
@@ -73,6 +76,7 @@
       {/if}
     </div>
   </button>
+  {#if orderHandle}{@render orderHandle(presentation.label)}{/if}
   <button
     class="card-more"
     aria-label={`${presentation.label} 的更多操作`}
@@ -101,6 +105,8 @@
   .project-card.focused,
   .project-card:focus-within { box-shadow: var(--inset); transform: translateY(2px); }
   .project-card.focused::after { content: ""; position: absolute; top: 16px; left: 16px; width: 8px; height: 8px; border-radius: 50%; background: var(--cobalt); box-shadow: var(--cobalt-glow); pointer-events: none; }
+  .project-card.ordering:not(.layout-list).focused::after { top: auto; bottom: 16px; }
+  .project-card.ordering:not(.layout-list) .local-badge { inset-inline-start: 50px; top: 15px; }
   .card-identity {
     width: 100%;
     min-height: 184px;
@@ -257,6 +263,7 @@
     gap: 14px;
     text-align: left;
   }
+  .layout-list.ordering .card-identity { padding-inline-start: 56px; }
   .layout-list .card-avatar {
     width: 36px;
     height: 36px;

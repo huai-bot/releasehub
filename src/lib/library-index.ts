@@ -3,8 +3,12 @@ import { hasProjectUpdate } from './ui';
 
 // Only compact, displayable fields cross the worker boundary, never release bodies/assets.
 export interface IndexRow { id: string; files: boolean; title: string; searchable: string; added: string; released: string; update: boolean }
-export interface LibraryIndex { software: string[]; files: string[]; softwareCount: number; filesCount: number }
+export interface LibraryIndex {
+  software: string[]; files: string[]; softwareCount: number; filesCount: number;
+  unfiltered?: { software: string[]; files: string[] };
+}
 export const emptyIndex: LibraryIndex = { software: [], files: [], softwareCount: 0, filesCount: 0 };
+export type IndexSort = Exclude<LibrarySort, 'manual'>;
 const collator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
 export function libraryRows(projects: Project[], notes: Map<string, RepositoryNote>): IndexRow[] {
   return projects.map(p => {
@@ -16,7 +20,7 @@ export function libraryRows(projects: Project[], notes: Map<string, RepositoryNo
   });
 }
 export function prepareRows(rows: IndexRow[]) { return rows.map(r => ({ ...r, searchable: r.searchable.toLowerCase() })); }
-export function sortRows(rows: IndexRow[], sort: LibrarySort): IndexRow[] {
+export function sortRows(rows: IndexRow[], sort: IndexSort): IndexRow[] {
   const descending = (a: string, b: string) => a < b ? 1 : a > b ? -1 : 0;
   // Sort a copy: switching criteria must not change stable tie order on a later sort.
   return rows.slice().sort((a, b) => {
@@ -26,14 +30,17 @@ export function sortRows(rows: IndexRow[], sort: LibrarySort): IndexRow[] {
     return descending(a.added, b.added);
   });
 }
-export function filterRows(rows: IndexRow[], query: string): LibraryIndex {
+export function filterRows(rows: IndexRow[], query: string, includeUnfiltered = false): LibraryIndex {
   const out: LibraryIndex = { software: [], files: [], softwareCount: 0, filesCount: 0 };
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (includeUnfiltered && terms.length) out.unfiltered = { software: [], files: [] };
   for (const row of rows) {
+    const kind = row.files ? 'files' : 'software';
     if (row.files) out.filesCount++; else out.softwareCount++;
-    if (!terms.length || terms.every(t => row.searchable.includes(t))) (row.files ? out.files : out.software).push(row.id);
+    out.unfiltered?.[kind].push(row.id);
+    if (terms.every(t => row.searchable.includes(t))) out[kind].push(row.id);
   }
   return out;
 }
-export type IndexRequest = { generation: number; rows?: IndexRow[]; sort: LibrarySort; query: string };
+export type IndexRequest = { generation: number; rows?: IndexRow[]; sort: IndexSort; query: string; includeUnfiltered: boolean };
 export type IndexReply = { generation: number; result: LibraryIndex };

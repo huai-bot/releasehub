@@ -1,11 +1,13 @@
 <script lang="ts">
+  import { SvelteMap } from 'svelte/reactivity';
   import { dispatch, type Actions } from '../lib/bridge';
+  import { handoffMessage } from '../lib/external-handoff';
   import type { GithubRepository, GithubRepositoryDetail, RepositoryNote } from '../lib/types';
   import { formatBytes, formatDate, readableError, safeGithubUrl } from '../lib/ui';
   import Icon from './Icon.svelte';
   import ReleaseNotes from './ReleaseNotes.svelte';
-  let { name, detail, note, loading, error, connected, preview, pending, subscribed, adding, backLabel = '返回列表', onclose, onretry, onstar, onedit, onnote, onlists, onadd, onopen, onoriginal }: {
-    backLabel?: string; onoriginal?: (url: string) => void;
+  let { name, detail, note, loading, error, connected, preview, pending, subscribed, adding, externalDownloaderName = null, backLabel = '返回列表', onclose, onretry, onstar, onedit, onnote, onlists, onadd, onopen, onoriginal }: {
+    backLabel?: string; onoriginal?: (url: string) => void; externalDownloaderName?: string | null;
     name: string; detail: GithubRepositoryDetail | null; note?: RepositoryNote; loading: boolean; error: string;
     connected: boolean; preview: boolean; pending: boolean; subscribed: boolean; adding: boolean;
     onclose: () => void; onretry: () => void; onstar: (repository: GithubRepository) => void;
@@ -18,16 +20,18 @@
   let listing = $state<ReleaseListing | null>(null);
   let listingBusy = $state(false);
   let listingError = $state('');
-  let queueing = $state<number | null>(null);
-  let downloadMessage = $state('');
+  type DownloadMethod = 'internal' | 'external';
+  let downloading = $state<{ url: string; method: DownloadMethod } | null>(null);
+  let downloadFeedback = $state<{ url: string; text: string } | null>(null);
+  const externalReceipts = new SvelteMap<string, string>();
   let listingRequest = 0;
   const showListing = $derived(listingFor === name);
 
   async function readAssets() {
-    if (!repository || repository.private || preview || (showListing && (listingBusy || queueing !== null))) return;
+    if (!repository || repository.private || preview || downloading || (showListing && listingBusy)) return;
     const requested = repository.fullName;
     const request = ++listingRequest;
-    listingFor = name; listing = null; listingBusy = true; listingError = ''; queueing = null; downloadMessage = '';
+    listingFor = name; listing = null; listingBusy = true; listingError = ''; downloadFeedback = null;
     try {
       const result = await dispatch('github_release_assets', { repository: requested });
       if (request === listingRequest) listing = result;
@@ -35,16 +39,22 @@
     finally { if (request === listingRequest) listingBusy = false; }
   }
 
-  async function queueAsset(asset: ReleaseListing['assets'][number]) {
-    if (!showListing || queueing !== null) return;
-    const request = listingRequest;
-    queueing = asset.id;
-    downloadMessage = '';
+  async function downloadAsset(asset: ReleaseListing['assets'][number], method: DownloadMethod) {
+    const downloader = externalDownloaderName;
+    const { url } = asset;
+    if (!showListing || downloading || (method === 'external' && (!downloader || externalReceipts.has(url)))) return;
+    downloading = { url, method };
+    downloadFeedback = null;
     try {
-      const record = await dispatch('download_release_link', { url: asset.url });
-      if (request === listingRequest) downloadMessage = record.status === 'completed' ? `${record.fileName} 已在下载中心。` : `${record.fileName} 已加入下载队列。`;
-    } catch (reason) { if (request === listingRequest) downloadMessage = readableError(reason); }
-    finally { if (request === listingRequest) queueing = null; }
+      if (method === 'external' && downloader) {
+        const receipt = await dispatch('send_external_release_link', { url, confirmed: true });
+        externalReceipts.set(url, handoffMessage(downloader, receipt.status));
+      } else {
+        const record = await dispatch('download_release_link', { url });
+        downloadFeedback = { url, text: record.status === 'completed' ? `${record.fileName} 已在下载中心。` : `${record.fileName} 已加入下载队列。` };
+      }
+    } catch (reason) { downloadFeedback = { url, text: readableError(reason) }; }
+    finally { downloading = null; }
   }
 </script>
 
@@ -73,7 +83,7 @@
       </div>
       {#if repository.private || (connected && repository.starred === null)}<p class="field-hint">{repository.private ? '私有仓库暂不加入软件库。' : ''}{#if connected && repository.starred === null} Star 状态未读到，请刷新详情后再操作。{/if}</p>{/if}
       <div class="repo-pages">
-        {#if !repository.private && !preview}<button class="text-button" disabled={showListing && (listingBusy || queueing !== null)} onclick={() => void readAssets()}><Icon name={showListing && listingBusy ? 'loader' : 'package'} class={showListing && listingBusy ? 'spinning' : ''} size={15} />{showListing ? '刷新最新附件' : '查看最新附件'}</button>{/if}
+        {#if !repository.private && !preview}<button class="text-button" disabled={Boolean(downloading) || (showListing && listingBusy)} onclick={() => void readAssets()}><Icon name={showListing && listingBusy ? 'loader' : 'package'} class={showListing && listingBusy ? 'spinning' : ''} size={15} />{showListing ? '刷新最新附件' : '查看最新附件'}</button>{/if}
         <button class="text-button" onclick={() => onopen(`${repository.url}/releases`)}>发行版原文</button>
         {#if repository.hasIssues}<button class="text-button" onclick={() => onopen(`${repository.url}/issues`)}>问题</button>{/if}
         {#if repository.hasDiscussions}<button class="text-button" onclick={() => onopen(`${repository.url}/discussions`)}>讨论</button>{/if}
@@ -88,12 +98,23 @@
             {#if listing.assets.length}
               <ul>
                 {#each listing.assets as asset (asset.id)}
-                  <li><div><strong>{asset.name}</strong><span>{formatBytes(asset.size)}</span></div><button class="button secondary" aria-label={`下载 ${asset.name}`} disabled={queueing !== null} onclick={() => void queueAsset(asset)}><Icon name={queueing === asset.id ? 'loader' : 'download'} class={queueing === asset.id ? 'spinning' : ''} size={15} />{queueing === asset.id ? '正在核对' : '下载'}</button></li>
+                  {@const sending = downloading?.url === asset.url && downloading.method === 'external'}
+                  {@const queuing = downloading?.url === asset.url && downloading.method === 'internal'}
+                  {@const receipt = externalReceipts.get(asset.url)}
+                  {@const internalLabel = externalDownloaderName ? '内置下载' : '下载'}
+                  <li>
+                    <div class="asset-file"><strong>{asset.name}</strong><span>{formatBytes(asset.size)}</span></div>
+                    <div class="asset-actions">
+                      {#if externalDownloaderName}<button class="button secondary" aria-label={`发送到 ${externalDownloaderName}：${asset.name}`} disabled={Boolean(downloading || receipt)} onclick={() => void downloadAsset(asset, 'external')}><Icon name={sending ? 'loader' : 'external'} class={sending ? 'spinning' : ''} size={15} />{sending ? '正在发送' : `发送到 ${externalDownloaderName}`}</button>{/if}
+                      <button class="button secondary" aria-label={`${internalLabel} ${asset.name}`} disabled={Boolean(downloading)} onclick={() => void downloadAsset(asset, 'internal')}><Icon name={queuing ? 'loader' : 'download'} class={queuing ? 'spinning' : ''} size={15} />{queuing ? '正在核对' : internalLabel}</button>
+                    </div>
+                    {#if receipt}<p class="asset-feedback" role="status">{receipt}</p>{/if}
+                    {#if downloadFeedback?.url === asset.url}<p class="asset-feedback" role="status">{downloadFeedback.text}</p>{/if}
+                  </li>
                 {/each}
               </ul>
             {:else}<p role="status">此发行版没有可下载的附件。</p>{/if}
           {:else}<p role="status">未找到最新公开发行版。可打开原文查看其他版本。</p>{/if}
-          {#if downloadMessage}<p role="status">{downloadMessage}</p>{/if}
         </section>
       {/if}
       <div class="readme-heading"><Icon name="notes" size={16} /><h3>README</h3></div>
@@ -127,11 +148,14 @@
   .release-assets-heading h3 { color:var(--heading); font-size:14px; font-weight:650; overflow-wrap:anywhere; }
   .release-assets p { overflow-wrap:anywhere; }
   .release-assets ul { margin:6px 0 0; padding:0; list-style:none; }
-  .release-assets li { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0; }
+  .release-assets li { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px 12px; padding:8px 0; }
   .release-assets li + li { border-top:1px solid var(--hairline, var(--border)); }
-  .release-assets li > div { min-width:0; overflow-wrap:anywhere; }
-  .release-assets li strong { display:block; color:var(--text); font-weight:600; }
-  .release-assets li button { flex:none; }
+  .asset-file { flex:1 1 90px; min-width:0; overflow-wrap:anywhere; }
+  .asset-file strong { display:block; color:var(--text); font-weight:600; }
+  .asset-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px; min-width:0; max-width:100%; margin-inline-start:auto; }
+  .asset-actions button { max-width:100%; min-width:0; white-space:normal; overflow-wrap:anywhere; }
+  .asset-actions :global(svg) { flex:none; }
+  .asset-feedback { flex-basis:100%; margin:0; line-height:1.5; }
   .readme-heading { display: flex; align-items: center; gap: 7px; margin: 24px 0 13px; padding-bottom: 10px; border-bottom: 1px solid var(--border); color: var(--muted); }
   .readme-heading h3 { font-size: 12px; font-weight: 600; }
   .empty-readme { color: var(--muted); font-size: 12px; }

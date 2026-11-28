@@ -223,6 +223,10 @@ pub struct Settings {
     pub library_layout: String,
     #[serde(default = "default_library_sort")]
     pub library_sort: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_software_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_files_order: Vec<String>,
     pub auto_download: bool, pub max_concurrent_downloads: usize, pub close_to_tray: bool,
     #[serde(default = "default_download_connections")]
     pub download_connections: usize,
@@ -243,6 +247,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self { theme: "system".into(), color_scheme: default_color_scheme(), material: default_material(), blur: default_blur(), library_layout: default_library_layout(), library_sort: default_library_sort(), check_interval_minutes: 60, notifications: true,
+            library_software_order: Vec::new(), library_files_order: Vec::new(),
             auto_download: false, max_concurrent_downloads: 2, close_to_tray: true,
             download_connections: default_download_connections(), use_external_downloader: false, external_downloader: ExternalDownloader::default(),
             agent_enabled: false, agent_port: 47831, startup_page: default_startup_page(),
@@ -256,7 +261,13 @@ impl Settings {
         if !["blue", "teal", "violet", "amber"].contains(&self.color_scheme.as_str()) { return Err("配色设置无效".into()); }
         if !["acrylic", "mica"].contains(&self.material.as_str()) { return Err("材质设置无效".into()); }
         if !["two", "three", "list"].contains(&self.library_layout.as_str()) { return Err("资源库布局无效".into()); }
-        if !["added", "name", "nameDesc", "released", "updated"].contains(&self.library_sort.as_str()) { return Err("资源排序方式无效".into()); }
+        if !["manual", "added", "name", "nameDesc", "released", "updated"].contains(&self.library_sort.as_str()) { return Err("资源排序方式无效".into()); }
+        for order in [&self.library_software_order, &self.library_files_order] {
+            let mut seen = std::collections::HashSet::new();
+            if order.iter().any(|id| uuid::Uuid::parse_str(id).map_or(true, |id| !seen.insert(id))) {
+                return Err("资源顺序须由不重复的项目 ID 组成".into());
+            }
+        }
         if self.check_interval_minutes != 0 && !(5..=10080).contains(&self.check_interval_minutes) { return Err("检查间隔须为0（仅手动检查）或5至10080分钟".into()); }
         if !(1..=4).contains(&self.max_concurrent_downloads) { return Err("同时下载数量须为1至4".into()); }
         if !(1..=8).contains(&self.download_connections) { return Err("单文件连接数须为1至8".into()); }
@@ -469,7 +480,9 @@ mod tests {
         value.as_object_mut().unwrap().remove("librarySort");
         let mut s: Settings = serde_json::from_value(value).unwrap();
         assert_eq!(s.navigation_order, ["agent","github","trainers","library","updates","downloads","home"]);
-        assert_eq!(s.library_sort, "added"); s.validate().unwrap();
+        assert_eq!(s.library_sort, "added");
+        assert!(s.library_software_order.is_empty() && s.library_files_order.is_empty());
+        s.validate().unwrap();
         s.library_sort = "invalid".into(); assert!(s.validate().is_err());
     }
     #[test] fn startup_navigation_and_note_limits_are_validated() {

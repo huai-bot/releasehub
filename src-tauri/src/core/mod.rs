@@ -16,6 +16,7 @@ mod tasks;
 
 use models::*;
 pub use models::{InstallationCheck, RepositoryNote};
+pub(crate) use external_downloads::{ExternalSendOutcome, PublicDownload};
 use crate::proxy::ProxyState;
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::PathBuf, sync::{atomic::AtomicBool, Arc, Mutex}};
@@ -125,6 +126,10 @@ impl Core {
             }
             "github_release_assets" => self.public_release_assets(&text(&payload, "repository", 512)?).await,
             "download_release_link" => output(self.queue_release_link(&text(&payload, "url", 4096)?).await?),
+            "send_external_release_link" => {
+                if payload["confirmed"].as_bool() != Some(true) { return Err("请先选择向本机下载器发送这个公开附件。".into()); }
+                output(self.send_external_release_link(&text(&payload, "url", 4096)?).await?)
+            }
             "add_project" => {
                 let input: AddProjectInput = decode(payload.get("input").cloned().ok_or("缺少项目信息")?)?;
                 output(self.add_project(input).await?)
@@ -210,7 +215,7 @@ impl Core {
                 if patch.contains_key("proxy") { self.proxy.persist_settings(settings.proxy.clone(), || self.store.save_settings(&settings))?; }
                 else { self.store.save_settings(&settings)?; }
                 if patch.contains_key("maxConcurrentDownloads") { self.pump_downloads(); }
-                if !patch.keys().all(|key| matches!(key.as_str(), "librarySort" | "libraryLayout")) { self.changed(); }
+                if !patch.keys().all(|key| matches!(key.as_str(), "librarySort" | "libraryLayout" | "librarySoftwareOrder" | "libraryFilesOrder")) { self.changed(); }
                 output(settings)
             }
             "export_library" => Ok(Value::String(self.export_library()?)),
